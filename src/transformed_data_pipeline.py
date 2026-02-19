@@ -58,7 +58,7 @@ def generate_transformed_datasets(stimuli_df, df, roi_df, output="both", experim
     """
     
     stimuli_df, df, roi_df = stimuli_df.copy(), df.copy(), roi_df.copy()
-    
+
     
     #----------------- Give proper column names to the dataframes -----------------#
     stimuli_df_col_names = ["name", "x", "y", "size", "color", "backg"]
@@ -69,9 +69,14 @@ def generate_transformed_datasets(stimuli_df, df, roi_df, output="both", experim
     fish_columns = [f"f{i}_{var}" for i in range(n_fish) for var in ["x", "y", "ori"]]
     stimuli_columns = [f"d{i}_{var}" for i in range(n_stimuli) for var in ["x", "y", "stim"]]
     df.columns = fish_columns + stimuli_columns
+    # Keep track of original PositionTxt row for debugging / checks
+    df["source_frame"] = np.arange(len(df))
     
     roi_columns = ["xoff", "yoff", "diameter", "x", "y", "radius"]
     roi_df.columns = roi_columns
+    
+    
+    
     
     
     
@@ -108,7 +113,7 @@ def generate_transformed_datasets(stimuli_df, df, roi_df, output="both", experim
     
     # 1. Calculate the duration of the initial pause
     framerate = 30
-    PX_TO_MM = 3.67
+    MM_TO_PX = 3.67
     avgROIRadius = round(roi_df['radius'].mean())
 
     # Identify key indices
@@ -206,8 +211,8 @@ def generate_transformed_datasets(stimuli_df, df, roi_df, output="both", experim
     stimuli_fish_df['n_dots_left'] = mask_left.sum(axis=1)
     stimuli_fish_df['n_dots_right'] = mask_right.sum(axis=1)
 
-    stimuli_fish_df[stimuli_fish_df.filter(like='x').columns] *= PX_TO_MM
-    stimuli_fish_df[stimuli_fish_df.filter(like='y').columns] *= PX_TO_MM
+    stimuli_fish_df[stimuli_fish_df.filter(like='x').columns] *= MM_TO_PX
+    stimuli_fish_df[stimuli_fish_df.filter(like='y').columns] *= MM_TO_PX
 
     stimuli_allfish_dict = {}
     for f in range(n_fish):
@@ -248,7 +253,7 @@ def generate_transformed_datasets(stimuli_df, df, roi_df, output="both", experim
     
     for f in range(n_fish):
         fish_key = f'f{f}'
-        fish_data = fish_df[[f'f{f}_x', f'f{f}_y', f'f{f}_ori', 'condition', 'frame']].copy()
+        fish_data = fish_df[[f'f{f}_x', f'f{f}_y', f'f{f}_ori', 'condition', 'frame',  'source_frame']].copy()
         stimuli_data = stimuli_allfish_dict[fish_key].copy()
         stimuli_data = stimuli_data.drop(columns=['trial_id', 'condition', 'stimulus_block_id', 'frame_count_stimulus', 'trial_start', 'frame', 'n_dots_left', 'n_dots_right'])
         combined_df = pd.concat([fish_data.reset_index(drop=True), stimuli_data.reset_index(drop=True)], axis=1)
@@ -256,7 +261,7 @@ def generate_transformed_datasets(stimuli_df, df, roi_df, output="both", experim
         combined_df = combined_df[combined_df['d0_stim'] != 'none']
         combined_df = combined_df.rename(columns={'condition': 'stimulus'})
         #reorder columns by frame, condition, fish x, fish y, fish ori, dot1 x, dot1 y, dot1 stim, dot2 x, dot2 y, dot2 stim, ...
-        ordered_columns = ['frame', 'stimulus', f'f{f}_x', f'f{f}_y', f'f{f}_ori']
+        ordered_columns = ['frame',  'source_frame', 'stimulus', f'f{f}_x', f'f{f}_y', f'f{f}_ori']
 
         for i in range(n_stimuli):
             ordered_columns.extend([f'd{i}_x', f'd{i}_y', f'd{i}_stim'])
@@ -344,16 +349,20 @@ def generate_transformed_datasets(stimuli_df, df, roi_df, output="both", experim
     
     
     
+
     
-    
-    
-def run_diagnostics(abs_dict=None, polar_dict=None, n_examples=5):
+def run_diagnostics(abs_dict=None, polar_dict=None, stimuli_df=None, fish_df=None, n_examples=5):
     """
     Run sanity checks on transformed datasets.
 
     This diagnostic routine can take:
         - abs_dict  : dictionary of absolute-coordinate DataFrames
         - polar_dict: dictionary of polar-coordinate DataFrames
+        - stimuli_df : pd.DataFrame
+            Trajectory file (e.g. `*_trajectory_*.csv`):
+            dot positions in fish-centered millimeter coordinates at stimulus onset.
+        - fish_df : pd.DataFrame
+            PositionTxt file: raw fish positions and orientations (pixels, clockwise).
         - n_examples: number of random frames to visually compare
 
     The function performs three possible checks:
@@ -365,11 +374,12 @@ def run_diagnostics(abs_dict=None, polar_dict=None, n_examples=5):
             - plots the density of polar angles at trial onset
               (same expected structure as absolute)
 
-        3. If both are provided:
+        3. If both are provided + stimuli_df and fish_df also provided:
             - randomly selects example frames and compares:
+                * INITIAL view (before transformation) → fish plotted as an oriented arrow
                 * ABSOLUTE view → fish plotted as an oriented arrow
                 * POLAR view     → fish at center, facing 0 rad
-              The two views must show consistent dot positions.
+              The three views must show consistent dot positions.
 
     Returns
     -------
@@ -383,10 +393,9 @@ def run_diagnostics(abs_dict=None, polar_dict=None, n_examples=5):
     print("\n===== RUNNING DIAGNOSTICS =====\n")
     
     fish_key = f'f{random.randint(0, 14)}'
-    n_stimuli=8
     
     
-    if abs_dict is not None : 
+    if abs_dict is not None :
         print("[ABSOLUTE COORDINATES DIAGNOSTIC]")
         print(
             "- We look at the distribution of dot ANGLES in the fish-centered frame\n"
@@ -394,8 +403,6 @@ def run_diagnostics(abs_dict=None, polar_dict=None, n_examples=5):
             "- What you should see:\n"
             "    * For lateral stimuli, the angle density should concentrate\n"
             "      around ±90° (≈ π/2 and 3π/2), i.e. on the sides of the fish.\n"
-            "    * You should NOT see most of the density at 0° or 180°\n"
-            "      (directly in front of or behind the fish).\n"
         )
         
         df_abs = abs_dict[fish_key]
@@ -457,8 +464,6 @@ def run_diagnostics(abs_dict=None, polar_dict=None, n_examples=5):
             "- What you should see:\n"
             "    * For lateral stimuli, the angle density should concentrate\n"
             "      around ±90° (≈ π/2 and 3π/2), i.e. on the sides of the fish.\n"
-            "    * You should NOT see most of the density at 0° or 180°\n"
-            "      (directly in front of or behind the fish).\n"
         )
         
         df_polar = polar_dict[fish_key]
@@ -497,185 +502,417 @@ def run_diagnostics(abs_dict=None, polar_dict=None, n_examples=5):
         
         
     
+    if abs_dict is not None and polar_dict is not None and stimuli_df is not None and fish_df is not None:
+        compare_raw_abs_polar(abs_dict, polar_dict, stimuli_df, fish_df, fish_key="f0", n_examples=n_examples)
+        
+        
     
-    if abs_dict is not None and polar_dict is not None :
-        print("[ABSOLUTE vs POLAR VISUAL DIAGNOSTIC]")
-        print(
-            "- We compare the SAME randomly chosen trial frame under two coordinate systems:\n"
-            "    1) The ABSOLUTE view  → fish shown as a blue arrow in the arena\n"
-            "    2) The POLAR view      → fish at the center, facing angle 0 rad (to the right)\n"
-            "\n"
-            "- What you should see:\n"
-            "    * The dots should appear in CONSISTENT relative positions across both plots.\n"
-            "      For example, if in the ABSOLUTE view the dots are on the left of the fish,\n"
-            "      then in the POLAR view all dot angles should cluster around ±90°.\n"
-            "\n"
-            "    * A mismatch indicates a transformation error:\n"
-            "         - If ABSOLUTE shows dots in front/behind the fish but POLAR shows them left/right → wrong centering/orientation.\n"
-            "         - If ABSOLUTE shows left dots and POLAR shows angles near 0° or 180° → wrong angle computation.\n"
-            "\n"
-            "- In short:\n"
-            "      >>> The two plots MUST tell the same story.\n"
-            "      If the geometry doesn't match, there is an issue in the coordinate transform.\n"
-        )   
-        df_abs = abs_dict[fish_key]
-        df_pol = polar_dict[fish_key]  
-        # We are looking for frames with activated stimulus
-        #    et qui ont au moins un stimulus actif
-        possible_frames = []
+    
+       
+       
+       
+       
+       
+       
+       
+       
+       
+       
+       
+       
+       
+       
+       
+       
+       
+       
 
-        for idx_abs, row_abs in df_abs.iterrows():
-            frame_val = row_abs.get("frame", idx_abs)
+def compare_raw_abs_polar(abs_dict,
+                          polar_dict,
+                          stimuli_df,
+                          fish_df,
+                          fish_key="f0",
+                          n_examples=5):
+    """
+    Compare, for a few frames, three views of the SAME underlying data:
+    1) A minimal "raw" reconstruction from Trajectory + PositionTxt
+    2) The ABSOLUTE dictionary output of the pipeline
+    3) The POLAR dictionary output of the pipeline
 
-            # ligne correspondante dans df_pol (même frame)
-            candidates_pol = df_pol[df_pol.get("frame", df_pol.index) == frame_val]
-            if candidates_pol.empty:
+    This is meant as a sanity check: the three plots should tell the same story.
+    """
+    
+    print("[RAW vs ABSOLUTE vs POLAR DIAGNOSTIC]")
+    print(
+        "- For a few randomly chosen frames, we plot three views of the SAME underlying data:\n"
+        "    1) RECONSTRUCTION  → minimal reconstruction from PositionTxt + Trajectory\n"
+        "    2) ABSOLUTE → pipeline output in screen coordinates (abs_dict)\n"
+        "    3) POLAR    → pipeline output in fish-centered polar coordinates (polar_dict)\n"
+        "\n"
+        "- RECONSTRUCTION view:\n"
+        "    * Uses only the essential geometry from the original files.\n"
+        "    * Reconstructs where dots should be on the screen using the fish\n"
+        "      position/orientation at trial onset and the mm trajectories.\n"
+        "    * Does NOT reapply all pipeline transforms – it is a minimal\n"
+        "      reconstruction of the experiment used to check the pipeline.\n"
+        "\n"
+        "- ABSOLUTE view (abs_dict):\n"
+        "    * Shows the fish at its absolute position in the arena and the dots\n"
+        "      in the absolute screen coordinate system.\n"
+        "    * Geometry (left/right, front/behind, distances) should be consistent\n"
+        "      with the minimal reconstruction view, even if the global origin is different.\n"
+        "\n"
+        "- POLAR view (polar_dict):\n"
+        "    * Fish is always at the center and looks toward angle 0 (to the right).\n"
+        "    * Dot angles/radii should match what you see in the ABSOLUTE / RAW views.\n"
+        "      For example: if ABSOLUTE shows dots to the right of the fish, then in\n"
+        "      POLAR these dots should cluster around angle 3*pi/2; if they are on the left,\n"
+        "      angles should be around π/2.\n"
+        "\n"
+        "- In short:\n"
+        "    >>> The three subplots must tell the SAME story.\n"
+        "    RECONSTRUCTION is a simple ground-truth reconstruction; ABSOLUTE and POLAR are the\n"
+        "    pipeline outputs. Any systematic mismatch (left/right flipped, wrong\n"
+        "    orientation, wrong distances, unit errors) indicates a problem in the\n"
+        "    transformation pipeline.\n"
+    )
+
+    # --------- 1. Prepare raw data (Trajectory + PositionTxt) in a consistent format --------- #
+    stimuli_df = stimuli_df.copy()
+    fish_df = fish_df.copy()
+
+    # Column naming as in the pipeline
+    stimuli_df_col_names = ["name", "x", "y", "size", "color", "backg"]
+    n_stimuli = len(stimuli_df.columns) // len(stimuli_df_col_names)
+    stimuli_df.columns = stimuli_df_col_names * n_stimuli
+
+    n_fish = len(fish_df.columns) // 3 - n_stimuli
+    fish_columns = [f"f{i}_{var}" for i in range(n_fish) for var in ["x", "y", "ori"]]
+    stimuli_columns = [f"d{i}_{var}" for i in range(n_stimuli) for var in ["x", "y", "stim"]]
+    fish_df.columns = fish_columns + stimuli_columns
+
+    # Drop size/color/backg and reorder stimuli_df to d0_x, d0_y, d0_stim, d1_x, ...
+    stimuli_df = stimuli_df.drop(columns=["size", "color", "backg"])
+    new_column_names = [
+        col for i in range(n_stimuli) for col in (f"d{i}_stim", f"d{i}_x", f"d{i}_y")
+    ]
+    stimuli_df.columns = new_column_names
+    ordered_columns = [
+        col for i in range(n_stimuli) for col in (f"d{i}_x", f"d{i}_y", f"d{i}_stim")
+    ]
+    stimuli_df = stimuli_df[ordered_columns]
+
+    # Replace stimulus values in fish_df by the ones from stimuli_df (as in your plot() code)
+    for k in range(n_stimuli):
+        for col in (f"d{k}_x", f"d{k}_y", f"d{k}_stim"):
+            fish_df[col] = stimuli_df[col].values
+
+    # Add a source_frame index to match the pipeline outputs
+    fish_df["source_frame"] = np.arange(len(fish_df))
+    
+    # --- Detect trials / stimulus blocks on RAW fish_df (same logic as pipeline) ---
+    fish_df["condition"] = np.where(
+        fish_df["d0_stim"] == "none",
+        "inter_stim_pause",
+        fish_df["d0_stim"],
+    )
+
+    fish_df["trial_start"] = (
+        (fish_df["condition"] == "inter_stim_pause")
+        & (fish_df["condition"].shift(1) != "inter_stim_pause")
+    )
+    fish_df["trial_id"] = fish_df["trial_start"].cumsum()
+
+    fish_df["stimulus_block_id"] = (
+        fish_df["condition"] != fish_df["condition"].shift(1)
+    ).cumsum()
+    fish_df["frame_count_stimulus"] = (
+        fish_df.groupby("stimulus_block_id").cumcount()
+    )
+
+    # --------- 2. Select candidate frames from abs_dict / polar_dict using source_frame --------- #
+    df_abs = abs_dict[fish_key]
+    df_pol = polar_dict[fish_key]
+
+    if "source_frame" not in df_abs.columns:
+        raise ValueError(
+            "compare_raw_abs_polar expects 'source_frame' in abs_dict[fish_key].\n"
+            "Make sure your pipeline adds this column before building abs_dict."
+        )
+
+    # Keep frames with at least one active stimulus in abs_dict
+    active_mask = np.zeros(len(df_abs), dtype=bool)
+    for k in range(n_stimuli):
+        stim_col = f"d{k}_stim"
+        if stim_col not in df_abs.columns:
+            continue
+        vals = df_abs[stim_col]
+        mask_k = ~vals.isin(["none", None, "None", "bout", "inter_stim_pause"]) & ~vals.isna()
+        active_mask |= mask_k
+
+    df_candidates = df_abs.loc[active_mask]
+
+    if df_candidates.empty:
+        print(f"No frames with active stimuli found for {fish_key}.")
+        return
+
+    source_frames = df_candidates["source_frame"].unique()
+    n_examples = min(n_examples, len(source_frames))
+    chosen_source_frames = random.sample(list(source_frames), n_examples)
+
+    print(f"\nComparing RAW vs ABSOLUTE vs POLAR for {n_examples} frames of {fish_key}.\n")
+
+    # --------- 3. For each chosen source_frame, plot the three views side by side --------- #
+    raw_fish_col_prefix = fish_key
+
+    for sf in chosen_source_frames:
+        # RAW row from initial PositionTxt/Trajectory
+        row_raw = fish_df.loc[fish_df["source_frame"] == sf]
+        if row_raw.empty:
+            continue
+        row_raw = row_raw.iloc[0]
+
+        # ABS row from abs_dict
+        row_abs = df_abs.loc[df_abs["source_frame"] == sf]
+        if row_abs.empty:
+            continue
+        row_abs = row_abs.iloc[0]
+
+        # POLAR row from polar_dict
+        row_pol = df_pol.loc[df_pol["source_frame"] == sf]
+        if row_pol.empty:
+            continue
+        row_pol = row_pol.iloc[0]
+
+        # --- Figure with 3 subplots: RAW | ABSOLUTE | POLAR --- #
+        fig = plt.figure(figsize=(15, 4))
+        ax_raw = fig.add_subplot(1, 3, 1)
+        ax_abs = fig.add_subplot(1, 3, 2)
+        ax_pol = fig.add_subplot(1, 3, 3, projection="polar")
+
+        # ============== SUBPLOT 1 : RAW VIEW (minimal reconstruction) ============== #
+        arrow_len = 12
+        MM_TO_PX = 3.67  # 1 mm -> 3.67 px
+
+        # 1) fish orientation to draw the arrow
+        f_ori_draw = row_raw[f"{raw_fish_col_prefix}_ori"]  # clockwise, 0 = right
+
+        forward_draw_x = np.cos(f_ori_draw)
+        forward_draw_y = -np.sin(f_ori_draw) # in PositionTxt y goes down so we multiply by -1
+
+        # --- 1) Compute fish position relative to block onset ---
+        block_id   = row_raw["stimulus_block_id"]
+        block_rows = fish_df[fish_df["stimulus_block_id"] == block_id]
+        onset_rows = block_rows[block_rows["frame_count_stimulus"] == 0]
+
+        if onset_rows.empty:
+            onset_row = row_raw  
+        else:
+            onset_row = onset_rows.iloc[0]
+
+        # fish position in this raw (repère raw, top-left)
+        fx_curr = row_raw[f"{raw_fish_col_prefix}_x"]
+        fy_curr = row_raw[f"{raw_fish_col_prefix}_y"]
+
+        # fish position from beginning of the trial
+        fx_onset = onset_row[f"{raw_fish_col_prefix}_x"]
+        fy_onset = onset_row[f"{raw_fish_col_prefix}_y"]
+
+        # compute position of fish from the position at the beginning of the trial --> have same origin as stimulus
+        fx_plot = fx_curr - fx_onset
+        fy_plot = -(fy_curr - fy_onset)
+
+        # --- 2) Draw fish
+        ax_raw.scatter(fx_plot, fy_plot, s=80, color="deepskyblue")
+        ax_raw.arrow(
+            fx_plot, fy_plot,
+            arrow_len * forward_draw_x,
+            arrow_len * forward_draw_y,
+            head_width=2,
+            head_length=3,
+            length_includes_head=True,
+            color="deepskyblue",
+            linewidth=1.5,
+        )
+
+        # 3) Orientation at trial onset
+        f_ori_ego = onset_row[f"{raw_fish_col_prefix}_ori"]  # clockwise, 0 = right
+
+        forward_x = np.cos(f_ori_ego)
+        forward_y = -np.sin(f_ori_ego)
+        left_x    = np.sin(f_ori_ego)
+        left_y    = np.cos(f_ori_ego)
+
+        # stock in order to do zoom after
+        xs_raw = [fx_plot]
+        ys_raw = [fy_plot]
+
+        colors = plt.cm.viridis(np.linspace(0, 1, n_stimuli))
+
+        for k, c in zip(range(n_stimuli), colors):
+            stim_col = f"d{k}_stim"
+            x_col    = f"d{k}_x"
+            y_col    = f"d{k}_y"
+
+            # Check columns exist
+            if any(col not in fish_df.columns for col in [stim_col, x_col, y_col]):
                 continue
 
-            # vérifier s'il y a au moins un stimulus actif
-            has_stim = False
-            for k in range(n_stimuli):
-                stim_col = f"d{k}_stim"
-                if stim_col in df_abs.columns:
-                    val = row_abs[stim_col]
-                    if val not in ["none", None, np.nan, "bout", "inter_stim_pause"]:
-                        has_stim = True
-                        break
+            stim_val = row_raw[stim_col]
+            if stim_val in ["none", None, 0, "None", "bout", "inter_stim_pause"] or pd.isna(stim_val):
+                continue
 
-            if has_stim:
-                possible_frames.append((idx_abs, candidates_pol.index[0]))
+            x_ego_mm = row_raw[x_col]
+            y_ego_mm = row_raw[y_col]
+            if pd.isna(x_ego_mm) or pd.isna(y_ego_mm):
+                continue
 
-        if not possible_frames:
-            print(f"No frames with active stimuli found for {fish_key}.")
-            return
+            # mm -> px
+            x_ego = x_ego_mm * MM_TO_PX
+            y_ego = y_ego_mm * MM_TO_PX
 
-        n_examples = min(n_examples, len(possible_frames))
-        chosen_pairs = random.sample(possible_frames, n_examples)
+            # Ego -> screen (coordinates centered on fish position at onset)
+            dx = x_ego * left_x + y_ego * forward_x
+            dy = x_ego * left_y + y_ego * forward_y
 
-        # Plot for eaxh xhosen frame
-        for idx_abs, idx_pol in chosen_pairs:
-            row_abs = df_abs.loc[idx_abs]
-            row_pol = df_pol.loc[idx_pol]
+            ax_raw.scatter(dx, dy, s=40, color=c)
+            ax_raw.text(dx + 1, dy + 1, str(k), fontsize=7, ha="center", va="center")
 
-            fish_x_col = f"{fish_key}_x"
-            fish_y_col = f"{fish_key}_y"
-            fish_ori_col = f"{fish_key}_ori"
+            xs_raw.append(dx)
+            ys_raw.append(dy)
 
-            f_x = row_abs[fish_x_col]
-            f_y = row_abs[fish_y_col]
-            f_ori = row_abs[fish_ori_col]  # CCW, 0 = vers la droite
+        # ------------------ AUTO-ZOOM ------------------
+        margin = 10
+        xmin, xmax = min(xs_raw) - margin, max(xs_raw) + margin
+        ymin, ymax = min(ys_raw) - margin, max(ys_raw) + margin
 
-            fig = plt.figure(figsize=(10, 4))
-            ax_abs = fig.add_subplot(1, 2, 1)
-            ax_pol = fig.add_subplot(1, 2, 2, projection="polar")
+        ax_raw.set_xlim(xmin, xmax)
+        ax_raw.set_ylim(ymin, ymax)
+        ax_raw.set_aspect("equal", adjustable="box")
+        ax_raw.grid(alpha=0.3, linestyle="--", linewidth=0.5)
+        ax_raw.set_xlabel("x (screen right)")
+        ax_raw.set_ylabel("y (screen up)")
+        ax_raw.set_title(f"RECONSTRUCTION – fish 0, source_frame {int(sf)}")
 
-            # ---------- SUBPLOT 1 : ABSOLUTE VIEW ----------
-            arrow_len = 20
-            ux = np.cos(f_ori)
-            uy = np.sin(f_ori)
+        # ============== SUBPLOT 2 : ABSOLUTE VIEW (pipeline abs_dict) ============== #
+        fx_abs = row_abs[f"{fish_key}_x"]
+        fy_abs = row_abs[f"{fish_key}_y"]
+        f_ori_abs = row_abs[f"{fish_key}_ori"]  # CCW, 0 = right
 
-            ax_abs.scatter(f_x, f_y, s=50, color="tab:blue")
-            ax_abs.arrow(
-                f_x, f_y,
-                arrow_len * ux, arrow_len * uy,
-                head_width=5,
-                head_length=8,
-                length_includes_head=True,
-                color="tab:blue",
-                linewidth=1.5
-            )
+        arrow_len_abs = 20
+        ux = np.cos(f_ori_abs)
+        uy = np.sin(f_ori_abs)
 
-            xs_abs = [f_x]
-            ys_abs = [f_y]
+        ax_abs.scatter(fx_abs, fy_abs, s=50, color="tab:blue")
+        ax_abs.arrow(
+            fx_abs, fy_abs,
+            arrow_len_abs * ux, arrow_len_abs * uy,
+            head_width=5,
+            head_length=8,
+            length_includes_head=True,
+            color="tab:blue",
+            linewidth=1.5,
+        )
 
-            for k in range(n_stimuli):
-                stim_col = f"d{k}_stim"
-                x_col = f"d{k}_x"
-                y_col = f"d{k}_y"
+        xs_abs = [fx_abs]
+        ys_abs = [fy_abs]
 
-                if stim_col not in df_abs.columns:
-                    continue
+        for k in range(n_stimuli):
+            stim_col = f"d{k}_stim"
+            x_col = f"d{k}_x"
+            y_col = f"d{k}_y"
 
-                stim_val = row_abs[stim_col]
-                if stim_val in ["none", None, np.nan, "bout", "inter_stim_pause"]:
-                    continue
+            if stim_col not in df_abs.columns:
+                continue
 
-                if x_col not in df_abs.columns or y_col not in df_abs.columns:
-                    continue
+            stim_val = row_abs[stim_col]
+            if stim_val in ["none", None, "None", "bout", "inter_stim_pause"] or pd.isna(stim_val):
+                continue
 
-                dx = row_abs[x_col]
-                dy = row_abs[y_col]
-                if np.isnan(dx) or np.isnan(dy):
-                    continue
+            if x_col not in df_abs.columns or y_col not in df_abs.columns:
+                continue
 
-                ax_abs.scatter(dx, dy, s=40, color="tab:orange")
-                ax_abs.text(dx, dy, str(k), fontsize=7, ha="center", va="center")
+            dx = row_abs[x_col]
+            dy = row_abs[y_col]
+            if np.isnan(dx) or np.isnan(dy):
+                continue
 
-                xs_abs.append(dx)
-                ys_abs.append(dy)
+            ax_abs.scatter(dx, dy, s=40, color="tab:orange")
+            ax_abs.text(dx, dy, str(k), fontsize=7, ha="center", va="center")
 
-            if len(xs_abs) > 1:
-                margin = 20
-                xmin, xmax = min(xs_abs) - margin, max(xs_abs) + margin
-                ymin, ymax = min(ys_abs) - margin, max(ys_abs) + margin
-                ax_abs.set_xlim(xmin, xmax)
-                ax_abs.set_ylim(ymin, ymax)
+            xs_abs.append(dx)
+            ys_abs.append(dy)
 
-            ax_abs.set_aspect("equal", adjustable="box")
-            ax_abs.set_title(f"ABS – {fish_key}, frame {int(row_abs.get('frame', idx_abs))}")
-            ax_abs.grid(alpha=0.3, linestyle="--", linewidth=0.5)
+        if len(xs_abs) > 1:
+            margin = 20
+            xmin, xmax = min(xs_abs) - margin, max(xs_abs) + margin
+            ymin, ymax = min(ys_abs) - margin, max(ys_abs) + margin
+            ax_abs.set_xlim(xmin, xmax)
+            ax_abs.set_ylim(ymin, ymax)
 
-            # ---------- SUBPLOT 2 : POLAR VIEW ----------
-            # fish at center, looking at angle 0 (right)
-            # --- draw fish orientation arrow in polar view ---
-            head_r = 3.0  # arrow length
-            arrow_theta = 0  # fish looks toward angle 0 rad (to the right)
+        ax_abs.set_aspect("equal", adjustable="box")
+        ax_abs.set_title(f"ABS – {fish_key}, source_frame {int(sf)}")
+        ax_abs.grid(alpha=0.3, linestyle="--", linewidth=0.5)
 
-            # arrow: from (angle 0, radius 0) to (angle 0, radius head_r)
-            ax_pol.annotate(
-                "", 
-                xy=(arrow_theta, head_r),     # end of arrow
-                xytext=(arrow_theta, 0),      # start of arrow
-                arrowprops=dict(arrowstyle="->", color="tab:blue", lw=2)
-            )
+        # ============== SUBPLOT 3 : POLAR VIEW (pipeline polar_dict) ============== #
+        head_r = 3.0
+        arrow_theta = 0  # fish looks to the right
 
-            radii_pol = []
-            for k in range(n_stimuli):
-                stim_col = f"d{k}_stim"
-                r_col = f"d{k}_radius"
-                a_col = f"d{k}_angle"
+        ax_pol.annotate(
+            "",
+            xy=(arrow_theta, head_r),
+            xytext=(arrow_theta, 0),
+            arrowprops=dict(arrowstyle="->", color="tab:blue", lw=2),
+        )
 
-                if stim_col not in df_pol.columns or r_col not in df_pol.columns or a_col not in df_pol.columns:
-                    continue
+        radii_pol = []
+        for k in range(n_stimuli):
+            stim_col = f"d{k}_stim"
+            r_col = f"d{k}_radius"
+            a_col = f"d{k}_angle"
 
-                stim_val = row_pol[stim_col]
-                if stim_val in ["none", None, np.nan, "bout", "inter_stim_pause"]:
-                    continue
+            if stim_col not in df_pol.columns or r_col not in df_pol.columns or a_col not in df_pol.columns:
+                continue
 
-                r = row_pol[r_col]
-                a = row_pol[a_col]
-                if np.isnan(r) or np.isnan(a):
-                    continue
+            stim_val = row_pol[stim_col]
+            if stim_val in ["none", None, "None", "bout", "inter_stim_pause"] or pd.isna(stim_val):
+                continue
 
-                radii_pol.append(r)
-                ax_pol.scatter(a, r, s=40, color="tab:orange")
-                ax_pol.text(a, r, str(k), fontsize=7, ha="center", va="center")
+            r = row_pol[r_col]
+            a = row_pol[a_col]
+            if np.isnan(r) or np.isnan(a):
+                continue
 
-            if radii_pol:
-                Rpol = max(radii_pol) * 1.2
-            else:
-                Rpol = 1.0
-            ax_pol.set_ylim(0, Rpol)
+            radii_pol.append(r)
+            ax_pol.scatter(a, r, s=40, color="tab:orange")
+            ax_pol.text(a, r, str(k), fontsize=7, ha="center", va="center")
 
-            ax_pol.set_title(f"POLAR – {fish_key}, frame {int(row_pol.get('frame', idx_pol))}")
-            ax_pol.set_theta_zero_location("E")  # 0 rad = à droite
-            ax_pol.set_theta_direction(1)        # CCW
+        if radii_pol:
+            R_pol = max(radii_pol) * 1.2
+        else:
+            R_pol = 1.0
+        ax_pol.set_ylim(0, R_pol)
 
-            ax_pol.grid(alpha=0.3)
+        ax_pol.set_title(f"POLAR – {fish_key}, source_frame {int(sf)}")
+        ax_pol.set_theta_zero_location("E")  # 0 rad = right
+        ax_pol.set_theta_direction(1)        # CCW
+        ax_pol.grid(alpha=0.3)
 
-            plt.tight_layout()
-            plt.show()
-        
-        
-
-        
+        plt.tight_layout()
+        plt.show()
+       
+       
+       
+       
+       
+       
+       
+       
+       
+       
+       
+       
+       
+       
+       
+            

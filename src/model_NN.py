@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 
 
 
+
 def train_nn_pipeline(
     df: pd.DataFrame,
     early_stopping: bool = True,
@@ -22,7 +23,7 @@ def train_nn_pipeline(
     batch_size: int = 64,
     num_epochs: int = 100,
     N1 = 128,
-    patience: int = 7,
+    patience: int = 10,
     seed: int = 0
 ):
     """
@@ -343,7 +344,7 @@ def loss(
         y_dori: torch.Tensor,             
         mu_st: torch.Tensor,          
         sigma_st: torch.Tensor,       
-        p_pos: torch.Tensor,          
+        p_pos: torch.Tensor, # Probability of positive speed     
         mu_ln: torch.Tensor,          
         sigma_ln: torch.Tensor,       
         nu: float = 5.0,              
@@ -404,3 +405,8 @@ def loss(
         # matches your "Loss = L_st + L_ln,B" up to averaging conventions
         loss = -(log_phi_st + log_like_lnB).mean()
         return loss
+    
+    
+    
+    
+    

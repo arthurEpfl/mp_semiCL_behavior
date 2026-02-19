@@ -403,8 +403,9 @@ def compute_orientations_and_radii(df, x_cols, y_cols, ori_names=None, r_names=N
 
 def make_egocentric(df, x_col='f_x', y_col='f_y'):
     """
-    Replace absolute stimulus positions d{k}_x, d{k}_y
-    with egocentric cartesian positions relative to the fish.
+    Convert stimulus positions to egocentric coordinates relative to the fish.
+    Only applies to active stimuli (d{k}_stim == 1).
+    Inactive stimuli remain exactly at (0,0).
     """
     df = df.copy()
 
@@ -413,10 +414,19 @@ def make_egocentric(df, x_col='f_x', y_col='f_y'):
     for k in range(n_stimuli):
         stim_x = f'd{k}_x'
         stim_y = f'd{k}_y'
+        stim_flag = f'd{k}_stim'
 
-        if stim_x in df.columns and stim_y in df.columns:
-            df[stim_x] = df[stim_x] - df[x_col]
-            df[stim_y] = df[stim_y] - df[y_col]
+        if stim_x in df.columns and stim_y in df.columns and stim_flag in df.columns:
+
+            mask = df[stim_flag].astype(bool)
+
+            # egocentrize only active stimuli
+            df.loc[mask, stim_x] = df.loc[mask, stim_x] - df.loc[mask, x_col]
+            df.loc[mask, stim_y] = df.loc[mask, stim_y] - df.loc[mask, y_col]
+
+            # ensure inactive stimuli stay exactly zero
+            df.loc[~mask, stim_x] = 0.0
+            df.loc[~mask, stim_y] = 0.0
 
     return df
 
@@ -425,8 +435,9 @@ def make_egocentric(df, x_col='f_x', y_col='f_y'):
 
 def make_absolute(df, x_col='f_x', y_col='f_y'):
     """
-    Replace egocentric stimulus positions d{k}_x, d{k}_y
-    with absolute cartesian positions by adding back fish position.
+    Convert egocentric stimulus positions back to absolute positions,
+    only when the stimulus is active (d{k}_stim == 1).
+    Inactive stimuli remain at 0.
     """
     df = df.copy()
 
@@ -435,12 +446,22 @@ def make_absolute(df, x_col='f_x', y_col='f_y'):
     )
 
     for k in range(n_stimuli):
+
         stim_x = f'd{k}_x'
         stim_y = f'd{k}_y'
+        stim_flag = f'd{k}_stim'
 
-        if stim_x in df.columns and stim_y in df.columns:
-            df[stim_x] = df[stim_x] + df[x_col]
-            df[stim_y] = df[stim_y] + df[y_col]
+        if stim_x in df.columns and stim_y in df.columns and stim_flag in df.columns:
+
+            mask = df[stim_flag].astype(bool)
+
+            # restore absolute coordinates ONLY where active
+            df.loc[mask, stim_x] = df.loc[mask, stim_x] + df.loc[mask, x_col]
+            df.loc[mask, stim_y] = df.loc[mask, stim_y] + df.loc[mask, y_col]
+
+            # keep inactive stimuli at 0
+            df.loc[~mask, stim_x] = 0.0
+            df.loc[~mask, stim_y] = 0.0
 
     return df
 

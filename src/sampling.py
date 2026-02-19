@@ -7,8 +7,8 @@ from matplotlib.animation import FuncAnimation
 
 
 
-#                     WARNING 
-# !   subsample must be equal to horizon_frames !
+#     WARNING 
+# !  horizon_frames must be equal to 1. Need more assumptions to change this  !
 
 
 
@@ -18,8 +18,8 @@ def sample_trajectory(
     scalers: dict,
     *,
     fps: int = 30,
-    subsample: int = 5,
-    horizon_frames: int = 5,
+    subsample: int = 1,
+    horizon_frames: int = 1,  # For now always 1 
     max_lag_seconds: int = 3,
     cols_to_lag: list[str],
     N_sampling_seconds: int = 60
@@ -29,7 +29,7 @@ def sample_trajectory(
 
     Input
     -----
-    df_trial_base : DataFrame created by preprocessing_pipeline but 
+    df_trial_base : Based DataFrame created by preprocessing_pipeline but 
                     containing exactly ONE trial
 
     model : trained neural net that predicts distribution parameters for (speed, d_ori) at horizon=subsample frames.
@@ -37,7 +37,7 @@ def sample_trajectory(
     scalers : dict of fitted scalers returned by train pipeline:
               {"X": scaler_X, "speed": scaler_speed, "ori": scaler_ori}
 
-    What it does (high-level)
+    How the sampling works
     -------------------------
     1) Take the first (max_lag_seconds) of the trial to build the initial lag state (seed window).
     2) Build engineered features + lag features ONCE on the seed window (with subsample).
@@ -62,45 +62,75 @@ def sample_trajectory(
     """
     
     max_lag_frames = int(max_lag_seconds * fps)
-    N_total_prediction = int(N_sampling_seconds * fps // subsample)  # because of subsampling every 5 frames
+    N_total_prediction = int(N_sampling_seconds * fps // horizon_frames)  
     stim_cols = [f"d{i}_{s}" for i in range(8) for s in ["stim","x","y"]]
     
 
-    # 100 following rows from random start index
+    # following rows from random start index
     seed_len = int(max_lag_seconds * fps + 1)
     window = df_trial_base.iloc[:seed_len].copy().reset_index(drop=True)
     t_last = seed_len - 1
-
-    window_with_engineered_features = functions.add_engineered_features(window, representation="absolute", n_stimuli=8)
+    
+    window_egocentric = functions.make_egocentric(window)
+    
+    window_with_engineered_features = functions.add_engineered_features(window_egocentric, representation="absolute", n_stimuli=8)
     exclude_cols = [c for c in window_with_engineered_features.columns if c not in cols_to_lag]
     
-    window_lag, _ = functions.add_lag_features_for_all(window_with_engineered_features, max_lag_seconds=max_lag_seconds, subsample=subsample, exclude_cols=exclude_cols)
-
-    window_lag.head()
+    window_lag, _ = functions.add_lag_features_for_all(window_with_engineered_features, max_lag_seconds=max_lag_seconds, subsample=1, exclude_cols=exclude_cols)
 
     feature_cols = window_lag.columns.tolist()
+    
+    def select_subsampled_lags(df, subsample):
+        cols = []
+        for c in df.columns:
+            if "_lag_" in c:
+                lag = int(c.split("_lag_")[1])
+                if lag % subsample == 0:
+                    cols.append(c)
+            else:
+                cols.append(c)  # keep non-lag features
+        return df[cols]
+    
+    
     param = []
     prediction = []
 
 
-    for k in range(N_total_prediction):
+    for _ in range(N_total_prediction):
 
 
         # ---- 1) One-step prediction from LAST row of window_lag ----
         model.eval()
         with torch.no_grad():
-            x_np = scalers["X"].transform(window_lag.iloc[[-1]][feature_cols])
+            
+            if subsample > 1:
+                window_lag_subsampled = select_subsampled_lags(window_lag, subsample=subsample)
+                feature_cols_sub = window_lag_subsampled.columns.tolist()
+                x_np = scalers["X"].transform(window_lag_subsampled.iloc[[-1]][feature_cols_sub])
+            else:
+                x_np = scalers["X"].transform(window_lag.iloc[[-1]][feature_cols])
 
             x_in = torch.from_numpy(x_np.astype("float32"))
 
             out = model(x_in)
             param.append(out.cpu().numpy().flatten())
-            mu_st = out[:, 0]
-            sigma_st = torch.nn.functional.softplus(out[:, 1]) + 1e-6
 
-            p_pos = torch.sigmoid(out[:, 2])
-            mu_ln = out[:, 3]
-            sigma_ln = 1e-3 + (1.0 - 1e-3) * torch.sigmoid(out[:, 4])
+            mu_st        = out[:, 0]
+            sigma_st_raw = out[:, 1]
+            p_pos_raw    = out[:, 2]
+            mu_ln        = out[:, 3]
+            sigma_ln_raw = out[:, 4]
+
+            eps = 1e-6
+            sigma_min, sigma_max = 1e-3, 1.0
+
+            # EXACT same transforms as in loss()
+            sigma_st = torch.nn.functional.softplus(sigma_st_raw) + eps
+            p_pos    = torch.sigmoid(p_pos_raw)
+
+            sigma_ln_tmp = torch.nn.functional.softplus(sigma_ln_raw) + eps
+            sigma_ln     = sigma_min + (sigma_max - sigma_min) * torch.sigmoid(sigma_ln_tmp)
+
 
             # --- Sample orientation ---
             t_sample = torch.distributions.StudentT(df=5).sample(mu_st.shape).to(mu_st.device)
@@ -114,6 +144,12 @@ def sample_trajectory(
             pred_speed_val = float(pred_speed.item())
             pred_ori_val   = float(pred_ori.item())
             
+        
+        pred_speed_val = float(pred_speed.item())
+
+        # clip only catastrophic values (and fix NaN/inf)
+        if (not np.isfinite(pred_speed_val)) or (abs(pred_speed_val) > 1e6):
+            pred_speed_val = np.sign(pred_speed_val) * 1e6 if np.isfinite(pred_speed_val) else 0.0
         
         pred_speed_val = scalers["speed"].inverse_transform([[pred_speed_val]])[0, 0]   # to obtain the real speed value in original units 
         pred_ori_val   = scalers["ori"].inverse_transform([[pred_ori_val]])[0, 0]
@@ -136,7 +172,7 @@ def sample_trajectory(
 
         new_row["f_ori"] = (last_row["f_ori"] + pred_ori_val) % (2 * np.pi)
 
-        dt = horizon_frames / fps
+        dt = horizon_frames
         new_row["f_x"] = float(last_row["f_x"]) + pred_speed_val * np.cos(new_row["f_ori"]) * dt
         new_row["f_y"] = float(last_row["f_y"]) + pred_speed_val * np.sin(new_row["f_ori"]) * dt
         
@@ -151,10 +187,11 @@ def sample_trajectory(
         window = pd.concat([window, new_row.to_frame().T], ignore_index=True)
         t_last = t_next
 
-        # ---- 4) Compute engineered features ONLY for new row ----
+        # ---- 4) Compute engineered features ONLY for new row and make stimuli egocentric ----
         new_row_df = pd.DataFrame([new_row])
+        new_row_df_egocentric = functions.make_egocentric(new_row_df)
         new_row_eng = functions.add_engineered_features(
-            new_row_df,
+            new_row_df_egocentric,
             representation="absolute",
             n_stimuli=8
         ).iloc[0]
@@ -165,16 +202,15 @@ def sample_trajectory(
 
         for base in cols_to_lag:
 
-            # shift: 90 <- 85 <- ... <- 5 <- current
-            for L in range(max_lag_frames, subsample - 1, -subsample):
-                src_L = L - horizon_frames
+            # shift: 90 <- 89 <- ... <- 1 <- current
+            for L in range(max_lag_frames, 0, -1):   # range(start, stop, step)
+                src_L = L - subsample
                 dst = f"{base}_lag_{L}"
 
-                if src_L >= subsample:
+                if src_L >= 1:
                     src = f"{base}_lag_{src_L}"
                     next_feat[dst] = float(prev[src])
                 else:
-                    # lag_5 = previous current
                     next_feat[dst] = float(prev[base])
 
         # ---- 6) Update CURRENT columns ----
@@ -200,10 +236,7 @@ def sample_trajectory(
     window = window.iloc[seed_len:].reset_index(drop=True) # to keep only the generated part (the first max_lag_seconds correspond to the real fish)
     
     return window, prediction, param
-        
-        
-        
-        
+    
 
 
 
@@ -214,7 +247,8 @@ def generate_trajectory_video(
     window,
     fps: int = 30,
     n_stimuli: int = 8,
-    horizon_frames: int = 1
+    horizon_frames: int = 1,
+    fixed_limits: tuple = None
 ):
     """
     Generate an animation of a single trial trajectory.
@@ -233,14 +267,17 @@ def generate_trajectory_video(
     n_stimuli : int
         Number of stimuli (default: 8).
 
+    fixed_limits : tuple, optional
+        If provided, use these (xmin, xmax, ymin, ymax) as fixed limits for the plot.
+
     Returns
     -------
     anim : matplotlib.animation.FuncAnimation
         The animation object.
     """
 
+    
     traj_df = window.reset_index(drop=True)
-    traj_df = functions.make_absolute(traj_df)
 
     # -------------------------
     # 1) Fixed frame limits
@@ -253,9 +290,13 @@ def generate_trajectory_video(
         stim = traj_df[f"d{k}_stim"].to_numpy().astype(bool)
         xs = np.concatenate([xs, traj_df.loc[stim, f"d{k}_x"].to_numpy()])
         ys = np.concatenate([ys, traj_df.loc[stim, f"d{k}_y"].to_numpy()])
-
-    xmin, xmax = np.nanmin(xs), np.nanmax(xs)
-    ymin, ymax = np.nanmin(ys), np.nanmax(ys)
+        
+        
+    if fixed_limits is None:
+        xmin, xmax = np.nanmin(xs), np.nanmax(xs)
+        ymin, ymax = np.nanmin(ys), np.nanmax(ys)
+    else:
+        xmin, xmax, ymin, ymax = fixed_limits
 
     pad = 0.05 * max(xmax - xmin, ymax - ymin)  # 5% margin
     xmin, xmax = xmin - pad, xmax + pad
@@ -264,7 +305,7 @@ def generate_trajectory_video(
     # -------------------------
     # 2) Figure
     # -------------------------
-    fig, ax = plt.subplots()
+    fig, ax = plt.subplots(figsize=(12, 8))
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(ymin, ymax)
     ax.set_aspect("equal", adjustable="box")
@@ -306,7 +347,7 @@ def generate_trajectory_video(
         else:
             stim_scatter.set_offsets(np.c_[stim_x, stim_y])
 
-        t_sec = t / fps
+        t_sec = (t * horizon_frames) / fps
         title.set_text(f"t={t_sec:.1f}s")
         return fish_quiv, stim_scatter, title
 
@@ -316,6 +357,8 @@ def generate_trajectory_video(
     # -------------------------
     interval = 1000 * horizon_frames / fps
     anim = FuncAnimation(fig, update, frames=len(traj_df), interval=interval, blit=False)
+    plt.close(fig)
+    
 
     return anim
 

@@ -83,24 +83,37 @@ def preprocessing_pipeline(
     df_raw = df_raw.drop(columns=['stimulus'])
     # transform dk_stim for each stimulus k into 0 if the feature is 'none' else 1
     for k in range(8):
-        df_raw[f'd{k}_stim'] = df_raw[f'd{k}_stim'].apply(lambda x: 0 if x == 'none' else 1)
+        df_raw[f'd{k}_stim'] = df_raw[f'd{k}_stim'].apply(lambda x: 0 if x in ['none', 'inter_stim_pause'] else 1)
         df_raw[f'd{k}_x'] = df_raw[f'd{k}_x']*df_raw[f'd{k}_stim']
         df_raw[f'd{k}_y'] = df_raw[f'd{k}_y']*df_raw[f'd{k}_stim']
     df_raw = df_raw.drop(columns=['fish_id']) # Make no sens to keep fish_id for prediction
     df_raw = df_raw.drop(columns=['frame']) # Make no sens to keep frame for prediction
     df_raw = df_raw.drop(columns=['source_frame'])
     
+
     #### Remove NaN and constant features, and 100% correlated features 
     print("------------ Raw dataframe ------------")
     df_raw, _ = functions.remove_nan_plus_constant_and_correlated_features(df_raw, remove_nan_threshold=100, corr_threshold=1.0)
 
     df_raw = functions.compute_d_orientation(df_raw)
-    df_raw = functions.compute_speed(df_raw)
+    df_base = functions.compute_speed(df_raw)
     
-    df_base = functions.make_egocentric(df_raw)
+    df_base_egocentric = functions.make_egocentric(df_base)
     
-    df_feature_engineered = functions.add_engineered_features(df_base, representation=representation, n_stimuli=8)
+    df_feature_engineered = functions.add_engineered_features(df_base_egocentric, representation=representation, n_stimuli=8)
 
+
+    
+    print("------------ Percentage of frame with x number of stimuli  ------------")
+    vc = (
+        df_feature_engineered['n_active_stimuli']
+        .value_counts(normalize=True)
+        .rename_axis("Number of active stimuli")
+        .reset_index(name="Percentage of frames")
+    )
+
+    print(vc)
+    
     exclude_cols = [c for c in df_feature_engineered.columns if c not in cols_to_lag]
 
     df, _ = functions.add_lag_features_for_all(df_feature_engineered, max_lag_seconds=max_lag_seconds, subsample=subsample, exclude_cols=exclude_cols)
