@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+
+# Data and run artifacts (large, not versioned)
+data/
+runs/
+abs_dict.pkl
+*.pkl
+
+# Virtual environments
+.venv/
+venv/

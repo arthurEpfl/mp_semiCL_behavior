@@ -1,0 +1,44 @@
+# Default training configuration.
+# Copy and modify this file to define new experimental runs.
+
+[model]
+# Model architecture. Currently supported: "mlp"
+type = "mlp"
+# Width of each hidden layer. Only the first value is used by "mlp".
+hidden_sizes = [128]
+
+[training]
+lr = 1e-3
+batch_size = 64
+num_epochs = 1000
+early_stopping = false
+patience = 10
+seed = 0
+train_frac = 0.8
+
+[data]
+# List of fish indices (0-14) to include, or omit the key to use all fish.
+fish_ids = [0,1]
+subsample = 1
+max_lag_seconds = 3
+horizon_frames = 1
+cols_to_lag = [
+    "f_speed",
+    "d_ori",
+    "min_dist_active",
+    "mean_dist_active",
+    "mean_angle_active",
+    "lateral_balance",
+    "n_active_stimuli",
+    "is_dots_moving",
+    "dist_center",
+]
+# Path to input data file (relative to repo root, or absolute)
+pkl_path = "abs_dict.pkl"
+
+# Dish geometry — shared across all fish (per-dish coordinate frame).
+# center: estimated from fish trajectories.
+# radius: 50 mm × MM_TO_PX (3.67 px/mm) = 183.5 px for a 10 cm diameter dish.
+dish_x = 180.0
+dish_y = 174.0
+dish_radius = 183.5
