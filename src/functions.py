@@ -17,25 +17,34 @@ import re
 
 
 
-def stack_dict_pipeline(fish_dict):
+def stack_dict_pipeline(fish_dict, dish_x=None, dish_y=None, dish_radius=None):
     """
     Stack all per-fish DataFrames from abs_dict or polar_dict (output of the pipeline)
     into a single long-format DataFrame.
+
+    All fish share the same per-dish coordinate system (the transformation pipeline
+    normalises each fish to its own dish frame), so dish_x/y/radius are the same
+    for every fish.
 
     Parameters
     ----------
     fish_dict : dict
         Dictionary like {"f0": df_f0, ..., "f14": df_f14}.
+    dish_x, dish_y : float, optional
+        Dish centre coordinates in the per-dish pixel frame (same for all fish).
+    dish_radius : float, optional
+        Dish radius in pixels (same for all fish).
+        For a 10 cm diameter dish: radius = 50 mm × MM_TO_PX (3.67 px/mm) ≈ 183.5 px.
 
     Returns
     -------
     pd.DataFrame
-        Long DataFrame with one row per frame per fish, and columns:
+        Long DataFrame with one row per frame per fish, with columns:
         - frame, source_frame, stimulus, ...
-        - fish_x, fish_y, fish_ori
+        - f_x, f_y, f_ori  (renamed from f{N}_x etc.)
         - d0_x/d0_y/d0_stim ... (for abs_dict)
-        - or d0_angle/d0_radius/d0_stim ... (for polar_dict)
         - fish_id (int)
+        - dish_x, dish_y, dish_radius (if provided)
     """
     stacked = []
 
@@ -59,6 +68,12 @@ def stack_dict_pipeline(fish_dict):
 
         # Add fish_id column
         tmp["fish_id"] = fish_id
+
+        # Attach dish geometry
+        if dish_x is not None:
+            tmp["dish_x"] = float(dish_x)
+            tmp["dish_y"] = float(dish_y)
+            tmp["dish_radius"] = float(dish_radius)
 
         stacked.append(tmp)
 
@@ -631,8 +646,13 @@ def add_engineered_features(df, representation, n_stimuli=8):
     df["mean_dist_active"] = df["mean_dist_active"].fillna(0.0)
     df["mean_angle_active"] = df["mean_angle_active"].fillna(0.0)
 
+    # Distance from dish center, normalized by dish radius (0 = center, 1 = edge)
+    # Only computed when dish geometry columns are present in the dataframe.
+    if "dish_x" in df.columns and "dish_y" in df.columns and "dish_radius" in df.columns:
+        dx = df["f_x"] - df["dish_x"]
+        dy = df["f_y"] - df["dish_y"]
+        df["dist_center"] = np.sqrt(dx ** 2 + dy ** 2) / df["dish_radius"]
 
-    # Optionally, you can also fill these NaNs if needed before modeling
     return df
 
 
@@ -763,11 +783,13 @@ def add_lag_features_for_all(
     created_lag_cols = []
 
     # ---------- 3) Create lag features ----------
+    lag_dict = {}
     for col in candidate_cols:
         for lag in range(subsample, max_lag_frames + 1, subsample):
             lag_col = f"{col}_lag_{lag}"
-            df[lag_col] = df[col].shift(lag)
+            lag_dict[lag_col] = df[col].shift(lag)
             created_lag_cols.append(lag_col)
+    df = pd.concat([df, pd.DataFrame(lag_dict, index=df.index)], axis=1)
     if verbose:
         print(
             f"Created {len(created_lag_cols)} lag features "

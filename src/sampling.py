@@ -19,10 +19,13 @@ def sample_trajectory(
     *,
     fps: int = 30,
     subsample: int = 1,
-    horizon_frames: int = 1,  # For now always 1 
+    horizon_frames: int = 1,  # For now always 1
     max_lag_seconds: int = 3,
     cols_to_lag: list[str],
-    N_sampling_seconds: int = 60
+    N_sampling_seconds: int = 60,
+    dish_x: float = None,
+    dish_y: float = None,
+    dish_radius: float = None,
 ):
     """
     Autoregressive sampling on a SINGLE trial.
@@ -72,8 +75,13 @@ def sample_trajectory(
     t_last = seed_len - 1
     
     window_egocentric = functions.make_egocentric(window)
-    
+
     window_with_engineered_features = functions.add_engineered_features(window_egocentric, representation="absolute", n_stimuli=8)
+    # Drop dish geometry columns now that dist_center has been computed (mirrors preprocessing.py)
+    for col in ["dish_x", "dish_y", "dish_radius"]:
+        if col in window_with_engineered_features.columns:
+            window_with_engineered_features = window_with_engineered_features.drop(columns=[col])
+
     exclude_cols = [c for c in window_with_engineered_features.columns if c not in cols_to_lag]
     
     window_lag, _ = functions.add_lag_features_for_all(window_with_engineered_features, max_lag_seconds=max_lag_seconds, subsample=1, exclude_cols=exclude_cols)
@@ -175,8 +183,16 @@ def sample_trajectory(
         dt = horizon_frames
         new_row["f_x"] = float(last_row["f_x"]) + pred_speed_val * np.cos(new_row["f_ori"]) * dt
         new_row["f_y"] = float(last_row["f_y"]) + pred_speed_val * np.sin(new_row["f_ori"]) * dt
-        
-        
+
+        # ---- Clamp to dish boundary ----
+        if dish_radius is not None:
+            dx = new_row["f_x"] - dish_x
+            dy = new_row["f_y"] - dish_y
+            dist = np.sqrt(dx ** 2 + dy ** 2)
+            if dist > dish_radius:
+                scale = dish_radius / dist
+                new_row["f_x"] = dish_x + dx * scale
+                new_row["f_y"] = dish_y + dy * scale
 
         # ---- Copy TRUE stimulus aligned ----
         true_stim_row = df_trial_base.iloc[t_next]

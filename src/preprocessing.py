@@ -87,8 +87,9 @@ def preprocessing_pipeline(
         df_raw[f'd{k}_x'] = df_raw[f'd{k}_x']*df_raw[f'd{k}_stim']
         df_raw[f'd{k}_y'] = df_raw[f'd{k}_y']*df_raw[f'd{k}_stim']
     df_raw = df_raw.drop(columns=['fish_id']) # Make no sens to keep fish_id for prediction
-    df_raw = df_raw.drop(columns=['frame']) # Make no sens to keep frame for prediction
-    df_raw = df_raw.drop(columns=['source_frame'])
+    for col in ['frame', 'source_frame']:
+        if col in df_raw.columns:
+            df_raw = df_raw.drop(columns=[col])
     
 
     #### Remove NaN and constant features, and 100% correlated features 
@@ -101,6 +102,11 @@ def preprocessing_pipeline(
     df_base_egocentric = functions.make_egocentric(df_base)
     
     df_feature_engineered = functions.add_engineered_features(df_base_egocentric, representation=representation, n_stimuli=8)
+
+    # Drop dish geometry columns now that dist_center has been computed from them
+    for col in ['dish_x', 'dish_y', 'dish_radius']:
+        if col in df_feature_engineered.columns:
+            df_feature_engineered = df_feature_engineered.drop(columns=[col])
 
 
     
