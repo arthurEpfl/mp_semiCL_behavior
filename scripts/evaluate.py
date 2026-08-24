@@ -74,6 +74,7 @@ class FishRecord:
     dt_s: np.ndarray              # (n,) inter-bout interval to next bout (s); NaN allowed
     distance_px: np.ndarray       # (n,) travel distance to next bout (px); NaN allowed
     u_raw: np.ndarray | None = None   # (n,5) raw rich stimulus features [Lp,Lm,Sp,Sm,Fp] or None
+    stim_csv: np.ndarray | None = None  # (n,7) bout-level rich stim from CSV (stim_mode='rich_csv') or None
 
     @property
     def n(self) -> int:
@@ -128,9 +129,25 @@ def build_records(df, min_len=10, group_cols=("fish_id", "segment_id"),
         if abs_dict is not None and roi is not None:
             u_raw = _rich_features_for_group(g[good], fid, abs_dict, roi, fish_arrs)
 
+        # bout-level rich stimulus block (stim_mode='rich_csv') -- from CSV columns, no abs_dict.
+        # all-zero on no-stimulus bouts; carries bearing + group size + per-side speed + moving
+        # (present on static-dot bouts too, unlike the moving-only simple `b`).
+        stim_csv = None
+        if "n_dots_left" in g.columns:
+            def _c(name):
+                return (np.nan_to_num(g[name].to_numpy(float)[good])
+                        if name in g.columns else np.zeros(len(dth)))
+            stim_csv = np.stack([
+                np.nan_to_num(np.sin(phi)), np.nan_to_num(np.cos(phi)),
+                _c("n_dots_left") / 8.0, _c("n_dots_right") / 8.0,
+                _c("speed_left") / 3.5, _c("speed_right") / 3.5,
+                moving.astype(float),
+            ], axis=1).astype(float)
+
         records[fid] = FishRecord(
             fish_id=fid, dtheta=dth, symbol=symbols_from_dtheta(dth), b=b,
-            stim_angle=phi, moving=moving, dt_s=dt_s, distance_px=dist, u_raw=u_raw)
+            stim_angle=phi, moving=moving, dt_s=dt_s, distance_px=dist, u_raw=u_raw,
+            stim_csv=stim_csv)
     return records
 
 
@@ -536,6 +553,20 @@ def _score_fish(model, rec, dtheta0=DTHETA0):
         row["nats_stim"] = float(np.mean(ld[stim])) if stim.any() else np.nan
         row["nats_nostim"] = float(np.mean(ld[~stim])) if (~stim).any() else np.nan
         row["n_stim"] = int(stim.sum())
+    # EXTRA CHANNELS. Models that fit a joint emission (turn + travel + interval) can return
+    # `logdens_dist` / `logdens_dt` alongside the angle `logdens`. Historically only the angle was
+    # reported, which meant ~2/3 of what those models optimise was never scored. Adapters that do
+    # not emit them are unaffected -- the keys are simply absent.
+    # nanmean, NOT mean: the last bout of every fish has no forward-looking distance or dt, so a
+    # plain mean would return NaN for every fish. `n_*` records how many bouts actually counted.
+    for key, suf in (("logdens_dist", "dist"), ("logdens_dt", "dt")):
+        v = out.get(key)
+        if v is None:
+            continue
+        v = np.asarray(v, float); ok = np.isfinite(v)
+        row[f"nats_per_bout_{suf}"] = float(np.nanmean(v)) if ok.any() else np.nan
+        row[f"bits_per_bout_{suf}"] = float(-np.nanmean(v) / LN2) if ok.any() else np.nan
+        row[f"n_{suf}"] = int(ok.sum())
     slq = out.get("symbol_logq")
     if slq is not None:
         idx = rec.symbol.astype(int)

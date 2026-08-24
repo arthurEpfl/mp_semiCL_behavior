@@ -1,0 +1,933 @@
+"""Joint-likelihood bout model: one feature vector, one body, chained heads.
+
+WHAT IS DIFFERENT FROM ``fit_MLP_mix.MLPMixKinDensity``, and why it is worth measuring.
+
+1. THE FACTORISATION MATCHES THE DATA. The kin model trains
+   ``p(dtheta|x_ang) . p(l|x_kin) . p(tau|x_kin, l)`` -- the distance head sees no turn angle at
+   all, and neither does the dt head. Here the emission is the full chain
+
+       L = -[ log p(dtheta | x) + log p(l | x, dtheta) + log p(tau | x, dtheta, l) ]
+
+   so each channel is conditioned on everything sampled before it within the same bout.
+
+2. ONE FEATURE VECTOR. The kin model hard-codes ``use_kin=False`` and builds a SEPARATE 6-column
+   kin trunk, so the angle body never sees kinematic history and the kin trunk never sees the
+   stimulus, the border or the turn history. Here ``use_kin=True`` puts everything in one ``x``
+   that a single shared body consumes -- ``MB.build_feature_matrix`` already supports this, the
+   switch was simply never flipped.
+
+3. METRIC A COVERS ALL THREE CHANNELS. ``MLPMixKinDensity`` inherits a ``score`` that evaluates
+   only the angle mixture, so about two thirds of the fitted emission is optimised against a
+   likelihood that is never reported. ``score`` here returns ``logdens`` (angle, same key as
+   before) plus ``logdens_dist`` and ``logdens_dt``.
+
+DELIBERATELY ABSENT: vigor, artr, kin_feedback, kin_var_comp, qmap, indiv, innov_comp. This is a
+clean baseline, not the accumulated lineage. ``contain`` is available because it corrects the
+radial OCCUPANCY distribution; the thing that actually keeps the fish in the dish is the
+``guardrail``, which is on regardless and is not a "fix".
+
+CONDITIONER CONVENTION. The heads receive ``|dtheta|``, not signed dtheta: left and right should
+not change step size or timing by symmetry, and feeding the sign would break a symmetry the angle
+mixture otherwise enforces. Both conditioners are scaled the same way the corresponding history
+blocks are (``/dth_scale``, and centred by ``kin_scales``) so the heads see inputs on the scale
+they were trained at.
+
+COMPARABILITY WARNING: because the angle body now also reads kinematic history, this model's
+angle ``bits_per_bout`` is NOT comparable to the historical turn-only series from the kin zoo.
+Within this family it is fine.
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+sys.path.insert(0, str(Path(__file__).parent))
+import evaluate as E                    # noqa: E402
+import fit_MLP as M                     # noqa: E402
+import fit_MLP_border as MB             # noqa: E402
+import fit_MLP_mix as MX                # noqa: E402
+
+_EMPTY = np.zeros(0)                    # allocation-free stand-in for an absent feature block
+
+
+# =========================================================================== #
+#  Net
+# =========================================================================== #
+class MDNMixJoint(MX.MDNMix):
+    """Shared body -> 5-comp angle mix, then distance | dtheta, then dt | dtheta, distance.
+
+    ``forward`` is inherited from ``MDNMix`` and returns the ANGLE parameters only, so
+    ``predict_params_mix`` / ``symbol_logq_mix`` / the symbol track keep working unchanged.
+    The chained heads are reached through ``joint_forward``.
+    """
+
+    def __init__(self, n_features, hidden, n_dist=2, n_dt=3):
+        super().__init__(n_features, hidden)
+        self.n_dist, self.n_dt = int(n_dist), int(n_dt)
+        self.dist_head = nn.Linear(hidden + 1, 3 * self.n_dist)      # +1 = |dtheta| / dth_scale
+        self.dt_head = nn.Linear(hidden + 2, 3 * self.n_dt)          # +2 = that, and centred log l
+
+    def joint_forward(self, x, a_z, ld_c):
+        """(angle params, (logw,mu,sigma) for distance, same for dt). ``a_z`` = |dtheta|/dth_scale,
+        ``ld_c`` = (log distance - dm)/ds, both teacher-forced at train time."""
+        b = self.body(x)
+        angle = self._angle_params(self.head(b))
+        a = a_z.reshape(-1, 1)
+        do = self.dist_head(torch.cat([b, a], dim=1))
+        k = self.n_dist
+        dist = (F.log_softmax(do[:, :k], dim=1), do[:, k:2 * k],
+                F.softplus(do[:, 2 * k:3 * k]) + M.EPS)
+        to = self.dt_head(torch.cat([b, a, ld_c.reshape(-1, 1)], dim=1))
+        kt = self.n_dt
+        dtp = (F.log_softmax(to[:, :kt], dim=1), to[:, kt:2 * kt],
+               F.softplus(to[:, 2 * kt:3 * kt]) + M.EPS)
+        return angle, dist, dtp
+
+
+def _cond_cols(y_ang, y_dist, dth_scale, kin_scales):
+    """The two within-bout conditioners, on the scale the history blocks use."""
+    dm, ds, _tm, _ts = kin_scales
+    a_z = np.abs(np.asarray(y_ang, float)) / float(dth_scale)
+    ld = np.log(np.clip(np.asarray(y_dist, float), 1e-6, None))
+    ld_c = (ld - dm) / ds
+    return (np.nan_to_num(a_z).astype(np.float32),
+            np.nan_to_num(ld_c).astype(np.float32))
+
+
+def _noise_tensors(noise_builder, ep, dth_scale, kin_scales, dev):
+    """Build one epoch's NOISY copy as device tensors, in the same row order as the clean one."""
+    Xn, yan, ydn, ytn = noise_builder(ep)
+    azn, lcn = _cond_cols(yan, ydn, dth_scale, kin_scales)
+    return (torch.tensor(np.asarray(Xn, np.float32), device=dev),
+            torch.tensor(azn, device=dev), torch.tensor(lcn, device=dev),
+            torch.tensor(np.asarray(yan, np.float32), device=dev),
+            torch.tensor(np.asarray(ydn, np.float32), device=dev),
+            torch.tensor(np.asarray(ytn, np.float32), device=dev))
+
+
+def _noise_kwargs(model, train_records):
+    """Translate a model's ``noise_aug`` dict into the trainer's noise kwargs ({} when off).
+
+    ONE rng for the whole fit, advanced by every call, so each epoch sees a FRESH perturbation of
+    the same records rather than a fixed augmented dataset -- which would merely be a bigger
+    training set and would let the net memorise the particular jitter. Shared by the joint and
+    fishre trainers so the two cannot drift."""
+    na = getattr(model, "noise_aug", None)
+    if not na:
+        return {}
+    rng = np.random.default_rng([int(model.seed), 7919])
+    cfg, recs = model._cfg_feat, list(train_records)
+    return dict(noise_builder=lambda _ep: MB.build_noisy_sequences(recs, cfg, rng),
+                noise_mode=str(na.get("mode", "concat")),
+                noise_frac=float(na.get("frac", 0.5)))
+
+
+def fit_mix_joint(X, y_ang, y_dist, y_dt, hidden, dth_scale, kin_scales, *, epochs=80, lr=1e-3,
+                  batch_size=256, patience=8, val_frac=0.15, seed=0, device=None,
+                  n_dist=2, n_dt=3, weight_decay=1e-5,
+                  noise_builder=None, noise_mode="concat", noise_frac=0.5):
+    """Train ``MDNMixJoint`` on the exact chained joint NLL. Distance/dt NaN-masked per channel
+    (the last bout of every fish has no forward-looking dt or distance); early stopping is on the
+    JOINT validation loss, so all three channels share one stopping criterion.
+
+    ``noise_builder(epoch) -> (X~, dtheta~, distance~, dt)`` enables NOISE AUGMENTATION: a fresh
+    pose-perturbed copy of the whole training set each epoch, with the targets corrected back to
+    the true next onset (``MB.build_noisy_sequences``). ``noise_mode='concat'`` trains on clean
+    and noisy rows both (~2x epoch cost, the faithful version); ``'mask'`` replaces a
+    Bernoulli(``noise_frac``) subset of each clean batch instead (same cost, half the clean data).
+    THE VALIDATION LOSS IS ALWAYS CLEAN -- otherwise early stopping optimises a different
+    objective from the one reported, and the loss is not comparable to any archived arm."""
+    M._seed_everything(seed)
+    dev = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+    a_z, ld_c = _cond_cols(y_ang, y_dist, dth_scale, kin_scales)
+    Xt = torch.tensor(np.asarray(X, np.float32), device=dev)
+    ya = torch.tensor(np.asarray(y_ang, np.float32), device=dev)
+    yd = torch.tensor(np.asarray(y_dist, np.float32), device=dev)
+    yt = torch.tensor(np.asarray(y_dt, np.float32), device=dev)
+    az = torch.tensor(a_z, device=dev); lc = torch.tensor(ld_c, device=dev)
+    net = MDNMixJoint(Xt.shape[1], hidden, n_dist=n_dist, n_dt=n_dt).to(dev)
+    opt = torch.optim.Adam(net.parameters(), lr=lr, weight_decay=weight_decay)
+
+    def nll_on(Xb, azb, lcb, yab, ydb, ytb):
+        ang, dpar, tpar = net.joint_forward(Xb, azb, lcb)
+        la = MX.mix_logdens(yab, ang).mean()
+        md = torch.isfinite(ydb) & (ydb > 0); mt = torch.isfinite(ytb) & (ytb > 0)
+        ld = MX._lnk_logpdf(torch.clamp(ydb, min=1e-6), *dpar)
+        lt = MX._lnk_logpdf(torch.clamp(ytb, min=1e-6), *tpar)
+        z = torch.zeros((), device=dev)
+        return -(la + (ld[md].mean() if md.any() else z) + (lt[mt].mean() if mt.any() else z))
+
+    def nll(ix):
+        return nll_on(Xt[ix], az[ix], lc[ix], ya[ix], yd[ix], yt[ix])
+
+    n = Xt.shape[0]; nval = max(int(val_frac * n), 1)
+    g = torch.Generator().manual_seed(seed); perm = torch.randperm(n, generator=g).to(dev)
+    tr, va = perm[nval:], perm[:nval]
+    best, best_state, bad, hist = np.inf, None, 0, []
+    for _ep in range(epochs):
+        net.train()
+        # RESHUFFLE EVERY EPOCH. `perm` above fixes the train/val SPLIT (which must stay fixed);
+        # the batch COMPOSITION must not. Slicing `tr` directly, as this loop used to, meant every
+        # minibatch contained the same 256 bouts for all 80/250 epochs. `fit_mix` (:118) and
+        # `fit_mix_kin` both reshuffle; this was the only trainer in the repo that did not.
+        NT = (_noise_tensors(noise_builder, _ep, dth_scale, kin_scales, dev)
+              if noise_builder is not None else None)
+        tr_ep = tr[torch.randperm(len(tr), device=dev)]
+        for i in range(0, len(tr_ep), batch_size):
+            ix = tr_ep[i:i + batch_size]
+            if NT is not None and noise_mode == "mask":
+                m = torch.rand(len(ix), device=dev) < float(noise_frac)
+                Xb = torch.where(m.unsqueeze(1), NT[0][ix], Xt[ix])
+                azb = torch.where(m, NT[1][ix], az[ix]); lcb = torch.where(m, NT[2][ix], lc[ix])
+                yab = torch.where(m, NT[3][ix], ya[ix]); ydb = torch.where(m, NT[4][ix], yd[ix])
+                ytb = torch.where(m, NT[5][ix], yt[ix])
+                opt.zero_grad(); loss = nll_on(Xb, azb, lcb, yab, ydb, ytb)
+            else:
+                opt.zero_grad(); loss = nll(ix)
+            loss.backward(); opt.step()
+        if NT is not None and noise_mode != "mask":       # 'concat': a second, noisy pass
+            tr_ep2 = tr[torch.randperm(len(tr), device=dev)]
+            for i in range(0, len(tr_ep2), batch_size):
+                ix = tr_ep2[i:i + batch_size]
+                opt.zero_grad()
+                loss = nll_on(NT[0][ix], NT[1][ix], NT[2][ix], NT[3][ix], NT[4][ix], NT[5][ix])
+                loss.backward(); opt.step()
+        net.eval()
+        with torch.no_grad():
+            v = float(nll(va))
+        hist.append(v)
+        if v < best - 1e-5:
+            best, bad = v, 0
+            best_state = {k: t.detach().clone() for k, t in net.state_dict().items()}
+        else:
+            bad += 1
+            if bad >= patience:
+                break
+    if best_state is not None:
+        net.load_state_dict(best_state)
+    return net.to("cpu").eval(), hist
+
+
+# =========================================================================== #
+#  numpy rollout
+# =========================================================================== #
+def _numpy_predictor_joint(model, z=None):
+    """Hand-rolled forward pass for the free-run loop (the torch graph is far too slow per bout).
+
+    ``z`` is the per-trajectory random effect, or None. It loads LEVEL-ONLY and enters every head
+    additively, so the whole mechanism folds into four bias vectors ONCE here and costs nothing per
+    bout. Level-only means: the forward-mixture weight logit for the turn head, and the location
+    parameters (not the scales, not the mixture shapes) for the two kinematic heads.
+    """
+    sd = model.state_dict()
+    W1, b1 = sd["body.0.weight"].numpy(), sd["body.0.bias"].numpy()
+    W2, b2 = sd["head.weight"].numpy(), sd["head.bias"].numpy()
+    Wd, bd = sd["dist_head.weight"].numpy(), sd["dist_head.bias"].numpy()
+    Wt, bt = sd["dt_head.weight"].numpy(), sd["dt_head.bias"].numpy()
+    nd, ndt = int(model.n_dist), int(model.n_dt)
+    if z is not None and "z_body.weight" in sd:
+        # KEEP THE DTYPE. `b1 + (W_z @ z)` promotes float32 -> float64 the moment z is float64, and
+        # every subsequent bout is then computed in a different precision from the control's. The
+        # divergence is ~1e-8 per bout, which is invisible until it flips an rng.choice and the two
+        # trajectories separate completely -- so a z = 0 arm would NOT reproduce the control and the
+        # paired ladder would be silently unpaired.
+        z = np.asarray(z, np.float32).reshape(-1)
+
+        def _load1(key):
+            """Scalar offset from a (1, m) loading. The RESHAPE IS NOT COSMETIC: `W @ z` on a
+            (1, m) weight returns a length-1 ARRAY, and converting that to a scalar is a
+            deprecation under numpy 1.x but a hard TypeError under numpy 2 -- so the same code
+            ran on one interpreter and crashed on another. Reduce to a float explicitly."""
+            return float(np.dot(sd[key].numpy().reshape(-1), z))
+
+        b1 = (b1 + sd["z_body.weight"].numpy().reshape(len(b1), -1) @ z).astype(b1.dtype)
+        b2 = b2.copy(); b2[0] = b2.dtype.type(b2[0] + _load1("z_turn.weight"))
+        bd = bd.copy()
+        bd[nd:2 * nd] = (bd[nd:2 * nd] + _load1("z_dist.weight")).astype(bd.dtype)
+        bt = bt.copy()
+        bt[ndt:2 * ndt] = (bt[ndt:2 * ndt] + _load1("z_dt.weight")).astype(bt.dtype)
+        if "z_bord.weight" in sd:
+            # re_bgain: the per-fish gain on the border INPUT columns folds into W1's border
+            # columns once (W1 @ diag(g on slice) == scale those columns), zero per-bout cost.
+            # Same clamp as the torch path; dtype preserved for the CRN reasons above.
+            _g = float(np.exp(np.clip(_load1("z_bord.weight"), -1.5, 1.5)))
+            _s0, _s1 = model.border_slice
+            W1 = W1.copy()
+            W1[:, _s0:_s1] = (W1[:, _s0:_s1] * _g).astype(W1.dtype)
+
+    def sp(z):
+        return np.logaddexp(0.0, z)
+
+    def _sm(lw):
+        w = np.exp(lw - lw.max()); return w / w.sum()
+
+    def body_angle(x):
+        b = np.maximum(W1 @ x + b1, 0.0)
+        o = W2 @ b + b2
+        ang = (_sm(o[:5]), sp(o[5]) + M.EPS,
+               sp(o[6]) + M.ALPHA_MIN, sp(o[7]) + M.EPS, sp(o[8]) + M.ALPHA_MIN, sp(o[9]) + M.EPS,
+               sp(o[10]) + M.ALPHA_MIN, sp(o[11]) + M.EPS, sp(o[12]) + M.ALPHA_MIN, sp(o[13]) + M.EPS)
+        return b, ang
+
+    def dist_params(b, a_z):
+        do = Wd @ np.concatenate([b, [a_z]]) + bd
+        return _sm(do[:nd]), do[nd:2 * nd], sp(do[2 * nd:3 * nd]) + M.EPS
+
+    def dt_params(b, a_z, ld_c):
+        to = Wt @ np.concatenate([b, [a_z, ld_c]]) + bt
+        return _sm(to[:ndt]), to[ndt:2 * ndt], sp(to[2 * ndt:3 * ndt]) + M.EPS
+
+    return body_angle, dist_params, dt_params
+
+
+def generate_mix_joint_loop(model, rec, cfg_feat, rng, closed_loop=True, guardrail=True, eps=1e-3,
+                            stim_loop=True, keep_features=False,
+                            stim_provider=None, stop_time_s=None):
+    """Free-run one trajectory. Same contract as ``MX.generate_mix_kin_loop`` so the calibrators
+    and the harness can use either.
+
+    Closed-loop from the model's own pose: the border covariate and (when ``stim_loop``) the
+    shoal bearing/range are recomputed each bout from the generated position. The turn history and
+    BOTH kinematic history lags live in the same feature row, matching training.
+
+    ROLLOUT ON A *NEW* STIMULUS PROGRAM (``stim_provider`` / ``stop_time_s``, both default off):
+    ``rec.dot_cx[t]`` is indexed by BOUT, and is materialised as an array before this loop starts,
+    so a fixed stimulus timeline cannot be pre-baked into it -- the bout times are themselves
+    generated here. ``stim_provider(t, time_s, x, y, h) -> (dot_cx, dot_cy, moving, n_dots)`` is
+    called instead, with the live clock and pose, so the program can be resolved online (see
+    ``scripts/stim_rollout.py``). ``stop_time_s`` ends the run at the last bout whose ONSET is
+    still inside the programme and truncates every returned array to that length.
+
+    Both are pure additions: with ``stim_provider=None`` and ``stop_time_s=None`` the reads and
+    the RNG draw order are exactly as before, so output stays bit-identical (asserted by
+    ``scripts/smoke_stim_program.py``).
+    """
+    n = rec.n
+    K = cfg_feat["K"]; Kk = int(cfg_feat.get("K_kin", 3))
+    dth_scale = cfg_feat["dth_scale"]
+    dm, ds, tm, ts = cfg_feat["kin_scales"]
+    dist_hi, dt_hi = cfg_feat.get("kin_clip", (400.0, 600.0))
+    stim = M._stim_block(rec, cfg_feat["stim_mode"], cfg_feat["rich_scales"],
+                         phi_ref=cfg_feat.get("phi_ref", "ori"))
+    use_border = cfg_feat.get("use_border")
+    tf_border = MB._border_block(rec, cfg_feat) if use_border else np.zeros((n, 0))
+    # K_stim block: pure function of the record's own stimulus programme, so it is indexed by
+    # bout exactly as the teacher-forced stim block is. (The whole rollout is indexed by bout
+    # number rather than wall-clock -- the known clock_ratio caveat -- so this is consistent with
+    # how `moving` and `n_dots` are already fed.)
+    tf_shist = (MB._stimhist_block(rec, cfg_feat) if int(cfg_feat.get("K_stim", 1)) > 1
+                else np.zeros((n, 0)))
+    recompute_stim = (stim_loop and closed_loop
+                      and cfg_feat["stim_mode"] in ("dot", "dotb", "shoal", "shoalr", "shoalf"))
+    if stim_provider is not None and not recompute_stim:
+        # Fail loudly: silently teacher-forcing the record's stimulus while the caller believes a
+        # new programme is driving the fish would look like a working tool and be a replay.
+        raise ValueError(
+            "stim_provider needs the online stimulus path: require stim_loop=True, "
+            f"closed_loop=True and stim_mode in (dot, dotb, shoal, shoalr, shoalf); got "
+            f"stim_loop={stim_loop}, closed_loop={closed_loop}, "
+            f"stim_mode={cfg_feat['stim_mode']!r}.")
+    if stim_provider is not None and tf_shist.shape[1]:
+        # Same reasoning as above: the K_stim channels describe the RECORD's block programme, so
+        # replaying them under a new programme would be a silent replay of the old one.
+        raise ValueError("stim_provider is incompatible with K_stim > 1: the stimulus-memory "
+                         "block would still describe the record's own programme. Resolve the "
+                         "previous onsets from the provider's programme before enabling both.")
+    if recompute_stim:
+        dot_cx_a = np.asarray(getattr(rec, "dot_cx", np.full(n, np.nan)), float)
+        dot_cy_a = np.asarray(getattr(rec, "dot_cy", np.full(n, np.nan)), float)
+        mv_a = np.asarray(rec.moving, float); phi_gen = np.full(n, np.nan)
+        nd_a = np.asarray(getattr(rec, "n_dots", np.zeros(n)), float)
+        dcx_used = np.full(n, np.nan); dcy_used = np.full(n, np.nan)
+    # PER-FISH RANDOM EFFECT. One draw per TRAJECTORY from the fitted prior -- the honest "new fish"
+    # claim, and the only option that cannot leak: the evaluated fish is held out, so it has no
+    # fitted embedding. Sigma is diagonal by construction, so a scaled standard normal is the draw.
+    #
+    # SPAWNED STREAM, and this is load-bearing. generative_metrics keys rollouts on (seed, fish, rep)
+    # with NO model index, deliberately, so replicate r of model A and model B are paired -- which
+    # requires every arm to consume the same variates from `rng` in the same order. Drawing z from
+    # `rng` itself would desynchronise every emission draw after it and the paired t-test would
+    # still print RESOLVED while being invalid. SeedSequence.spawn bumps the parent's child counter
+    # but does not advance its stream, so the emission draws stay byte-identical to the control.
+    # Asserted in smoke_fishre.py, not assumed.
+    _re = cfg_feat.get("fish_re")
+    z_re = None
+    u_rad_re = 0.0
+    if _re is not None:
+        _sd_re = np.asarray(_re["sd"], float).reshape(-1)
+        z_re = rng.spawn(1)[0].normal(size=_sd_re.shape[0]) * _sd_re
+        if "rad_sd" in _re:
+            # RADIAL individuality for the fishre family (rad_indiv): a per-trajectory
+            # multiplicative swing on the containment bias, mirroring indiv's u_rad -- an
+            # additive offset leaks into the turn marginal and can flip a fish outward.
+            # SPAWN ORDER IS LOAD-BEARING: z stays child 0 (a cfg without the key draws exactly
+            # as before), this is child 1, and the main emission stream is never touched, so the
+            # CRN pairing against the no-rad control arm holds bout for bout.
+            # Gate on KEY PRESENCE, not truthiness: _search_rad_indiv's base pass sets
+            # rad_sd=0.0 and shares one rng across its fish, so both passes must consume the
+            # SAME spawn count per rollout -- a truthiness gate shifts every later fish's z_re
+            # to a different spawn child and the two-point solve reads z-resampling noise.
+            # rad_sd=0.0 still yields u_rad_re == 0.0, i.e. a bit-identical rollout.
+            u_rad_re = float(rng.spawn(1)[0].normal() * float(_re["rad_sd"]))
+    # PER-FISH GATE OFFSET (rad_gate): each trajectory shifts the containment gate u0 by a fixed
+    # draw -- a personal HOME RADIUS, moving where wall avoidance engages rather than how hard.
+    # Built because the multiplicative swing (u_rad/rad_sd) is measured INERT on graded bulk=0
+    # biases: scaling a bias that only acts in the outer ring cannot move per-fish MEAN r/R,
+    # while moving the gate 0.60->0.45 shifts it by ~0.03. Same CRN contract as rad_sd: spawned
+    # stream (never the main one), key-presence gated so the calibrator's base pass stays paired.
+    u_gate = 0.0
+    _rg = cfg_feat.get("rad_gate")
+    if _rg is not None and "sd" in _rg:
+        u_gate = float(rng.spawn(1)[0].normal() * float(_rg["sd"]))
+    body_angle, dist_params, dt_params = _numpy_predictor_joint(model, z=z_re)
+    cx, cy, R = rec.dish_cx, rec.dish_cy, rec.dish_R
+    # Initial heading: in psi_ref='travel' the whole rollout runs in the travel frame, so seed it
+    # with theta_{-1} (exact from the first bout's dtheta), NOT f_ori -- 10.3% of bouts carry an
+    # uncorrected 180-deg body-axis flip, which would start one rollout in ten facing backwards.
+    h0 = (float(MB._travel_ref(rec)[0]) if cfg_feat.get("psi_ref") == "travel"
+          else float(rec.f_ori_rad[0]))
+    x, y, h = float(rec.x_px[0]), float(rec.y_px[0]), h0
+    dth = np.zeros(n); dist = np.zeros(n); dtg = np.zeros(n)
+    xs = np.empty(n); ys = np.empty(n)
+    ld_hist = np.zeros(n); lt_hist = np.zeros(n)
+    # Running wall-clock. t_now is ALWAYS the onset time of the bout about to be generated, so it
+    # is what a stimulus programme must be sampled at. Costs one float add per bout and consumes
+    # no RNG, so the default path is unaffected.
+    t_now = 0.0; t_onset = np.zeros(n); n_done = n
+    wall_stats = {}
+    Xrec = (np.zeros((n, int(model.body[0].in_features)), dtype=np.float32)
+            if keep_features else None)
+    cb_cfg = cfg_feat.get("centre_bias", 0.0)
+    # SHALLOW-BORDER REJECTION (key absent => rd0 is None => the loop below is byte-identical to
+    # every archived arm, which is the only bit-identity guarantee offered: rejection consumes a
+    # VARIABLE number of variates, so a reject arm can never be CRN-paired bout-for-bout against
+    # a non-reject one. The ladder pairs at replicate level, which is unaffected.)
+    _wr = cfg_feat.get("wall_reject")
+    rd0 = rd1 = None
+    rmax = 0
+    R_g = R                    # radius the GUARDRAIL acts at (the border FEATURES always use R)
+    if _wr:
+        rd0 = float(_wr.get("d0", MB.WALL_REJECT_DEFAULT["d0"]))
+        rd1 = float(_wr.get("d1", MB.WALL_REJECT_DEFAULT["d1"]))
+        rmax = max(int(_wr.get("max_draws", MB.WALL_REJECT_DEFAULT["max_draws"])), 1)
+        # THE HARD FLOOR. Rejection SHAPES the distribution across the ramp band, but on its own
+        # it can only make d < d0 improbable, not impossible -- exhaust the draw budget and
+        # something has to be emitted. So the guardrail moves inward to the forbidden-ring
+        # boundary and does the same job there it already does at the physical wall: 'reflect'
+        # preserves the step-length marginal and leaves the heading inward, unlike a clip.
+        # Note the FEATURES still see the true R: the fish's distance to the real wall is real,
+        # and only its reachable set is smaller.
+        R_g = R * (1.0 - rd0 / (0.5 * MB.DISH_MM))
+        _u0 = np.hypot(x - cx, y - cy) / R_g
+        if _u0 > 1.0:
+            # Seeded inside the ring (real fish do reach 0.5 mm on ~0.02% of bouts, and those
+            # are the tracking-glitch bouts anyway). Pull the seed onto the boundary, or
+            # _ray_to_wall returns 0 and the trajectory freezes in place for the whole rollout.
+            x = cx + (x - cx) / _u0 * (1.0 - 1e-9)
+            y = cy + (y - cy) / _u0 * (1.0 - 1e-9)
+    # KIN_FEEDBACK: shrink the kinematic history ON READ. The block is z-scored (mean 0), so a
+    # factor < 1 pulls every lag toward the population mean, which rescales the effective AR
+    # coefficient of the free-running loop and damps the exposure-bias over-persistence.
+    # NOTE this model differs from the kin family: those columns feed the SHARED body, so the
+    # shrinkage reaches the turn head too. Watch the turn panel metrics, not just the kinematic ones.
+    _kfb = cfg_feat.get("kin_feedback", 1.0)
+    kfb_d, kfb_t = ((float(_kfb["dist"]), float(_kfb["dt"])) if isinstance(_kfb, dict)
+                    else (float(_kfb), float(_kfb)))
+    # VIGOR: per-trajectory log-modulation of the emitted step / interval. u = a fixed intercept
+    # (individuality), d = a slow stationary AR(1) (tempo drift). Applied OUTSIDE the loop -- the
+    # history keeps the unmodulated value, or the mean-reverting body would push back against z
+    # and it would compound. -var/2 keeps E[exp(z)] = 1 so the population mean is unchanged.
+    # INDIV: per-trajectory individuality for the two channels vigor does not cover.
+    # u_fw tilts the FORWARD mixture weight -- changing how OFTEN the fish turns, not how hard,
+    # which is the axis real fish actually vary on (forward fraction spans 4.5x across the 15,
+    # median |dtheta| only 2x) and which leaves the pooled turn marginal alone.
+    # u_rad SCALES the containment bias. An additive offset was tried and is wrong twice over:
+    # centre_bias steers by adding cb*sin(psi) to dtheta so an offset leaks into the turn
+    # marginal, and a negative draw flips a fish OUTWARD and triples the wall fraction.
+    _iv = cfg_feat.get("indiv"); u_fw = u_rad = 0.0
+    if _iv:
+        u_fw = float(rng.normal(0.0, float(_iv.get("fw", 0.0))))
+        u_rad = float(rng.normal(0.0, float(_iv.get("rad", 0.0))))
+    # INNOV_COMP: widen the innovation about THIS bout's conditional mean, restoring the spread
+    # kin_feedback removes. For a linear AR, scaling the innovation multiplies the stationary
+    # variance while leaving acf(k)=phi^k untouched -- so lambda sets the acf and c the spread.
+    # NOT kin_var_comp, which rescaled about the fixed TRAINING log-mean with the history left
+    # unscaled: a pure output transform that widened the marginal without restoring the loop.
+    _kin = cfg_feat.get("kin_innov")
+    ci_d = float(_kin.get("dist", 1.0)) if _kin else 1.0
+    ci_t = float(_kin.get("dt", 1.0)) if _kin else 1.0
+    vg = cfg_feat.get("vigor"); z_di = z_dt = 0.0
+    if vg:
+        su_di, sd_di, ph_di, var_di = vg["dist"]; su_dt, sd_dt, ph_dt, var_dt = vg["dt"]
+        c_di = float(np.sqrt(1.0 - ph_di * ph_di)); c_dt = float(np.sqrt(1.0 - ph_dt * ph_dt))
+        u_di = rng.normal(0.0, su_di); u_dt = rng.normal(0.0, su_dt)
+        d_di = rng.normal(0.0, sd_di); d_dt = rng.normal(0.0, sd_dt)
+    for t in range(n):
+        xs[t], ys[t] = x, y
+        if use_border and closed_loop:
+            r = np.hypot(x - cx, y - cy); psi = MB._wrap_pi(np.arctan2(cy - y, cx - x) - h)
+            border_t = MB.border_channels((R - r) / R, psi, cfg_feat.get("border_mode", "raw"))[0]
+            assert border_t.shape[0] == tf_border.shape[1], "border row width != block width"
+        else:
+            border_t = tf_border[t]
+        if recompute_stim:
+            if stim_provider is None:
+                dcx, dcy, mv_t, nd_t = dot_cx_a[t], dot_cy_a[t], mv_a[t], nd_a[t]
+            else:                            # resolve the programme from the live clock + pose
+                dcx, dcy, mv_t, nd_t = stim_provider(t, t_now, x, y, h)
+                dcx = float(dcx); dcy = float(dcy)
+                mv_t = float(mv_t); nd_t = float(nd_t)
+            dcx_used[t] = dcx; dcy_used[t] = dcy
+            if np.isfinite(dcx):
+                phi_gen[t] = MB._wrap_pi(np.arctan2(dcy - y, dcx - x) - h)
+            stim_t = MX._dot_stim_row(cfg_feat["stim_mode"], dcx, dcy,
+                                      x, y, h, mv_t, nd_t)
+            assert stim_t.shape[0] == stim.shape[1], "closed-loop stim row width != block width"
+        else:
+            stim_t = stim[t]
+        hist = np.zeros(K)
+        for k in range(1, K + 1):
+            if t - k >= 0:
+                hist[k - 1] = dth[t - k]
+        kin = np.zeros(2 * Kk)
+        for k in range(1, Kk + 1):
+            if t - k >= 0:
+                kin[k - 1] = kfb_d * (ld_hist[t - k] - dm) / ds
+                kin[Kk + k - 1] = kfb_t * (lt_hist[t - k] - tm) / ts
+        # block order MUST match MB.build_feature_matrix: history, stim, stimhist, border, kin
+        row = np.concatenate([hist / dth_scale, stim_t, tf_shist[t] if tf_shist.shape[1] else _EMPTY,
+                              border_t, kin]).astype(np.float32)
+        assert row.shape[0] == int(model.body[0].in_features), "joint row width != net input dim"
+        if keep_features:
+            Xrec[t] = row
+        b, ang = body_angle(row)
+        w, sF, aL1, tL1, aL2, tL2, aR1, tR1, aR2, tR2 = ang
+        if u_fw:
+            w = np.array([w[0] * float(np.exp(u_fw)), w[1], w[2], w[3], w[4]]); w = w / w.sum()
+
+        def _emit():
+            """One draw of the chained bout triple ``(dtheta, base distance, base dt)``.
+
+            Factored out ONLY so the shallow-border rejection can redraw it. The forward pass has
+            already happened (``b``, ``ang`` above), so a redraw is a handful of rng calls and no
+            matmul -- which is why a max_draws of 20 costs nothing. Nothing here depends on the
+            draw index, so calling it once reproduces the original code exactly, variate for
+            variate."""
+            # ---- 1. dtheta | x --------------------------------------------------------- #
+            c = rng.choice(5, p=w)
+            if c == 0:
+                v = rng.normal(0.0, sF)
+            elif c == 1:
+                v = -rng.gamma(aL1, tL1)
+            elif c == 2:
+                v = -rng.gamma(aL2, tL2)
+            elif c == 3:
+                v = +rng.gamma(aR1, tR1)
+            else:
+                v = +rng.gamma(aR2, tR2)
+            dth_t = float(np.clip(v, -180.0, 180.0))
+            cb = cb_cfg
+            if isinstance(cb, dict):                      # shell-gated containment bias
+                _u = np.hypot(x - cx, y - cy) / R
+                _u0 = float(cb.get("u0", 0.75))
+                if u_gate:
+                    # clip keeps a personal gate physically sane: never inside r/R 0.20 (a bias
+                    # acting over the whole dish) and never beyond 0.90 (no containment at all).
+                    _u0 = float(np.clip(_u0 + u_gate, 0.20, 0.90))
+                cb = (float(cb.get("bulk", 0.0))
+                      + float(cb.get("shell", 0.0)) * max(0.0, (_u - _u0) / max(1.0 - _u0, 1e-6)))
+            if u_rad:
+                cb = float(cb) * float(np.exp(u_rad))
+            if u_rad_re:
+                cb = float(cb) * float(np.exp(u_rad_re))
+            if cb:
+                psi_c = MB._wrap_pi(np.arctan2(cy - y, cx - x) - h)
+                dth_t = float(np.clip(dth_t + cb * np.sin(psi_c), -180.0, 180.0))
+            # ---- 2. distance | x, dtheta ----------------------------------------------- #
+            a_z = abs(dth_t) / dth_scale
+            dw, dmu, dsig = dist_params(b, a_z)
+            j = rng.choice(len(dw), p=dw)
+            # clip the 'average fish' step FIRST, then scale by the vigor -- otherwise a genuinely
+            # long-stepping trajectory is squashed back into the pooled q99.9 cap and loses exactly
+            # the large steps that make it long-stepping.
+            _ld = rng.normal(dmu[j], dsig[j])
+            if ci_d != 1.0:
+                _ld = float(np.dot(dw, dmu)) + ci_d * (_ld - float(np.dot(dw, dmu)))
+            base_di = float(np.clip(np.exp(_ld), 1e-3, dist_hi))
+            # ---- 3. dt | x, dtheta, distance ------------------------------------------- #
+            # conditions on the BASE distance, not the vigor-scaled one, so distance individuality
+            # cannot leak into the interval channel (real between-fish corr of the two levels ~ 0).
+            ld_c = (np.log(max(base_di, 1e-6)) - dm) / ds
+            tw, tmu, tsig = dt_params(b, a_z, ld_c)
+            jt = rng.choice(len(tw), p=tw)
+            _lt = rng.normal(tmu[jt], tsig[jt])
+            if ci_t != 1.0:
+                _lt = float(np.dot(tw, tmu)) + ci_t * (_lt - float(np.dot(tw, tmu)))
+            base_dt = float(np.clip(np.exp(_lt), 1e-3, dt_hi))
+            return dth_t, base_di, base_dt
+
+        def _vigor_step():
+            nonlocal d_di, d_dt, z_di, z_dt
+            d_di = ph_di * d_di + sd_di * c_di * rng.normal()
+            d_dt = ph_dt * d_dt + sd_dt * c_dt * rng.normal()
+            z_di = u_di + d_di - 0.5 * var_di
+            z_dt = u_dt + d_dt - 0.5 * var_dt
+
+        if rd0 is None:
+            dth_t, base_di, base_dt = _emit()
+            if vg:
+                _vigor_step()
+        else:
+            # SHALLOW-BORDER REJECTION. Redraw the whole triple (the heads are chained, so
+            # keeping the turn and redrawing only the step would sample from a different law)
+            # until the LANDING POINT is accepted by MB.accept_prob.
+            #
+            # This terminates. The dish is convex, so heading straight inward always gives the
+            # largest reachable wall distance d + L, and a draw therefore succeeds whenever
+            # L >= d0 - d; with d0 = 2 mm = 7.2 px and a median real step of 15.0 px, 95% of
+            # steps clear that even from ON the wall, where roughly half the heading circle is
+            # still available. There is no corner to be trapped in. The ramp is also inactive for
+            # ~95% of bouts (only 0.07% of real bouts are inside 4 mm), so the expected cost is
+            # ~1 draw. All of which is INSTRUMENTED below rather than assumed.
+            #
+            # The vigor AR state advances ONCE per bout, not once per draw -- otherwise a rejected
+            # bout would silently age the tempo latent.
+            if vg:
+                _vigor_step()
+            _exp_di = float(np.exp(z_di))
+            _best = None; _best_u = np.inf
+            for _k in range(rmax):
+                dth_t, base_di, base_dt = _emit()
+                _hh = h + np.radians(dth_t)
+                _dv = base_di * _exp_di
+                _ul = np.hypot(x + _dv * np.cos(_hh) - cx, y + _dv * np.sin(_hh) - cy) / R
+                _a = MB.accept_prob(_ul, rd0, rd1)
+                if _a >= 1.0 or rng.random() < _a:
+                    break
+                if _best is None or _ul < _best_u:     # remember the least-bad candidate
+                    _best_u = _ul; _best = (dth_t, base_di, base_dt)
+            else:
+                # BUDGET EXHAUSTED -> take the BEST of the draws, not the last one. Keeping the
+                # last was the first implementation and it is strictly worse: it throws away up
+                # to 19 better candidates for no reason, and it was measured putting bouts
+                # 0.011 mm from the wall on a deliberately under-trained model. The hard floor is
+                # then still guaranteed by the guardrail, which runs at R_g (the forbidden-ring
+                # boundary) rather than the physical wall -- see below.
+                dth_t, base_di, base_dt = _best
+                wall_stats["n_reject_fallback"] = wall_stats.get("n_reject_fallback", 0) + 1
+            wall_stats["n_draws"] = wall_stats.get("n_draws", 0) + _k + 1
+            if _k:
+                wall_stats["n_redraw_bouts"] = wall_stats.get("n_redraw_bouts", 0) + 1
+        dth[t] = dth_t
+        dval = base_di * float(np.exp(z_di)); tval = base_dt * float(np.exp(z_dt))
+        if cfg_feat.get("dt_snap"):
+            # EMITTED value only; ld_hist/lt_hist keep the continuous base below, so the loop
+            # dynamics, the RNG stream and every other channel stay byte-identical to the
+            # unsnapped control -- the contrast is attributable to the measurement operator alone.
+            tval = MB.snap_dt(tval)
+        dist[t] = dval; dtg[t] = tval
+        t_onset[t] = t_now; t_now += tval          # t_now is now bout t+1's onset time
+        # history keeps the BASE: the body must stay in average-fish world (see the vigor note above)
+        ld_hist[t] = np.log(max(base_di, 1e-6)); lt_hist[t] = np.log(max(base_dt, 1e-6))
+        h = h + np.radians(dth[t])
+        if guardrail:
+            x, y, h = MB.advance(x, y, h, dval, cx, cy, R_g, eps,
+                                 mode=cfg_feat.get("wall_mode", "clip"), stats=wall_stats)
+        else:
+            x = x + dval * np.cos(h); y = y + dval * np.sin(h)
+        if stop_time_s is not None and t_now >= stop_time_s:
+            # The test is on the NEXT onset, so the last kept bout is the last one starting
+            # strictly inside the programme; the bout that would start past the end (and whose
+            # stimulus lookup would be out of range) is never generated. The realised end
+            # therefore undershoots stop_time_s by up to one inter-bout interval.
+            n_done = t + 1
+            break
+    if n_done < n:                                  # truncate every per-bout array together
+        dth, dist, dtg = dth[:n_done], dist[:n_done], dtg[:n_done]
+        xs, ys, t_onset = xs[:n_done], ys[:n_done], t_onset[:n_done]
+        if recompute_stim:
+            phi_gen = phi_gen[:n_done]; dcx_used = dcx_used[:n_done]; dcy_used = dcy_used[:n_done]
+        if keep_features:
+            Xrec = Xrec[:n_done]
+    out = dict(dtheta=dth, symbol=E.symbols_from_dtheta(dth), dt_s=dtg, distance_px=dist,
+               x_px=xs, y_px=ys,
+               n_hits=wall_stats.get("n_hit", 0), n_bounces=wall_stats.get("n_bounce", 0))
+    if rd0 is not None:
+        # Instrumented, not assumed. An uninstrumented quantity a downstream calibrator can
+        # absorb is exactly the shape of the kin_feedback trap, so count the draws.
+        out["n_draws"] = wall_stats.get("n_draws", 0)
+        out["n_redraw_bouts"] = wall_stats.get("n_redraw_bouts", 0)
+        out["n_reject_fallback"] = wall_stats.get("n_reject_fallback", 0)
+    if recompute_stim:
+        out["stim_angle_gen"] = phi_gen
+    if stim_provider is not None or stop_time_s is not None:
+        # Tool-mode extras only -- the default sample dict keeps exactly the keys it always had.
+        out["t_onset_s"] = t_onset
+        out["end_time_s"] = float(t_now)
+        if recompute_stim:
+            out["dot_cx"] = dcx_used; out["dot_cy"] = dcy_used
+    if keep_features:
+        out["X"] = Xrec
+    return out
+
+
+# =========================================================================== #
+#  Adapter
+# =========================================================================== #
+class MLPMixJointDensity(MX.MLPMixLoopDensity):
+    """Joint-likelihood model with a single feature vector and chained heads.
+
+    ``score`` reports THREE channels, which is the point: the kin family optimises distance and dt
+    against a likelihood it never reports.
+    """
+
+    def __init__(self, K=8, K_kin=3, stim_mode="shoal", include_symbols=False, hidden=128,
+                 epochs=80, lr=1e-3, patience=8, batch_size=256, seed=0,
+                 use_border=True, border_mode="raw", wall_mode="clip",
+                 closed_loop=True, guardrail=True, eps=1e-3, stim_loop=True,
+                 n_dist=2, n_dt=3, contain=False, contain_fish=12, contain_w_occ=2.6,
+                 vigor=False, vigor_drift_calib=False, kin_fb_calib=False,
+                 indiv=False, innov_comp=False,
+                 dt_snap=False, psi_ref="ori", phi_ref="ori",
+                 K_stim=1, noise_aug=None, contain_mode="bias", **kwargs):
+        super().__init__(K=K, stim_mode=stim_mode, include_symbols=include_symbols, hidden=hidden,
+                         epochs=epochs, lr=lr, patience=patience, batch_size=batch_size, seed=seed,
+                         use_border=use_border, border_mode=border_mode, wall_mode=wall_mode,
+                         closed_loop=closed_loop, guardrail=guardrail, eps=eps,
+                         stim_loop=stim_loop, **kwargs)
+        self.K_kin = int(K_kin)
+        self.n_dist, self.n_dt = int(n_dist), int(n_dt)
+        self.contain = bool(contain)
+        self.contain_fish, self.contain_w_occ = int(contain_fish), float(contain_w_occ)
+        # Ported from the kin lineage so the treatments can be compared like-for-like.
+        # vigor      = per-trajectory intercept (+ optional slow AR drift) on the EMITTED step/interval.
+        # kin_fb_calib = shrink the kinematic history on read, damping the free-run over-persistence.
+        self.vigor, self.vigor_drift_calib = bool(vigor), bool(vigor_drift_calib)
+        self.kin_fb_calib = bool(kin_fb_calib)
+        # indiv      = per-trajectory turning style + spatial preference (the channels vigor misses)
+        # innov_comp = restore the spread kin_feedback removes, without disturbing the acf
+        self.indiv, self.innov_comp = bool(indiv), bool(innov_comp)
+        # dt_snap  = quantise the EMITTED interval to the 1/30 s camera lattice (MB.snap_dt)
+        # psi_ref  = angular reference of the border bearing: 'ori' (archived behaviour, raw body
+        #            orientation) or 'travel' (previous travel heading -- the frame the closed
+        #            loop actually queries). phi_ref = the same choice for the dot bearing.
+        self.dt_snap = bool(dt_snap)
+        self.psi_ref, self.phi_ref = str(psi_ref), str(phi_ref)
+        # K_stim = how many stimulus ONSETS the net sees (1 = the current snapshot only, i.e.
+        #          every archived arm; 3 = plus the two previous presentations). MB._stimhist_block.
+        # noise_aug = pose-perturbed training pairs with the target corrected back to the truth
+        #          (dict: sigma_pos px, sigma_ori deg, mode 'concat'|'mask', frac). None = off.
+        # contain_mode = 'bias' (the archived shell-gated centre_bias) or 'reject' (shallow-border
+        #          rejection replaces the SHELL ramp; the bulk term stays a fitted knob with 0 in
+        #          its grid, so the search decides whether any turn bias is needed at all).
+        self.K_stim = int(K_stim)
+        self.noise_aug = dict(noise_aug) if noise_aug else None
+        self.contain_mode = str(contain_mode)
+        self.use_kin = True
+
+    def fit(self, train_records, ctx):
+        c = ctx.cfg
+        self.K = int(c.get("mlp_K", self.K))
+        self.stim_mode = c.get("mlp_stim_mode", self.stim_mode)
+        self.hidden = int(c.get("mlp_hidden", self.hidden))
+        # epochs_override / patience_override are how colab_run_ladder's --force-epochs runs a PAIRED
+        # budget contrast inside one select. They were read only from ctx.cfg here, so they never
+        # reached any joint rung and a budget ladder silently ran both arms at the same budget.
+        # Same precedence as MLPMixKinDensity.fit (fit_MLP_mix.py:1552).
+        self.epochs = int(getattr(self, "epochs_override", None)
+                          if getattr(self, "epochs_override", None) is not None
+                          else c.get("mlp_epochs", self.epochs))
+        self.patience = int(getattr(self, "patience_override", None)
+                            if getattr(self, "patience_override", None) is not None
+                            else c.get("mlp_patience", self.patience))
+        self.lr = float(c.get("mlp_lr", self.lr))
+        self._dt_pool, self._dist_pool = ctx.dt_pool, ctx.dist_pool
+        self._rich_scales = ctx.rich_scales
+        alld = np.concatenate([r.dtheta for r in train_records])
+        self._dth_scale = float(max(np.std(alld), 1.0))
+        adist = np.concatenate([r.distance_px for r in train_records])
+        adist = adist[np.isfinite(adist) & (adist > 0)]
+        adt = np.concatenate([r.dt_s for r in train_records]); adt = adt[np.isfinite(adt) & (adt > 0)]
+        self._kin_scales = (float(np.log(adist).mean()), float(max(np.log(adist).std(), 1e-3)),
+                            float(np.log(adt).mean()), float(max(np.log(adt).std(), 1e-3)))
+        self._kin_clip = (float(np.quantile(adist, 0.999)), float(np.quantile(adt, 0.999)))
+        # use_kin=True is the whole point: ONE x carrying turn history, stimulus, border AND
+        # kinematic history. joint=True tells the shared calibrators which generator to use.
+        self._cfg_feat = dict(K=self.K, stim_mode=self.stim_mode, include_symbols=self.include_symbols,
+                              dth_scale=self._dth_scale, rich_scales=self._rich_scales,
+                              use_border=self.use_border, border_mode=self.border_mode,
+                              wall_mode=self.wall_mode, use_adapt=False, adapt_lambda=0.6,
+                              use_kin=True, joint=True, kin_scales=self._kin_scales,
+                              K_kin=self.K_kin, kin_clip=self._kin_clip,
+                              n_dist=self.n_dist, n_dt=self.n_dt,
+                              dt_snap=self.dt_snap, psi_ref=self.psi_ref, phi_ref=self.phi_ref,
+                              K_stim=self.K_stim)
+        if self.noise_aug:
+            self._cfg_feat["noise_aug"] = dict(self.noise_aug)
+        X = np.concatenate([MB.build_feature_matrix(r, self._cfg_feat) for r in train_records], 0)
+        y_ang = np.concatenate([r.dtheta for r in train_records])
+        y_dist = np.concatenate([np.asarray(r.distance_px, float) for r in train_records])
+        y_dt = np.concatenate([np.asarray(r.dt_s, float) for r in train_records])
+        self._model, self.history = fit_mix_joint(
+            X, y_ang, y_dist, y_dt, self.hidden, self._dth_scale, self._kin_scales,
+            epochs=self.epochs, lr=self.lr, patience=self.patience,
+            batch_size=self.batch_size, seed=self.seed, n_dist=self.n_dist, n_dt=self.n_dt,
+            **_noise_kwargs(self, train_records))
+        # SAME ORDER as MLPMixKinDensity.fit, so the treatments are comparable to the lineage:
+        # vigor -> drift rescale -> kin_feedback -> containment. (The known ordering quirk that the
+        # drift is sized before the shrinkage is preserved deliberately; its impact here is small
+        # because these models have almost no window-level drift of their own to subtract.)
+        if self.vigor:
+            vg = MX._calibrate_vigor(train_records)
+            vg["apply_turn"] = False                     # turn individuality is a separate mechanism
+            self._cfg_feat["vigor"] = vg
+            if self.vigor_drift_calib:
+                MX.MLPMixKinDensity._rescale_vigor_drift(self, train_records)
+        if self.kin_fb_calib:
+            tg, vtg = MX._kin_acf_targets(train_records)
+            kfb, _kvs = MX._search_kin_feedback(
+                self._model, train_records, self._cfg_feat, tg, vtg,
+                closed_loop=self.closed_loop, guardrail=self.guardrail, eps=self.eps,
+                stim_loop=self.stim_loop, seed=self.seed)
+            self._cfg_feat["kin_feedback"] = kfb
+        if self.contain:
+            self._cfg_feat["wall_mode"] = "reflect"
+            self._cfg_feat.update(MX._search_wall(
+                self._model, train_records, self._cfg_feat, mode=self.contain_mode,
+                closed_loop=self.closed_loop, guardrail=self.guardrail, eps=self.eps,
+                stim_loop=self.stim_loop, seed=self.seed,
+                max_fish=self.contain_fish, w_occ=self.contain_w_occ))
+        # innov BEFORE indiv: it changes the per-bout spread that the individuality search then
+        # measures on top of. Both AFTER contain, then contain is RE-FIT, because both widen the
+        # model and movement spread drives wall contact (corr +0.59) while rad_frac_wall is the
+        # top C2ST feature. Not re-fitting is how contain_vc lost.
+        if self.innov_comp:
+            self._cfg_feat["kin_innov"] = MX._search_innov_comp(
+                self._model, train_records, self._cfg_feat,
+                closed_loop=self.closed_loop, guardrail=self.guardrail, eps=self.eps,
+                stim_loop=self.stim_loop, seed=self.seed)
+        if self.indiv:
+            self._cfg_feat["indiv"] = MX._search_indiv(
+                self._model, train_records, self._cfg_feat, MX._indiv_targets(train_records),
+                closed_loop=self.closed_loop, guardrail=self.guardrail, eps=self.eps,
+                stim_loop=self.stim_loop, seed=self.seed)
+        if self.contain and (self.indiv or self.innov_comp):
+            self._cfg_feat.update(MX._search_wall(
+                self._model, train_records, self._cfg_feat, mode=self.contain_mode,
+                closed_loop=self.closed_loop, guardrail=self.guardrail, eps=self.eps,
+                stim_loop=self.stim_loop, seed=self.seed + 1,
+                max_fish=min(self.contain_fish, 8), w_occ=self.contain_w_occ))
+        self.config = dict(mode="joint", hidden=self.hidden, n_features=X.shape[1], K=self.K,
+                           K_kin=self.K_kin, stim_mode=self.stim_mode, use_border=self.use_border,
+                           use_kin=True, n_dist=self.n_dist, n_dt=self.n_dt)
+        return self
+
+    def score(self, rec):
+        """THREE channels. ``logdens`` keeps the angle meaning so every existing consumer is
+        unaffected; the harness picks up the two extra keys and reports them separately.
+
+        Units differ per channel (nats per degree / pixel / second), so the three numbers are not
+        comparable to EACH OTHER in absolute level -- only across models within a channel.
+        """
+        X = MB.build_feature_matrix(rec, self._cfg_feat)
+        a_z, ld_c = _cond_cols(rec.dtheta, rec.distance_px, self._cfg_feat["dth_scale"],
+                               self._cfg_feat["kin_scales"])
+        with torch.no_grad():
+            Xt = torch.tensor(X)
+            ang, dpar, tpar = self._model.joint_forward(Xt, torch.tensor(a_z), torch.tensor(ld_c))
+            logdens = MX.mix_logdens(torch.tensor(rec.dtheta.astype(np.float32)), ang).numpy()
+            yd = torch.tensor(np.asarray(rec.distance_px, np.float32))
+            yt = torch.tensor(np.asarray(rec.dt_s, np.float32))
+            ld = MX._lnk_logpdf(torch.clamp(yd, min=1e-6), *dpar).numpy()
+            lt = MX._lnk_logpdf(torch.clamp(yt, min=1e-6), *tpar).numpy()
+        # Mask EXACTLY the bouts the training loss masks (`isfinite & > 0`), so the reported
+        # likelihood is over the same support the model was fitted on. This is not cosmetic: 10
+        # of the 70590 bouts have distance exactly 0, and a log-normal evaluated at the 1e-6 clamp
+        # returns about -850 nats. Ten such bouts would move a fish's bits/bout by ~0.26 bits --
+        # small enough to look like a real effect and entirely an artefact.
+        dv = np.asarray(rec.distance_px, float); tv = np.asarray(rec.dt_s, float)
+        ld = np.where(np.isfinite(dv) & (dv > 0), ld, np.nan)
+        lt = np.where(np.isfinite(tv) & (tv > 0), lt, np.nan)
+        params = MX.predict_params_mix(self._model, X)
+        return dict(logdens=logdens, symbol_logq=MX.symbol_logq_mix(*params),
+                    logdens_dist=ld, logdens_dt=lt)
+
+    def sample(self, rec, rng, **kw):
+        # **kw forwards the tool-mode knobs (stim_provider / stop_time_s / keep_features); the
+        # harness only ever calls sample(rec, rng), so the adapter contract is unchanged.
+        return generate_mix_joint_loop(self._model, rec, self._cfg_feat, rng,
+                                       closed_loop=self.closed_loop, guardrail=self.guardrail,
+                                       eps=self.eps, stim_loop=self.stim_loop, **kw)
+
+
+def save_joint(model, path):
+    """Persist a fitted joint model. Mirrors ``MX.save_mix``; kept separate because the net has a
+    different head layout and ``load_mix`` rebuilds from ``config``."""
+    if not hasattr(model, "_model"):
+        raise RuntimeError("model is not fitted; call .fit(...) before save_joint")
+    torch.save(dict(cls="MLPMixJointDensity", state_dict=model._model.state_dict(),
+                    n_features=int(model.config["n_features"]), hidden=int(model.config["hidden"]),
+                    cfg_feat=model._cfg_feat, config=model.config, name=model.name,
+                    dt_pool=np.asarray(model._dt_pool), dist_pool=np.asarray(model._dist_pool),
+                    history=getattr(model, "history", None),
+                    K=model.K, K_kin=model.K_kin, stim_mode=model.stim_mode,
+                    include_symbols=model.include_symbols, use_border=model.use_border,
+                    border_mode=model.border_mode, wall_mode=model._cfg_feat.get("wall_mode", "clip"),
+                    n_dist=model.n_dist, n_dt=model.n_dt,
+                    vigor=model.vigor, vigor_drift_calib=model.vigor_drift_calib,
+                    kin_fb_calib=model.kin_fb_calib,
+                    indiv=model.indiv, innov_comp=model.innov_comp,
+                    K_stim=int(getattr(model, "K_stim", 1)),
+                    noise_aug=getattr(model, "noise_aug", None),
+                    contain_mode=str(getattr(model, "contain_mode", "bias")),
+                    loop=dict(closed_loop=model.closed_loop, guardrail=model.guardrail,
+                              eps=model.eps, stim_loop=model.stim_loop)), path)
+    return path
+
+
+def load_joint(path, map_location="cpu"):
+    """Reload a joint model saved by ``save_joint``, ready to ``.sample`` / ``.score``."""
+    MX._numpy2_unpickle_compat()
+    try:
+        blob = torch.load(path, map_location=map_location, weights_only=False)
+    except TypeError:
+        blob = torch.load(path, map_location=map_location)
+    lp = blob["loop"]
+    m = MLPMixJointDensity(K=blob["K"], K_kin=blob["K_kin"], stim_mode=blob["stim_mode"],
+                           include_symbols=blob["include_symbols"], hidden=blob["hidden"],
+                           use_border=blob["use_border"], border_mode=blob["border_mode"],
+                           wall_mode=blob.get("wall_mode", "clip"),
+                           closed_loop=lp["closed_loop"], guardrail=lp["guardrail"],
+                           eps=lp["eps"], stim_loop=lp["stim_loop"],
+                           n_dist=blob["n_dist"], n_dt=blob["n_dt"])
+    net = MDNMixJoint(blob["n_features"], blob["hidden"], n_dist=blob["n_dist"], n_dt=blob["n_dt"])
+    net.load_state_dict(blob["state_dict"]); net.eval()
+    m._model = net
+    m._cfg_feat = blob["cfg_feat"]
+    m._rich_scales = blob["cfg_feat"].get("rich_scales")
+    m._dt_pool = blob["dt_pool"]; m._dist_pool = blob["dist_pool"]
+    m.config = blob["config"]; m.name = blob["name"]; m.history = blob.get("history")
+    m._dth_scale = blob["cfg_feat"]["dth_scale"]; m._kin_scales = blob["cfg_feat"]["kin_scales"]
+    # Restore the treatment flags (mirrors load_fishre). Generation/scoring read _cfg_feat and
+    # are correct either way, but a re-save or a refit of the loaded object reads THESE -- a
+    # psit/dt_snap checkpoint refit without them would silently train an 'ori'-frame, unsnapped
+    # model under the same name.
+    for _f in ("vigor", "vigor_drift_calib", "kin_fb_calib", "indiv", "innov_comp"):
+        if _f in blob:
+            setattr(m, _f, bool(blob[_f]))
+    m.contain = m._cfg_feat.get("centre_bias") is not None
+    m.dt_snap = bool(m._cfg_feat.get("dt_snap", False))
+    m.psi_ref = str(m._cfg_feat.get("psi_ref", "ori"))
+    m.phi_ref = str(m._cfg_feat.get("phi_ref", "ori"))
+    # Read the new treatments from cfg_feat first (it is the object generation actually uses) and
+    # fall back to the top-level keys, so a checkpoint written before these existed still loads.
+    m.K_stim = int(m._cfg_feat.get("K_stim", blob.get("K_stim", 1)))
+    m.noise_aug = m._cfg_feat.get("noise_aug", blob.get("noise_aug"))
+    m.contain_mode = str(blob.get("contain_mode",
+                                  "reject" if m._cfg_feat.get("wall_reject") else "bias"))
+    return m

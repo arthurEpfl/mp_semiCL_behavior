@@ -6,8 +6,10 @@ dependencies = [
     "torch>=2.4",
     "pandas>=2.2",
     "numpy>=2.0",
+    "scipy>=1.11",           # segment_bouts (find_peaks, gaussian_filter1d), evaluate, fit_MLP*
     "scikit-learn>=1.5",
     "matplotlib>=3.9",
+    "imageio-ffmpeg>=0.5",   # bundled ffmpeg so .mp4 works with no system install
     "seaborn>=0.13",
     "ipython>=8.0",
 ]

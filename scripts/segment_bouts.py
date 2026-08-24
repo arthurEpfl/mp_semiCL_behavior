@@ -337,6 +337,81 @@ def flag_near_wall(bouts, frac=0.95):
     return bouts
 
 
+def load_physical_dish(path):
+    """Physical dish geometry per fish from the RAW ROIdef, mapped into this
+    transformed (y-flipped) frame: centre = (x - xoff, diameter - (y - yoff)),
+    radius unchanged. Row i corresponds to fish i. This is the TRUE 100 mm dish
+    wall -- distinct from data/data/ROIdef.csv, whose radius is each fish's own
+    99.5th-percentile excursion (trajectory-derived)."""
+    roi = pd.read_csv(path, header=None,
+                      names=["xoff", "yoff", "diameter", "x", "y", "radius"])
+    roi["cx"] = roi["x"] - roi["xoff"]
+    roi["cy"] = roi["diameter"] - (roi["y"] - roi["yoff"])
+    return roi[["cx", "cy", "radius"]]
+
+
+def add_dist_to_border(bouts, dish):
+    """Add distance-to-nearest-border features (PIXEL-NATIVE, scale-free):
+      dist_to_border_px   = R - r        (px; ~0 at the wall, ~R at the centre)
+      dist_to_border_norm = (R - r) / R  (1 at the centre -> 0 at the wall)
+    where r = distance from the physical dish centre and R = the physical radius
+    (per fish, from load_physical_dish). No mm conversion: the normalised column
+    is exact and unit-free (a ratio of two pixel lengths); for a rough mm read
+    multiply the px column by 1 / PX_PER_MM."""
+    bouts = bouts.copy()
+    cx = bouts["fish_id"].map(dish["cx"])
+    cy = bouts["fish_id"].map(dish["cy"])
+    R = bouts["fish_id"].map(dish["radius"])
+    r = np.hypot(bouts["x_px"] - cx, bouts["y_px"] - cy)
+    bouts["dist_to_border_px"] = (R - r).astype(float)
+    bouts["dist_to_border_norm"] = ((R - r) / R).astype(float)
+    return bouts
+
+
+R0_MM = 20.0     # proximity softening (mm); matches fit_hmm_stim retinal-size weight
+
+
+def add_dist_to_dot(bouts, transformed_dir=Path("data/data/df_transformed"),
+                    n_stimuli=8, r0_mm=R0_MM):
+    """Add per-bout ACTIVE-DOT geometry, looked up from the per-frame transformed CSVs by
+    ``frame_onset`` (the stimulus analogue of ``add_dist_to_border``):
+      dot_cx, dot_cy  = active-dot CENTROID position (px, transformed frame) at bout onset
+      dot_dist_px     = distance from the fish onset pose (x_px,y_px) to that centroid
+      dot_prox        = 1/(1 + (dot_dist_px/PX_PER_MM)/r0_mm)   retinal-size / proximity weight
+    Left NaN where no dot is active at the bout onset. Reuses the active-dot rule (``STIM_NONE``)
+    and the centroid convention from ``stim_angle_at``. Distance uses the bout's own ``x_px,y_px``
+    so it is consistent with the pose the models seed/roll out from."""
+    bouts = bouts.copy()
+    for c in ("dot_cx", "dot_cy", "dot_dist_px", "dot_prox"):
+        bouts[c] = np.nan
+    tdir = Path(transformed_dir)
+    for fid, grp in bouts.groupby("fish_id"):
+        cands = sorted(tdir.glob(f"*_f{int(fid)}_transformed_abs.csv"))
+        if not cands:
+            continue
+        fdf = pd.read_csv(cands[0]).sort_values("frame").reset_index(drop=True)
+        row_of = {int(f): i for i, f in enumerate(fdf["frame"].to_numpy(int))}
+        DX = np.stack([fdf[f"d{k}_x"].to_numpy(float) for k in range(n_stimuli)], axis=1)
+        DY = np.stack([fdf[f"d{k}_y"].to_numpy(float) for k in range(n_stimuli)], axis=1)
+        ACT = np.stack([(~fdf[f"d{k}_stim"].astype(str).isin(STIM_NONE).to_numpy())
+                        & np.isfinite(DX[:, k]) for k in range(n_stimuli)], axis=1)
+        for idx, fo in grp["frame_onset"].items():
+            i = row_of.get(int(fo))
+            if i is None:
+                continue
+            m = ACT[i]
+            if not m.any():
+                continue
+            cx = float(np.mean(DX[i][m])); cy = float(np.mean(DY[i][m]))
+            d = float(np.hypot(float(bouts.at[idx, "x_px"]) - cx,
+                               float(bouts.at[idx, "y_px"]) - cy))
+            bouts.at[idx, "dot_cx"] = cx
+            bouts.at[idx, "dot_cy"] = cy
+            bouts.at[idx, "dot_dist_px"] = d
+            bouts.at[idx, "dot_prox"] = 1.0 / (1.0 + (d / PX_PER_MM) / r0_mm)
+    return bouts
+
+
 # -------------------------------- driver ------------------------------------ #
 def main():
     p = argparse.ArgumentParser(description=__doc__,
@@ -354,6 +429,10 @@ def main():
                    help="Bout onset placement: 'trough' = local speed minimum before "
                         "the peak (physical bout start, default); 'lead' = Le Goc literal "
                         "80 ms before the peak.")
+    p.add_argument("--roi-physical", type=Path,
+                   default=Path("data/data/Original_data/ROIdef2025-02-20T12_09_16.csv"),
+                   help="RAW physical ROIdef (true 100 mm dish geometry) used for the "
+                        "dist_to_border feature. Skipped with a warning if absent.")
     args = p.parse_args()
 
     csvs = sorted(args.input.glob("*_transformed_abs.csv"))
@@ -379,6 +458,11 @@ def main():
     if bouts.empty:
         raise SystemExit("No bouts detected -- lower --speed-thresh-k.")
     bouts = flag_near_wall(bouts)
+    if args.roi_physical.exists():
+        bouts = add_dist_to_border(bouts, load_physical_dish(args.roi_physical))
+        print(f"  dist_to_border added (physical dish: {args.roi_physical.name})")
+    else:
+        print(f"  WARNING: {args.roi_physical} not found -- dist_to_border columns skipped.")
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     bouts.to_csv(args.output, index=False)

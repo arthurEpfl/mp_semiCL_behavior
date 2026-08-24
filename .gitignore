@@ -7,8 +7,36 @@ __pycache__/
 # Data and run artifacts (large, not versioned)
 data/
 runs/
+tool_videos/
 abs_dict.pkl
 *.pkl
+
+# Research artifacts: trained checkpoints, ladder result archives and their extracted
+# directories. These are large and reproducible; only the one shipped model is versioned.
+*.pt
+!assets/models/*.pt
+*_results.zip
+*_out/
+data.zip
+colab_bundle.zip
+artifacts.pkl
+
+# Write-up material (large binaries, not part of the code)
+Presentation/
+MasterThesis.pdf
+*.ipynb.bak
+
+# Superseded legacy notebooks: the old per-frame `src/` pipeline, replaced by the bout-level
+# pipeline in scripts/. Untracked (not deleted) -- they still exist in git history and, for
+# whoever has them, on disk.
+notebooks/NN_overfit_1_fish.ipynb
+notebooks/NN_overfit_1_trial_moving.ipynb
+notebooks/NN_all_data.ipynb
+notebooks/prediction/
+notebooks/evaluate.ipynb
+
+# Local tooling config
+.claude/
 
 # Virtual environments
 .venv/

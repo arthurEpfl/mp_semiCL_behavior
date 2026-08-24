@@ -40,6 +40,7 @@ Usage
 
 import argparse
 import math
+import os
 import sys
 from pathlib import Path
 
@@ -59,6 +60,99 @@ ALPHA_MIN = H.ALPHA_MIN       # 1.0  (Gamma shape floor, paper constraint)
 EPS = H.EPS                   # 1e-12
 LOG2PI = math.log(2 * math.pi)
 
+# ------------------- 'shoal' stimulus block constants ----------------------- #
+# Non-monotone RANGE tuning x group SIZE x MOTION. Real fish steer toward the shoal
+# most strongly at 55-90 px (centroid distance), weakly beyond ~120 px, and REVERSE
+# below ~25 px; a monotone proximity weight (the old 'dot' block's 1/(1+r/20))
+# cannot represent a peak or a sign change, which is why 'dot'/'dotb' both give a
+# flat range profile in free-run.
+SHOAL_RBF_PX = (25.0, 50.0, 90.0, 160.0)     # basis knots, px (centroid distance)
+SHOAL_RBF_W = 0.40                            # basis width, natural-log units
+SHOAL_R_REF = 70.0                            # rz pivot, px
+SHOAL_R_OCT = float(np.log(4.0))              # rz scale: +-1 == +-2 octaves
+SHOAL_R_MIN = 2.0                             # px floor (r reaches 0.64 px in the data)
+SHOAL_N_MAX = 8.0                             # largest group size
+SHOAL_COLS = ("act", "moving", "nz", "rz",
+              "gs1", "gs2", "gs3", "gs4",
+              "gc1", "gc2", "gc3", "gc4",
+              "gns1", "gns2", "gns3", "gns4",
+              "mv_sin", "mv_cos")                                  # 18
+SHOALR_COLS = ("act", "moving", "rz",
+               "gs1", "gs2", "gs3", "gs4",
+               "gc1", "gc2", "gc3", "gc4",
+               "mv_sin", "mv_cos")                                 # 13 (range-only ablation)
+# FAR-FIELD variant. With knots at (25,50,90,160) the softmax basis saturates beyond the outermost
+# knot -- ghat_4 -> 1 as r grows -- so the model cannot distinguish 160 px from 400 px and whatever
+# pull it learned at the last knot persists indefinitely. Measured consequence: the generated
+# restoring force is -3.4 px/bout beyond 120 px where real fish are at -0.53, i.e. it keeps hauling
+# itself toward the shoal from any distance. Real fish-to-shoal range reaches 280 px at q99, so an
+# extra knot there gives the head the resolution to LEARN the far-field back-off instead of having
+# a taper imposed on it.
+SHOALF_RBF_PX = (25.0, 50.0, 90.0, 160.0, 280.0)
+SHOALF_COLS = ("act", "moving", "nz", "rz",
+               "gs1", "gs2", "gs3", "gs4", "gs5",
+               "gc1", "gc2", "gc3", "gc4", "gc5",
+               "gns1", "gns2", "gns3", "gns4", "gns5",
+               "mv_sin", "mv_cos")                                 # 21
+_SHOAL_LC = np.log(np.asarray(SHOAL_RBF_PX, float))
+_SHOALF_LC = np.log(np.asarray(SHOALF_RBF_PX, float))
+
+
+def shoal_cols(stim_mode):
+    """Canonical column names for the shoal modes -- the single source of truth."""
+    return {"shoal": SHOAL_COLS, "shoalf": SHOALF_COLS}.get(stim_mode, SHOALR_COLS)
+
+
+def shoal_channels(phi, r_px, n_dots, moving, use_n=True, far=False):
+    """(n, 18) -- or (n, 13) when ``use_n`` is False -- 'shoal' stimulus channels.
+
+    Column order is ``SHOAL_COLS`` / ``SHOALR_COLS``. Vectorised AND scalar-safe, so
+    ``_stim_block`` (record arrays, train/score time) and ``fit_MLP_mix._dot_stim_row``
+    (ONE row rebuilt from the GENERATED pose during closed-loop rollout) share this
+    single code path -- the by-hand column-order hazard cannot reappear for this mode.
+
+    phi     egocentric bearing to the ACTIVE-DOT CENTROID (rad, + = fish's left);
+            NaN when no dot is active.
+    r_px    fish-to-centroid distance (px); NaN when no dot is active.
+    n_dots  N = n_dots_left + n_dots_right, a block constant in {1,2,4,6,8}; 0 off-block.
+    moving  1.0 on moving-stimulus bouts (block constant).
+
+    Every channel is exactly 0.0 on no-stimulus bouts and bounded O(1) by construction,
+    so no leak-free scale fitting is needed (``rich_scales`` stays unused).
+    """
+    phi = np.atleast_1d(np.asarray(phi, float))
+    r = np.atleast_1d(np.asarray(r_px, float))
+    N = np.atleast_1d(np.nan_to_num(np.asarray(n_dots, float)))
+    mv = np.atleast_1d(np.nan_to_num(np.asarray(moving, float)))
+    act = np.isfinite(phi) & np.isfinite(r) & (r > 0.0)
+    s = np.where(act, np.sin(np.nan_to_num(phi)), 0.0)
+    c = np.where(act, np.cos(np.nan_to_num(phi)), 0.0)
+    # log-range, floored; off-dot rows are parked at the pivot then zeroed by `act`
+    lr = np.log(np.where(act, np.clip(r, SHOAL_R_MIN, None), SHOAL_R_REF))
+    nz = np.where(act, np.log2(np.clip(N, 1.0, None)) / np.log2(SHOAL_N_MAX), 0.0)
+    rz = np.where(act, np.clip((lr - np.log(SHOAL_R_REF)) / SHOAL_R_OCT, -1.0, 1.0), 0.0)
+    # softmax-normalised basis: sum_j ghat_j == 1, so the gain profile FLAT-extrapolates
+    # outside the knots (raw Gaussians would force gain -> 0 at both ends, wrong at the
+    # near end where a sustained NEGATIVE gain is required) and sum_j g*sin == sin exactly,
+    # which is why raw sin/cos are redundant and omitted.
+    _lc = _SHOALF_LC if far else _SHOAL_LC
+    z = -0.5 * ((lr[:, None] - _lc[None, :]) / SHOAL_RBF_W) ** 2             # (n, 4) or (n, 5)
+    z = z - z.max(axis=1, keepdims=True)
+    G = np.exp(z)
+    G = G / G.sum(axis=1, keepdims=True)
+    G = G * act[:, None].astype(float)
+    cols = [act.astype(float)[:, None], mv[:, None]]
+    if use_n:
+        cols.append(nz[:, None])
+    cols += [rz[:, None], G * s[:, None], G * c[:, None]]
+    if use_n:
+        cols.append(G * (nz * s)[:, None])
+    cols += [(mv * s)[:, None], (mv * c)[:, None]]
+    out = np.concatenate(cols, axis=1).astype(float)
+    _exp = (SHOALF_COLS if far else SHOAL_COLS) if use_n else SHOALR_COLS
+    assert out.shape[1] == len(_exp), (out.shape, len(_exp))
+    return out
+
 
 # --------------------------- device / seeding ------------------------------- #
 def _get_device():
@@ -71,9 +165,34 @@ def _get_device():
     return torch.device("cpu")
 
 
-def _seed_everything(seed):
+def _seed_everything(seed, deterministic=True):
+    """Seed torch + legacy numpy, and (by default) make CUDA fits REPRODUCIBLE.
+
+    Verified: on CPU two identical-config fits are already bitwise identical, so the code has no
+    RNG leak. But the same config fitted twice on Colab's A100 gave different weights -- held-out
+    bits_per_bout 7.7388 vs 7.7365, which involves no sampling at all and so is a pure function of
+    the weights. That fit-to-fit spread is ~0.003 on c2st_traj, comparable to the ~0.005 rollout
+    SE the paired contrast reports, and the paired-on-replicate contrast treats the fitted model as
+    FIXED so it cannot see it. Any effect below ~0.01 AUC is therefore unresolvable without this.
+
+    cuBLAS matmul reductions use atomics unless a fixed workspace is configured, hence the env var
+    (must be set before the first CUDA context; harmless on CPU).
+    """
     torch.manual_seed(seed)
     np.random.seed(seed)
+    if not deterministic:
+        return
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    cudnn = getattr(torch.backends, "cudnn", None)
+    if cudnn is not None:
+        cudnn.deterministic = True
+        cudnn.benchmark = False          # benchmark autotunes per run -> different algorithms
+    try:
+        torch.use_deterministic_algorithms(True, warn_only=True)
+    except Exception:
+        pass
 
 
 def _inv_softplus(y):
@@ -103,9 +222,25 @@ def _symbol_block(symbol, K):
     return S
 
 
-def _stim_block(rec, stim_mode, rich_scales):
-    """(n, s_dim) stimulus features from FishRecord fields only (teacher-forceable)."""
+def _stim_block(rec, stim_mode, rich_scales, phi_ref="ori"):
+    """(n, s_dim) stimulus features from FishRecord fields only (teacher-forceable).
+
+    ``phi_ref='travel'`` reads the dot bearing referenced to the PREVIOUS travel heading
+    (``rec.stim_angle_travel``, exact absolute-bearing recovery in ``build_border_records``)
+    instead of the raw body orientation -- matching the frame the closed-loop generator's
+    per-bout recompute (``MX._dot_stim_row``) actually uses. Default = old behaviour."""
     n = rec.n
+    if phi_ref == "travel" and stim_mode not in ("dot", "dotb", "shoal", "shoalr", "shoalf"):
+        raise ValueError(f"phi_ref='travel' is not supported for stim_mode {stim_mode!r}")
+    _phi = None
+    if stim_mode in ("dot", "dotb", "shoal", "shoalr", "shoalf"):
+        if phi_ref == "travel":
+            if getattr(rec, "stim_angle_travel", None) is None:
+                raise RuntimeError("phi_ref='travel' needs rec.stim_angle_travel "
+                                   "(bouts CSV via fit_MLP_border.build_border_records).")
+            _phi = np.asarray(rec.stim_angle_travel, float)
+        else:
+            _phi = np.asarray(rec.stim_angle, float)
     if stim_mode == "none":
         return np.zeros((n, 0))
     if stim_mode == "simple":
@@ -116,6 +251,45 @@ def _stim_block(rec, stim_mode, rich_scales):
                                "(build_records with abs_dict & roi).")
         scales = rich_scales if rich_scales is not None else 1.0
         return (np.asarray(rec.u_raw, float) / scales).astype(float)   # (n,5) standardised
+    if stim_mode == "rich_csv":
+        if rec.stim_csv is None:
+            raise RuntimeError("stim_mode='rich_csv' needs rec.stim_csv "
+                               "(build_records reads the CSV stimulus columns).")
+        return np.asarray(rec.stim_csv, float)   # (n,7) already normalised & bounded, from CSV
+    if stim_mode == "dot":
+        # proximity-weighted egocentric bearing to the active-dot centroid, present on ALL
+        # active-dot bouts (moving AND static -- unlike `simple`, which is sin(phi) on moving
+        # bouts only). Built from the Phase-1 dot geometry (add_dot_geometry.py); NaN->0 off-dot.
+        if getattr(rec, "dot_prox", None) is None:
+            raise RuntimeError("stim_mode='dot' needs rec.dot_prox "
+                               "(run scripts/add_dot_geometry.py, then build_border_records).")
+        phi = _phi
+        g = np.nan_to_num(np.asarray(rec.dot_prox, float))            # proximity weight, 0 off-dot
+        s = np.nan_to_num(np.sin(phi)); c = np.nan_to_num(np.cos(phi))  # 0 where no active dot
+        mv = np.asarray(rec.moving, float)
+        return np.stack([s, c, g * s, g * c, g, mv], axis=1).astype(float)   # (n, 6)
+    if stim_mode == "dotb":
+        # bearing-only ablation of 'dot': [sin φ, cos φ, moving] present on ALL active-dot bouts
+        # (moving AND static) -- unlike `simple` (sin φ on moving bouts only). Drops the proximity
+        # channels to isolate whether they were what worsened abs_dtheta_w1. Needs only rec.stim_angle
+        # + rec.moving (no Phase-1 dot geometry required).
+        phi = _phi
+        s = np.nan_to_num(np.sin(phi)); c = np.nan_to_num(np.cos(phi))
+        mv = np.asarray(rec.moving, float)
+        return np.stack([s, c, mv], axis=1).astype(float)   # (n, 3)
+    if stim_mode in ("shoal", "shoalr", "shoalf"):
+        # Non-monotone RANGE tuning (softmax basis on log r) x group SIZE x MOTION, all
+        # from bouts-CSV columns only. 'shoalr' is the range-only ablation (drops N).
+        # Unlike 'dot', the range channels are signed-free -- the net may learn a NEGATIVE
+        # near-field gain, which the measured close-range turn-away requires.
+        if getattr(rec, "dot_dist_px", None) is None or getattr(rec, "n_dots", None) is None:
+            raise RuntimeError(f"stim_mode={stim_mode!r} needs rec.dot_dist_px and rec.n_dots "
+                               "(run scripts/add_dot_geometry.py, then "
+                               "fit_MLP_border.build_border_records).")
+        return shoal_channels(_phi, rec.dot_dist_px, rec.n_dots,
+                              np.asarray(rec.moving, float),
+                              use_n=(stim_mode != "shoalr"),
+                              far=(stim_mode == "shoalf"))       # (n, 18/13/21)
     raise ValueError(f"unknown stim_mode {stim_mode!r}")
 
 
@@ -127,7 +301,8 @@ def build_feature_matrix(rec, cfg_feat):
     blocks = [_history_block(rec.dtheta, cfg_feat["K"], cfg_feat["dth_scale"])]
     if cfg_feat["include_symbols"]:
         blocks.append(_symbol_block(rec.symbol, cfg_feat["K"]))
-    blocks.append(_stim_block(rec, cfg_feat["stim_mode"], cfg_feat["rich_scales"]))
+    blocks.append(_stim_block(rec, cfg_feat["stim_mode"], cfg_feat["rich_scales"],
+                              phi_ref=cfg_feat.get("phi_ref", "ori")))
     return np.concatenate(blocks, axis=1).astype(np.float32)
 
 
@@ -337,7 +512,8 @@ def generate_mlp(model, rec, cfg_feat, dt_pool, dist_pool, rng):
     n = rec.n
     K = cfg_feat["K"]
     dth_scale = cfg_feat["dth_scale"]
-    stim = _stim_block(rec, cfg_feat["stim_mode"], cfg_feat["rich_scales"])  # teacher-forced
+    stim = _stim_block(rec, cfg_feat["stim_mode"], cfg_feat["rich_scales"],
+                       phi_ref=cfg_feat.get("phi_ref", "ori"))  # teacher-forced
     fwd = _numpy_predictor(model)
     dth = np.zeros(n)
     for t in range(n):
@@ -364,6 +540,7 @@ def generate_mlp(model, rec, cfg_feat, dt_pool, dist_pool, rng):
             dth[t] = -rng.gamma(aL, tL)
         else:
             dth[t] = +rng.gamma(aR, tR)
+        dth[t] = float(np.clip(dth[t], -180.0, 180.0))   # bound the fed-back angle (a reorientation is wrap-limited; stops rollout blow-up)
     return dict(dtheta=dth, symbol=E.symbols_from_dtheta(dth),
                 dt_s=rng.choice(dt_pool, size=n), distance_px=rng.choice(dist_pool, size=n))
 
@@ -477,7 +654,7 @@ def main():
     p.add_argument("--output", type=Path, default=Path("data/mlp_basic.pt"))
     p.add_argument("--mode", choices=["basic", "full"], default="basic")
     p.add_argument("--K", type=int, default=5, help="AR history window (bouts)")
-    p.add_argument("--stim-mode", choices=["none", "simple", "rich"], default="simple")
+    p.add_argument("--stim-mode", choices=["none", "simple", "rich", "rich_csv", "dot", "dotb"], default="simple")
     p.add_argument("--include-symbols", action="store_true")
     p.add_argument("--hidden", type=int, default=64)
     p.add_argument("--epochs", type=int, default=60)

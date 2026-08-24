@@ -1,5 +1,73 @@
 # <center> Zebrafish Behavior Modeling 
 
+## Quick start — generate trajectories from a stimulus file
+
+Give the tool a Bonsai **stimulus trajectory file** and a trained model; it simulates fish and
+writes an mp4. No training, no real fish data, nothing to download separately.
+
+```bash
+git clone -b script-workflow https://github.com/arthurEpfl/mp_semiCL_behavior.git
+cd mp_semiCL_behavior
+uv sync                                   # or: pip install -e .
+jupyter lab notebooks/stimulus_tool.ipynb # run top to bottom
+```
+
+Output lands in `tool_videos/`: a 2×3 mp4 (two stimulus blocks × three simulated fish) plus the
+per-frame panel CSVs behind it.
+
+**Cost:** rollouts are fast — about **3 s per simulated fish** over a 175-minute programme. The
+**mp4 is the slow step, ~3.5 minutes**, because it renders 6 panels × 1800 frames; it runs in a
+subprocess so it cannot take down the kernel.
+
+### Using your own stimulus file
+
+Point `TRAJ_FILE` at it in the config cell. It must keep the rig's format: headerless CSV, one row
+per frame at 30 fps, **8 dot slots × 6 fields** in the order `name, x, y, size, color, backg`
+(48 columns), with
+
+- `x`, `y` in **millimetres relative to the fish**, left = positive `x`;
+- `size` 4 when a dot is on, 0 when off, and unused slots written literally as `none,0,0,0,1,0`;
+- block labels matching `CLsemi..._g{L}-{R}_s{sL}-{sR}` (e.g. `CLsemi1800_g4-0_s3.5-3.5`), and
+  `none` for inter-stimulus pauses.
+
+Anything not starting with `CLsemi` is treated as no stimulus. Because the paradigm is
+semi-closed-loop, the dot track is anchored to the *simulated* fish's pose at each block onset — so
+the same file produces a different absolute dot track on every rollout, exactly as it would for a
+different real fish.
+
+### What ships in `assets/` (≈2 MB)
+
+| File | What it is |
+|---|---|
+| `stimulus/…_180min.csv.gz` | An example stimulus programme. This is rig **input** — the experimental design — and contains no animal data. |
+| `ROIdef2025-02-20T12_09_16.csv` | Physical dish geometry. |
+| `models/ladder_b_indiv.pt` | The **J10** model (`mlp_joint_h128_shoal_contain_kfb_vig_indiv`). |
+| `real_reference.npz` | A ~13 kB aggregate summary of the recorded experiment: an occupancy histogram for start poses, plus the real comparison curves. |
+
+The raw recordings (`PositionTxt`, `df_transformed/`, `bouts_GsizeMotionSingle.csv`) are **not**
+published. `real_reference.npz` holds histograms only — no fish identity, no timing, no
+trajectories — which is enough for the tool to place a plausible starting fish and to draw the real
+baseline in the sanity panel. If you do have the full dataset locally under `data/`, the notebook
+detects it and uses it automatically.
+
+The sanity panel's real curves are a **population baseline, not a matched control**: they are
+reusable for any programme whose conditions stay in the recorded vocabulary (N ∈ {1,2,4,6,8},
+moving/static), but a programme with a different *mix* of conditions will shift the marginal
+histograms for compositional reasons. The following-index-by-N panel is robust to that.
+
+### Checking it still works
+
+```bash
+python scripts/smoke_stim_program.py    # 22 checks; needs the full local dataset
+```
+
+---
+
+## The rest of this repository
+
+Below is the original per-frame pipeline (`src/`), which the bout-level pipeline in `scripts/`
+supersedes. It is kept for reference and provenance.
+
 This repository contains pipelines and models used to learn and sample zebrafish trajectories from visual stimuli using a probabilistic neural network.
 
 The code is organized as a modular pipeline covering:
