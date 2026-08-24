@@ -6,11 +6,26 @@ Give the tool a Bonsai **stimulus trajectory file** and a trained model; it simu
 writes an mp4. No training, no real fish data, nothing to download separately.
 
 ```bash
+# 1. install uv if you do not have it  (https://docs.astral.sh/uv/)
+#    macOS/Linux:  curl -LsSf https://astral.sh/uv/install.sh | sh
+#    Windows:      powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+
+# 2. clone
 git clone -b script-workflow https://github.com/arthurEpfl/mp_semiCL_behavior.git
 cd mp_semiCL_behavior
-uv sync                                   # or: pip install -e .
-jupyter lab notebooks/stimulus_tool.ipynb # run top to bottom
+
+# 3. install everything (uv fetches Python 3.13+ itself if needed)
+uv sync
+
+# 4. open the notebook and run it top to bottom
+uv run jupyter lab notebooks/stimulus_tool.ipynb
 ```
+
+`uv run` is what puts the project environment on the path — a bare `jupyter lab` will not see it
+unless you have activated `.venv` yourself.
+
+Without uv: `python -m venv .venv && .venv/bin/pip install -e . && .venv/bin/jupyter lab
+notebooks/stimulus_tool.ipynb` (on Windows use `.venv\Scripts\`). Needs Python ≥ 3.13.
 
 Output lands in `tool_videos/`: a 2×3 mp4 (two stimulus blocks × three simulated fish) plus the
 per-frame panel CSVs behind it.
