@@ -12,6 +12,8 @@ dependencies = [
     "imageio-ffmpeg>=0.5",   # bundled ffmpeg so .mp4 works with no system install
     "seaborn>=0.13",
     "ipython>=8.0",
+    "jupyterlab>=4.0",       # the tool is driven from notebooks/stimulus_tool.ipynb
+    "ipykernel>=6.29",       # kernel for that notebook
 ]
 
 [build-system]
