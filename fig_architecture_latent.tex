@@ -1,0 +1,148 @@
+% =====================================================================
+%  Figure: the per-fish latent (random-effect) variant, MDNMixJointRE.
+%  Companion to fig_architecture.tex -- same chain, plus the latent.
+%
+%  Preamble requirements:
+%      \usepackage{amsmath,amssymb}
+%      \usepackage{graphicx}
+%      \usepackage{tikz}
+%      \usetikzlibrary{arrows.meta,positioning,fit,calc}
+%
+%  Use with:  \input{fig_architecture_latent}
+% =====================================================================
+\begin{figure}[p]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+  font=\footnotesize,
+  >={Stealth[length=2mm,width=1.8mm]},
+  bx/.style    = {draw, rounded corners=2pt, align=center, inner sep=4pt},
+  inp/.style   = {bx, fill=gray!12, minimum height=7mm},
+  bodyb/.style = {bx, fill=blue!10, text width=26mm},
+  bar/.style   = {bx, fill=blue!22, minimum width=6mm, minimum height=84mm, inner sep=1pt},
+  hd/.style    = {bx, fill=orange!14, text width=34mm},
+  dn/.style    = {bx, fill=green!10, draw=green!40!black, text width=52mm},
+  vl/.style    = {bx, fill=gray!15, minimum width=8mm, minimum height=7mm},
+  zbox/.style  = {bx, fill=violet!14, draw=violet!60!black, text width=34mm},
+  note/.style  = {bx, fill=gray!6, draw=gray!55, text width=62mm},
+  add/.style   = {circle, draw, thick, inner sep=0.8pt, fill=white},
+  fl/.style    = {->, semithick, gray!55!black},
+  zl/.style    = {->, semithick, violet!65!black},
+  off/.style   = {->, semithick, gray!50, dashed},
+  lb/.style    = {font=\scriptsize, inner sep=1.5pt},
+]
+
+% ---------------- shared trunk ----------------
+\node[inp]   (x)  at (-6.4, 0) {$x$};
+\node[bodyb] (bd) at (-4.6, 0) {shared body\\$\mathrm{ReLU}(W_x x + b_0)$\\
+                                {\scriptsize Linear $n_{\mathrm{feat}}\!\to\!128$}};
+\node[bar]   (b)  at (-2.4, 0) {\rotatebox{90}{$h$\, \scriptsize(128 units)}};
+
+% ---------------- heads ----------------
+\node[hd] (h1) at (0.1, 3.2) {\textbf{turn head}\\
+  Linear $128 \to 14$\\ input: $h$};
+\node[hd] (h2) at (0.1, 0) {\textbf{travel head}\\
+  Linear $128{+}1 \to 3n_{\mathrm{dist}}$\\ input: $[\,h,\; a\,]$};
+\node[hd] (h3) at (0.1, -3.2) {\textbf{interval head}\\
+  Linear $128{+}2 \to 3n_{\mathrm{dt}}$\\ input: $[\,h,\; a,\; c\,]$};
+
+% ---------------- latent injection points ----------------
+\node[add] (p1) at (2.5,  3.2) {$+$};
+\node[add] (p2) at (2.5,  0)   {$+$};
+\node[add] (p3) at (2.5, -3.2) {$+$};
+
+% ---------------- conditional densities ----------------
+\node[dn] (d1) at (5.7, 3.2) {$p_\phi(\Delta\theta \mid x, z)$\\[2pt]
+  {\scriptsize $= w_0(z)\,\mathcal{N}(0,\sigma_F^2)
+   + \sum_{k=1}^{2} w_{Lk}(z)\,\Gamma(-\Delta\theta;\alpha_{Lk},\theta_{Lk})$\\
+   $\phantom{=}+ \sum_{k=1}^{2} w_{Rk}(z)\,\Gamma(+\Delta\theta;\alpha_{Rk},\theta_{Rk})$\\[2pt]
+   $w = \mathrm{softmax}\bigl(u_0 + \lambda_\theta^{\!\top} z,\; u_1,\dots,u_4\bigr)$\\
+   \emph{the forward logit only; the Gammas are untouched}}};
+\node[dn] (d2) at (5.7, 0) {$p_\phi(\ell \mid x, |\Delta\theta|, z)$\\[2pt]
+  {\scriptsize $= \sum_{j=1}^{n_{\mathrm{dist}}} w_j\,
+   \mathrm{LogN}\bigl(\mu_j + \lambda_\ell^{\!\top} z,\; \sigma_j^2\bigr)$\\[2pt]
+   \emph{one common shift of every component:}\\
+   \emph{median step $\times\, e^{\lambda_\ell^{\top} z}$}}};
+\node[dn] (d3) at (5.7, -3.2) {$p_\phi(\tau \mid x, |\Delta\theta|, \ell, z)$\\[2pt]
+  {\scriptsize $= \sum_{j=1}^{n_{\mathrm{dt}}} w_j\,
+   \mathrm{LogN}\bigl(\mu_j + \lambda_\tau^{\!\top} z,\; \sigma_j^2\bigr)$\\[2pt]
+   \emph{one common shift of every component:}\\
+   \emph{median interval $\times\, e^{\lambda_\tau^{\top} z}$}}};
+
+% ---------------- emitted values ----------------
+\node[vl] (v1) at (9.4, 3.2)  {$\Delta\theta$};
+\node[vl] (v2) at (9.4, 0)    {$\ell$};
+\node[vl] (v3) at (9.4, -3.2) {$\tau$};
+
+% ---------------- the latent ----------------
+\node[zbox] (z) at (-4.6, -6.6) {\textbf{per-fish latent}\\
+  $z \in \mathbb{R}^{m}$, \; $m = 2$\\
+  $z \sim \mathcal{N}\bigl(0, \mathrm{diag}\,\sigma^2\bigr)$\\[2pt]
+  {\scriptsize $\sigma$ held fixed --- only the product\\
+   (loading $\times$ latent) is identified}};
+
+\node[note] (nt) at (7.0, -6.6) {\textbf{Two regimes for the same $z$}\\[2pt]
+  {\scriptsize \textbf{scoring} --- $z$ is \emph{marginalised}, never fitted per test fish:
+   $p(y_t \mid y_{1:t-1},x) = \int p(y_t \mid x,z)\,p(z \mid y_{1:t-1})\,dz$, evaluated by
+   Gauss--Hermite quadrature on $Q = k^m = 49$ nodes. Since $z$ is static the posterior is
+   the prior times a running product, so the filter is a cumulative sum and
+   $\sum_t \log c_t$ telescopes to $\log p(y_{1:n})$ exactly.\\[2pt]
+   \textbf{sampling} --- one $z$ is drawn from the prior per \emph{trajectory} and held
+   fixed for its whole rollout, so a simulated fish has a stable identity.}};
+
+% ---------------- trunk wiring ----------------
+\draw[fl] (x) -- (bd);
+\draw[fl] (bd) -- (b);
+\draw[fl] (b.east |- h1) -- (h1.west);
+\draw[fl] (b.east |- h2) -- (h2.west);
+\draw[fl] (b.east |- h3) -- (h3.west);
+
+\draw[fl] (h1.east) -- (p1);   \draw[fl] (p1) -- (d1.west);
+\draw[fl] (h2.east) -- (p2);   \draw[fl] (p2) -- (d2.west);
+\draw[fl] (h3.east) -- (p3);   \draw[fl] (p3) -- (d3.west);
+
+\draw[fl] (d1.east) -- (v1.west);
+\draw[fl] (d2.east) -- (v2.west);
+\draw[fl] (d3.east) -- (v3.west);
+
+% ---------------- the latent bus: level-only loadings ----------------
+\draw[zl,-] (z.east) -- (2.5,-6.6);
+\draw[zl] (2.5,-6.6) -- (p3);
+\draw[zl] (p3) -- (p2);
+\draw[zl] (p2) -- (p1);
+\node[lb, fill=white, inner sep=2pt, text=violet!65!black] at (0.0,-6.6) {$z$};
+\node[lb, fill=white, inner sep=2pt, text=violet!65!black] at (2.5,-4.7) {$\lambda_\tau^{\!\top} z$};
+\node[lb, fill=white, inner sep=2pt, text=violet!65!black] at (2.5,-1.7) {$\lambda_\ell^{\!\top} z$};
+\node[lb, fill=white, inner sep=2pt, text=violet!65!black] at (2.5, 1.7) {$\lambda_\theta^{\!\top} z$};
+
+% ---------------- the disabled body path ----------------
+\draw[off] (z.north) -- (bd.south);
+\node[lb, fill=white, text=gray!55!black, align=center, text width=32mm] at (-4.6,-3.1)
+  {$W_z z$ into the body\\ \textbf{off by default}\\
+   {\scriptsize it would reshape every conditional per fish, not shift its level}};
+
+% ---------------- the model statement ----------------
+\node[align=center, font=\small] at (1.6,-8.9)
+  {$p_\phi(\Delta\theta,\ell,\tau \mid x, z)
+    = p_\phi(\Delta\theta \mid x, z)\cdot p_\phi(\ell \mid x,|\Delta\theta|,z)
+    \cdot p_\phi(\tau \mid x,|\Delta\theta|,\ell,z),
+    \qquad z \sim \mathcal{N}(0,\mathrm{diag}\,\sigma^2)$};
+
+\end{tikzpicture}}
+\caption{\textbf{The per-fish latent variant: how individuality enters, and where it does not.}
+The chain of Fig.~\ref{fig:architecture} is unchanged --- the within-bout conditioners $a$ and
+$c$ still run turn $\to$ travel $\to$ interval and are omitted here for clarity. A single
+$m=2$ latent $z$ per fish enters through three \emph{level-only} loadings (violet), each a
+bias-free linear map from $z$ to one scalar. On the turn head it shifts the forward
+component's logit alone, so a fish can be more or less likely to swim straight without
+altering the shape of its turn distribution. On the travel and interval heads it adds a
+common offset to \emph{every} mixture component's log-scale location, which multiplies the
+typical step and pause by $e^{\lambda^{\top} z}$ while leaving the mixture weights and spreads
+intact. The dashed grey path, which would let $z$ enter the shared body, is disabled: with it
+on, 90\,\% of the latent's effect on the turn head flowed through it rather than through the
+level loadings, the pooled marginals degraded, and the arm finished worse than its anchor.
+Because $z$ is a latent with a prior rather than a per-fish parameter, individuality is both
+\emph{fitted} and \emph{scored}: the reported likelihood marginalises $z$ out, so it is
+comparable to a pooled model on the same held-out fish.}
+\label{fig:architecture-latent}
+\end{figure}

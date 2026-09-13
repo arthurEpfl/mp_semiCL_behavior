@@ -89,6 +89,83 @@ class ProgramStimProvider:
         return cx, cy, float(p.moving_of[b]), float(p.n_dots_of[b])
 
 
+class PhysicalStimProvider:
+    """Drive a rollout from a FIXED physical programme (``stim_program.PhysicalProgram``).
+
+    Where :class:`ProgramStimProvider` re-anchors the dot track to each simulated fish, this one
+    hands back the absolute positions real fish N saw at that frame, whoever is swimming. So every
+    rollout on the same programme sees dots in the same places, and differences between rollouts
+    are behaviour rather than stimulus placement -- the point being to isolate individuality.
+
+    Stateless (no anchor to latch), so one instance can serve every rollout. The model still
+    computes bearing and range from its OWN pose, so it reacts honestly to where it actually is.
+    """
+
+    def __init__(self, phys):
+        self.p = phys
+        self.n_calls = 0
+        self.n_out_of_range = 0
+
+    def __call__(self, t, time_s, x, y, h):
+        p = self.p
+        self.n_calls += 1
+        f = p.frame_of(time_s)
+        if f < 0 or f >= p.n_frames:
+            self.n_out_of_range += 1
+            return np.nan, np.nan, 0.0, 0.0
+        b = int(p.block_id[f])
+        if not p.is_stim_of[b] or not np.isfinite(p.cx[f]):
+            return np.nan, np.nan, 0.0, 0.0
+        return p.cx[f], p.cy[f], float(p.moving_of[b]), float(p.n_dots_of[b])
+
+
+class RecordAnchoredProvider:
+    """Re-anchor a REAL record's own stimulus programme to the simulated fish, indexed by BOUT.
+
+    For EVALUATION rollouts (Metric B panel, C2ST windows), which are compared with the real
+    record bout for bout. :class:`ProgramStimProvider` reads the programme at the GENERATED clock,
+    which drifts away from the record's -- a model trained on active bouts never pauses > 10 s --
+    so here the frame for bout ``t`` is the record's own ``rec.frame_onset[t]``: same block, same
+    condition and same dot-track phase as the real fish at that bout, so every mask built from
+    ``rec`` still lines up. What changes is the ANCHOR: on entering a block the SIMULATED fish's
+    pose is latched, exactly as the rig's CLsemi latches each real fish's, so the rollout starts
+    every block at the programme's onset distance instead of wherever the real fish's dots were.
+
+    Without it (the plain ``model.sample(rec, rng)`` path, which replays ``rec.dot_cx``), measured
+    on S3_adt_rej held-out folds: block-onset distance median 121 px vs real 73, and 49.8% of
+    block onsets beyond 121 px against 1.5% real.
+
+    Heading: the rig anchors to the BODY axis; a rollout has none, so the travel heading the
+    generator carries is used (as ProgramStimProvider does). Onset DISTANCE is exact under any
+    heading (a rotation preserves it); the dots' side relative to the travel direction is the
+    approximation, since body axis and travel heading sit a median ~40 deg apart.
+    """
+
+    def __init__(self, program, rec):
+        self.p = program
+        self.fo = np.asarray(rec.frame_onset, int)
+        self.cur_block = -1
+        self.anchor = (np.nan, np.nan, np.nan)
+        self.anchors = {}          # block id -> (ax, ay, aori) actually used
+
+    def __call__(self, t, time_s, x, y, h):
+        p = self.p
+        if t >= len(self.fo):
+            return np.nan, np.nan, 0.0, 0.0
+        f = int(self.fo[t])
+        if f < 0 or f >= p.n_frames:
+            return np.nan, np.nan, 0.0, 0.0
+        b = int(p.block_id[f])
+        if b != self.cur_block:                    # NEW BLOCK -> latch the simulated fish's pose
+            self.cur_block = b
+            self.anchor = (float(x), float(y), float(h))
+            self.anchors[b] = self.anchor
+        if not p.is_stim_of[b]:
+            return np.nan, np.nan, 0.0, 0.0
+        cx, cy = p.centroid(f, self.anchor)
+        return cx, cy, float(p.moving_of[b]), float(p.n_dots_of[b])
+
+
 # --------------------------------------------------------------------------- #
 # A record with no fish behind it
 # --------------------------------------------------------------------------- #
@@ -192,7 +269,7 @@ def sample_start_pose(records, rng, dish):
 # --------------------------------------------------------------------------- #
 # The rollout
 # --------------------------------------------------------------------------- #
-def rollout_program(model, program, rng, start_pose, dish, fish_id=0, n_max=None):
+def rollout_program(model, program, rng, start_pose, dish, fish_id=0, n_max=None, provider=None):
     """Free-run ``model`` over ``program``. Returns the sample dict plus:
 
       ``t_onset_s``   per-bout onset time (s)
@@ -211,7 +288,7 @@ def rollout_program(model, program, rng, start_pose, dish, fish_id=0, n_max=None
     if n_max is None:
         n_max = int(T / _SEC_PER_BOUT_BUDGET) + 100
     rec = make_synthetic_record(n_max, start_pose, dish, fish_id=fish_id)
-    prov = ProgramStimProvider(program)
+    prov = provider if provider is not None else ProgramStimProvider(program)
 
     g = model.sample(rec, rng, stim_provider=prov, stop_time_s=T)
 
@@ -226,7 +303,7 @@ def rollout_program(model, program, rng, start_pose, dish, fish_id=0, n_max=None
     g["last_onset_s"] = float(g["t_onset_s"][-1]) if n_gen else 0.0
     g["frame_onset"] = np.round(g["t_onset_s"] * program.fps).astype(int)
     g["block_id"] = program.block_id[np.clip(g["frame_onset"], 0, program.n_frames - 1)]
-    g["anchors"] = prov.anchors
+    g["anchors"] = getattr(prov, "anchors", {})      # empty for a physical programme
     g["start_pose"] = tuple(float(v) for v in start_pose)
     g["dish"] = tuple(float(v) for v in dish)
     g["program_s"] = float(T)
@@ -267,6 +344,38 @@ def rollout_many(model, program, n_rollouts, seed=0, records=None, dish=None,
             print(f"  rollout {k}: {len(g['dtheta'])} bouts, last onset "
                   f"{g['last_onset_s'] / 60:.2f} of {g['program_s'] / 60:.2f} min "
                   f"(short by {g['program_s'] - g['last_onset_s']:.1f}s), "
+                  f"median dt {np.median(g['dt_s']):.2f}s, max r/R {r.max():.3f}, "
+                  f"{g['wall_s']:.1f}s")
+    return out
+
+
+def rollout_physical_many(model, phys, n_rollouts, seed=0, same_start=True, verbose=True):
+    """``n_rollouts`` synthetic fish on ONE physical programme -- the individuality experiment.
+
+    Both confounds are held fixed by default: every rollout sees the SAME absolute dot track (fish
+    ``phys.fish_id``'s), and every rollout starts from that fish's real start pose in that fish's
+    dish. What is left to vary is the model's own per-trajectory draws (``indiv``/``vigor``) and its
+    emission noise -- so any divergence between rollouts IS the individuality.
+
+    ``same_start=False`` keeps the shared stimulus but lets each rollout start wherever it likes,
+    which re-introduces initial condition as a source of divergence.
+    """
+    prov = PhysicalStimProvider(phys)                 # stateless -> shared across rollouts
+    out = []
+    for k in range(int(n_rollouts)):
+        rng = np.random.default_rng([int(seed), k])
+        pose = phys.start_pose if same_start else (phys.dish[0], phys.dish[1],
+                                                   float(rng.uniform(-np.pi, np.pi)))
+        t0 = time.time()
+        g = rollout_program(model, phys, rng, pose, phys.dish, fish_id=k, provider=prov)
+        g["seed"] = [int(seed), k]
+        g["wall_s"] = time.time() - t0
+        g["physical_fish"] = int(phys.fish_id)
+        out.append(g)
+        if verbose:
+            r = np.hypot(g["x_px"] - phys.dish[0], g["y_px"] - phys.dish[1]) / phys.dish[2]
+            print(f"  rollout {k}: {len(g['dtheta'])} bouts, last onset "
+                  f"{g['last_onset_s'] / 60:.2f} of {g['program_s'] / 60:.2f} min, "
                   f"median dt {np.median(g['dt_s']):.2f}s, max r/R {r.max():.3f}, "
                   f"{g['wall_s']:.1f}s")
     return out

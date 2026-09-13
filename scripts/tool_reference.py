@@ -12,7 +12,8 @@ trajectories, nothing per-individual:
   * ``pose_hist``  3-D count histogram over (u, v, heading) in NORMALISED dish coordinates.
     Joint rather than three marginals, because position and heading are coupled in the real data
     (fish near the wall face inward) and independent marginals would start fish facing the wall.
-  * ``curves``     following index by group size, and binned densities for |dtheta|, dt and r/R.
+  * ``curves``     following index by group size, and binned densities for the three emission
+    heads (|dtheta|, distance, dt) plus the r/R the trajectory ends up with.
 
 ``build_reference`` is run ONCE, locally, by whoever holds the bouts CSV; ``load_reference`` is what
 the notebook calls. See the Data section of the README.
@@ -31,6 +32,11 @@ HIST_BINS = 60
 DTHETA_RANGE = (0.0, 180.0)
 DT_RANGE = (0.0, 6.0)
 RR_RANGE = (0.0, 1.0)
+# Distance is the THIRD emission head and the only one the tool did not plot. Range stops at 60 px
+# (real q99 = 44 px, q99.9 = 85, max 219): the head is heavy-tailed by design, so plotting to the
+# max would put 99% of the mass in the first two bins and hide the bulk, which is where the
+# kin_feedback shrinkage and the dispersion problems actually show.
+DIST_RANGE = (0.0, 60.0)
 POSE_BINS = (32, 32, 16)              # u, v, heading -> 16384 cells, overwhelmingly zero
 
 
@@ -101,6 +107,7 @@ def build_reference(records, out_path):
 
     u_all, v_all, h_all = [], [], []
     d_all, p_all, n_all, m_all, dt_all, rr_all = [], [], [], [], [], []
+    di_all = []
     for r in recs:
         u = (np.asarray(r.x_px, float) - r.dish_cx) / r.dish_R
         v = (np.asarray(r.y_px, float) - r.dish_cy) / r.dish_R
@@ -111,12 +118,14 @@ def build_reference(records, out_path):
         n_all.append(np.asarray(r.n_dots, float))
         m_all.append(np.asarray(r.moving, float))
         dt_all.append(np.asarray(r.dt_s, float))
+        di_all.append(np.asarray(r.distance_px, float))
         rr_all.append(np.hypot(u, v))
     u_all, v_all = np.concatenate(u_all), np.concatenate(v_all)
     h_all = np.concatenate(h_all)
     d_all, p_all = np.concatenate(d_all), np.concatenate(p_all)
     n_all, m_all = np.concatenate(n_all), np.concatenate(m_all)
     dt_all, rr_all = np.concatenate(dt_all), np.concatenate(rr_all)
+    di_all = np.concatenate(di_all)
 
     ok = np.isfinite(u_all) & np.isfinite(v_all) & np.isfinite(h_all)
     hw = (np.asarray(h_all) + np.pi) % (2 * np.pi) - np.pi          # wrap to (-pi, pi]
@@ -131,6 +140,7 @@ def build_reference(records, out_path):
     ad_c, ad_e = dens(np.abs(d_all), DTHETA_RANGE)
     dt_c, dt_e = dens(dt_all, DT_RANGE)
     rr_c, rr_e = dens(rr_all, RR_RANGE)
+    di_c, di_e = dens(np.abs(di_all), DIST_RANGE)
     fi = following_by_n(d_all, p_all, n_all, m_all)
 
     out_path = Path(out_path)
@@ -144,9 +154,11 @@ def build_reference(records, out_path):
         abs_dtheta_density=ad_c, abs_dtheta_edges=ad_e,
         dt_density=dt_c, dt_edges=dt_e,
         rr_density=rr_c, rr_edges=rr_e,
+        dist_density=di_c, dist_edges=di_e,
         mean_rR=float(np.nanmean(rr_all)),
         median_abs_dtheta=float(np.nanmedian(np.abs(d_all))),
         median_dt=float(np.nanmedian(dt_all)),
+        median_dist=float(np.nanmedian(di_all)),
         n_bouts=int(d_all.size))
     return out_path
 
@@ -158,6 +170,10 @@ def load_reference(path):
         abs_dtheta=(z["abs_dtheta_density"], z["abs_dtheta_edges"]),
         dt=(z["dt_density"], z["dt_edges"]),
         rr=(z["rr_density"], z["rr_edges"]),
+        # OPTIONAL, so a reference built before the distance head was plotted still loads; the
+        # notebook skips the panel when it is absent rather than failing at import.
+        **({"dist": (z["dist_density"], z["dist_edges"])} if "dist_density" in z.files else {}),
+        **({"median_dist": float(z["median_dist"])} if "median_dist" in z.files else {}),
         mean_rR=float(z["mean_rR"]),
         median_abs_dtheta=float(z["median_abs_dtheta"]),
         median_dt=float(z["median_dt"]))

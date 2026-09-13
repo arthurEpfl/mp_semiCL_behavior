@@ -64,7 +64,7 @@ def snap_dt(t, fps=30.0):
 # =========================================================================== #
 #  Records: baseline FishRecords + attached pose / border / dish
 # =========================================================================== #
-def build_border_records(df, roi_path=_DEFAULT_ROI, min_len=10):
+def build_border_records(df, roi_path=_DEFAULT_ROI, min_len=10, active_only=True):
     """Build the canonical per-fish records (via ``evaluate.build_records``) and attach
     the per-bout pose + border fields the wall covariate needs:
     ``x_px, y_px, f_ori_rad, dist_to_border_norm`` (arrays) and the physical dish
@@ -76,6 +76,16 @@ def build_border_records(df, roi_path=_DEFAULT_ROI, min_len=10):
     than ``min_len``). ``FishRecord`` is a plain dataclass, so the extra attributes
     attach cleanly; baseline models never read them.
     """
+    if active_only:
+        if "active" not in df.columns:
+            raise ValueError("active_only=True needs the `active` column "
+                             "(clean_data/bouts_clean.csv, not data/bouts_GsizeMotionSingle.csv)")
+        # Drop the gap-adjacent rows BEFORE building records, so rec.dtheta and every attached
+        # array describe the same population the model is trained on. On a gap row `distance`
+        # and `dtheta` are measured ACROSS the pause (implied speed 0.82 vs 11.9 px/s), and dt
+        # runs to 426 s while an active-trained model stops near 10 s -- left in, dt_w1 and the
+        # C2ST dt features measure the masking decision rather than the model.
+        df = df[df["active"].to_numpy(bool)].copy()
     records = E.build_records(df, min_len=min_len)      # keyed by fish_id
     dish = load_physical_dish(roi_path)                 # index = fish_id -> cx, cy, radius
     group_cols = ["fish_id", "segment_id"]
@@ -101,6 +111,17 @@ def build_border_records(df, roi_path=_DEFAULT_ROI, min_len=10):
             rec.stim_angle_travel = _wrap_pi(g["stim_angle_rad"].to_numpy(float)[good]
                                              + rec.f_ori_rad - _prev)
         rec.dist_to_border_norm = g["dist_to_border_norm"].to_numpy(float)[good]
+        if "run_id" in g.columns:                                 # clean_data/bouts_clean.csv
+            # Per-bout run id: a maximal stretch with no >10 s quiescence gap. The metrics use
+            # it to avoid pairing bouts across a gap once the real side is masked to `active`
+            # (a rollout has no gaps, so splicing would bias only the real reference).
+            rec.run_id = g["run_id"].to_numpy()[good]
+        if "active" in g.columns:
+            rec.active = g["active"].to_numpy(bool)[good]
+        if "run_pos" in g.columns:
+            # Position within the run. The history blocks pad slot k-1 wherever run_pos < k,
+            # so a bout early in a run never carries a lag from before its quiescence gap.
+            rec.run_pos = g["run_pos"].to_numpy()[good]
         rec.frame_onset = g["frame_onset"].to_numpy(int)[good]     # per-bout frame index (for the video bridge)
         if "dot_dist_px" in g.columns:                            # per-bout dot geometry (add_dot_geometry.py)
             rec.dot_dist_px = g["dot_dist_px"].to_numpy(float)[good]
@@ -325,12 +346,93 @@ def _stimhist_block(rec, cfg_feat):
     return out
 
 
+CLOCK_BLOCK_S = 60.0       # CLsemi stimulus block length (1800 fr @ 30 fps)
+CLOCK_TAU_S = 4.0          # default decay for clock_mode='exp'
+
+
+def _lagvalid_block(rec, cfg_feat):
+    """(n, K) per-slot validity mask for the turn-history block, or (n, 1) scalar.
+
+    ``M._history_block`` ZERO-PADS the first k rows of lag slot k-1. The turn lags are raw
+    degrees over ``dth_scale``, so a padded slot is exactly 0.0 -- which is also what a
+    perfectly straight bout gives. Without this channel the net cannot tell "there is no
+    previous bout" from "the previous bout went straight", and straight-ish is the modal
+    behaviour, so every sequence start injects a plausible fake observation.
+
+    It matters far more once records are RUNS (cut at >10 s quiescence gaps) than it did with
+    one record per fish: 979 sequence starts instead of 15, so ~5.5% of all K x n turn-lag
+    entries are padded rather than 0.02%.
+
+    ``cfg_feat['lag_valid']``: 'mask' -> (n, K) one flag per slot, unambiguous;
+                               'scalar' -> (n, 1) how many slots are real, K times cheaper.
+    """
+    mode = str(cfg_feat.get("lag_valid", "") or "").lower()
+    n, K = rec.n, int(cfg_feat["K"])
+    if mode not in ("mask", "scalar"):
+        return np.zeros((n, 0), dtype=np.float32)
+    # `run_pos` counts from each RUN start, so it is the quantity that matches what
+    # `_history_block` actually padded. Falling back to arange(n) counts from the record
+    # start -- one per fish -- which would report "valid" for every cross-gap slot.
+    rp = getattr(rec, "run_pos", None)
+    pos = np.arange(n) if rp is None else np.asarray(rp)
+    if mode == "scalar":
+        return (np.minimum(pos, K) / max(K, 1)).reshape(n, 1).astype(np.float32)
+    V = np.zeros((n, K), dtype=np.float32)
+    for k in range(1, K + 1):
+        V[pos >= k, k - 1] = 1.0
+    return V
+
+
+def _clock_block(rec, cfg_feat):
+    """(n, 1) where the bout sits inside the current STIMULUS block; exactly 0 during a pause.
+
+    MEASURED, holding the stimulus state fixed (range 40-85 px, |bearing| 45-135 deg, so it
+    cannot be geometry in disguise): P(turn toward) is 0.80 in the first 5 s of a moving block
+    against 0.70 for the remaining 55 s, +0.103 per fish in 14/15. No bearing, range, group-size
+    or condition channel can carry this -- all of them are matched. Static shows 10/15, nothing,
+    and ``dt`` inside the same cell is 8/15, so this is a TURN-head effect.
+
+    Two encodings, because the effect is a STEP, not a line:
+
+      'linear'  t / 60           a 0->1 ramp. Faithful to "where am I in the block", but the
+                                 net must build a 5 s step out of a 60 s line.
+      'exp'     exp(-t / tau)    an onset transient, tau = ``cfg_feat['clock_tau_s']`` (4 s),
+                                 which is the shape actually measured.
+
+    A pause bout is 0 under both -- and so is a late-block bout under 'exp' -- so the channel
+    reads "a stimulus just started", not "a stimulus is on". The latter is already ``act``.
+
+    ``t_pause_norm`` is deliberately NOT provided: its effects are real but small (dt 14/15,
+    distance 13/15, r/R 13/15, all 3-6%) and it is a kinematic-side channel, so it is a
+    cost-benefit call rather than a null. Add a second mode here if it is ever wanted.
+    """
+    mode = str(cfg_feat.get("clock_mode", "") or "").lower()
+    n = rec.n
+    if mode not in ("linear", "exp"):
+        return np.zeros((n, 0), dtype=np.float32)
+    start_fr, _bid, fr = block_onsets(rec)
+    t = np.maximum((fr - start_fr) / _FPS, 0.0)
+    nd = np.nan_to_num(np.asarray(getattr(rec, "n_dots", np.zeros(n)), float))
+    on = (nd > 0).astype(float)                      # gate: 0 on every pause bout
+    if mode == "linear":
+        v = np.clip(t / CLOCK_BLOCK_S, 0.0, 1.0)
+    else:
+        v = np.exp(-t / float(cfg_feat.get("clock_tau_s", CLOCK_TAU_S)))
+    return (v * on).reshape(n, 1).astype(np.float32)
+
+
 def build_feature_matrix(rec, cfg_feat):
     """(n, D) input matrix: fit_MLP's history (+symbols) + stim (+ the K_stim stimulus-memory
     block), then the border block when ``cfg_feat['use_border']`` and the adaptation block when
     ``cfg_feat['use_adapt']``.
-    Column order MUST match the generators (``generate_mlp*`` / ``generate_mix*``)."""
-    blocks = [M._history_block(rec.dtheta, cfg_feat["K"], cfg_feat["dth_scale"])]
+    Column order MUST match the generators (``generate_mlp*`` / ``generate_mix*``).
+
+    ``lag_valid`` and ``clock_mode`` are APPENDED LAST, after the kin block, on purpose:
+    ``fit_MLP_fishre`` derives ``border_slice`` by summing the widths of the blocks that come
+    BEFORE the border block, so inserting anything earlier would silently move the columns
+    ``re_bgain`` scales. Both default to off, so every archived config is bit-identical."""
+    blocks = [M._history_block(rec.dtheta, cfg_feat["K"], cfg_feat["dth_scale"],
+                               run_pos=getattr(rec, "run_pos", None))]
     if cfg_feat["include_symbols"]:
         blocks.append(M._symbol_block(rec.symbol, cfg_feat["K"]))
     blocks.append(M._stim_block(rec, cfg_feat["stim_mode"], cfg_feat["rich_scales"],
@@ -343,6 +445,10 @@ def build_feature_matrix(rec, cfg_feat):
         blocks.append(_adapt_block(rec, cfg_feat))
     if cfg_feat.get("use_kin"):
         blocks.append(_kin_history_block(rec, cfg_feat))
+    if cfg_feat.get("lag_valid"):
+        blocks.append(_lagvalid_block(rec, cfg_feat))
+    if cfg_feat.get("clock_mode"):
+        blocks.append(_clock_block(rec, cfg_feat))
     return np.concatenate(blocks, axis=1).astype(np.float32)
 
 
@@ -362,6 +468,12 @@ def _kin_history_block(rec, cfg_feat):
     for k in range(1, Kk + 1):
         H[k:, k - 1] = ldist[:-k]                     # cols 0..Kk-1   = prev log-distance (lags 1..Kk)
         H[k:, Kk + k - 1] = ldt[:-k]                  # cols Kk..2Kk-1 = prev log-dt
+    rp = getattr(rec, "run_pos", None)
+    if rp is not None:                                # never reach across a quiescence gap
+        rp = np.asarray(rp)
+        for k in range(1, Kk + 1):
+            H[rp < k, k - 1] = 0.0
+            H[rp < k, Kk + k - 1] = 0.0
     return H
 
 

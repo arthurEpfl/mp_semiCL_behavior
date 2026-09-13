@@ -1,0 +1,684 @@
+\documentclass{article}
+\usepackage{graphicx}     % images
+\usepackage{amsmath}      % equations
+\usepackage{booktabs}     % nice tables
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage[hidelinks]{hyperref}
+
+% --- placeholder box for figures to be added later ---
+\newcommand{\plotph}[1]{%
+  \begin{center}\fbox{\parbox[c][3.5cm][c]{0.85\linewidth}{%
+  \centering\itshape [Plot placeholder: #1]}}\end{center}}
+
+\title{Zebrafish bout discretization and hidden-Markov modelling from the
+       semi-closed-loop visual-stimulus assay}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{Data}
+
+\subsection{Experimental paradigm}
+The dataset (\texttt{GsizeMotionSingle}) comes from a semi-closed-loop
+behavioural assay (Perrino PhD thesis, Sect.~4.4): juvenile zebrafish
+(15--21~dpf) swim freely, each isolated in a 10~cm-diameter circular Petri
+dish, arranged in a $3\times5$ grid so that \textbf{15 fish are recorded
+simultaneously}. Behaviour is filmed from above with an infrared camera at
+\textbf{30~frames\,s$^{-1}$}; the full session lasts $\sim$180~min.
+
+The visual stimuli are groups of black dots (2~mm diameter) projected from
+below. They are designed to \emph{simulate conspecifics}: at stimulus onset the
+dot group is placed left or right of the fish (relative to the fish centroid),
+then follows a predefined open-loop trajectory within a $2.5\times2.5$~cm area.
+Stimuli vary in:
+\begin{itemize}
+  \item \textbf{group size}: 1, 2, 4, 6 or 8 dots, presented on a single side
+        (hence ``Single'');
+  \item \textbf{speed}: 0~mm\,s$^{-1}$ (static) or 3.5~mm\,s$^{-1}$ (moving,
+        bout-like).
+\end{itemize}
+Each trial is a 60~s stimulus presentation followed by a 50~s pause; conditions
+are repeated 6 times per side in randomised blocks.
+
+\plotph{Example egocentric trajectory of one fish before/after stimulus onset
+        with the projected dot group (cf.\ notebook diagnostics).}
+
+\subsection{Raw acquisition files}
+Three raw files are produced per session (camera origin at the top-left;
+distances in pixels unless stated):
+
+\begin{table}[h]\centering\small
+\begin{tabular}{@{}lp{0.62\linewidth}@{}}
+\toprule
+\textbf{File} & \textbf{Content}\\
+\midrule
+\texttt{PositionTxt} & One row per frame. First 45 columns = $(x,y,\text{orientation})$
+  for each of the 15 fish (pixels; orientation in radians, measured
+  \emph{clockwise}). Remaining columns = stimulus dot data.\\
+\texttt{Trajectory}  & One row per frame. Dot coordinates $(x,y)$ in
+  \emph{millimetres relative to the fish centroid}, plus stimulus name, size and
+  colours. Convention: left $\to x>0$, right $\to x<0$.\\
+\texttt{ROIdef}      & One row per dish: \texttt{xoff, yoff, diameter, x, y,
+  radius} (dish geometry in pixels).\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Stimulus naming.} e.g.\ \texttt{CLsemi1800\_g4-0\_s3.5-3.5}:
+\texttt{CLsemi} = semi-closed loop; \texttt{1800} = presentation length in frames
+($1800/30 = 60$~s); \texttt{g4-0} = 4 dots left, 0 right; \texttt{s3.5-3.5} =
+speed (mm\,s$^{-1}$). When no stimulus is shown the field is \texttt{none}
+(pause).
+
+\subsection{Preprocessing pipeline}
+The raw files are transformed into analysis-ready per-fish dataframes by
+\texttt{src/transformed\_data\_pipeline.py}
+(\texttt{generate\_transformed\_datasets}). The main steps are:
+\begin{enumerate}
+  \item \textbf{Naming \& sanity check}: assign column names
+        (\texttt{f\{N\}\_x/\_y/\_ori}, \texttt{d\{i\}\_x/\_y/\_stim}) and verify
+        that the stimulus labels agree between \texttt{PositionTxt} and
+        \texttt{Trajectory}.
+  \item \textbf{Trial structure}: derive trial / stimulus-block indices; tag each
+        frame's \texttt{condition} (a \texttt{CLsemi\dots} label, or
+        \texttt{inter\_stim\_pause}); separate out the end-of-session
+        single-dot ``knot'' positive-control (\texttt{bout}).
+  \item \textbf{Stimulus geometry}: convert dot coordinates from
+        fish-centred mm to absolute screen coordinates using the fish position
+        at block onset; count dots left/right of the fish.
+  \item \textbf{Coordinate normalisation} (\texttt{transform\_coordinates}):
+        invert the $y$ axis ($y \mapsto \text{diameter}-y$) and convert
+        orientation to counter-clockwise ($\theta \mapsto 2\pi-\theta$), so the
+        working frame is CCW with $0 =$ right.
+  \item \textbf{Assembly}: build \texttt{abs\_dict =
+        \{"f0":df0,\dots,"f14":df14\}}, one dataframe per fish. A polar
+        representation (\texttt{d\{k\}\_angle}, \texttt{d\{k\}\_radius}) is also
+        produced.
+\end{enumerate}
+The result is cached as the per-fish CSVs
+\texttt{*\_f\{N\}\_transformed\_abs.csv} (equivalently \texttt{abs\_dict.pkl}).
+Stacking these with \texttt{functions.stack\_dict\_pipeline} yields the long
+dataframe \texttt{df\_abs\_raw} (columns \texttt{f\{N\}\_*} renamed to
+\texttt{f\_*}, plus a \texttt{fish\_id} column).
+
+\subsection{Working dataframe}
+We segment bouts directly from the per-fish dataframes (one file $=$ one fish,
+$f0\dots f14$). Each has one row per frame with the columns:
+
+\begin{table}[h]\centering\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Column} & \textbf{Meaning} & \textbf{Units / type}\\
+\midrule
+\texttt{frame}            & frame index (30~fps)                 & integer\\
+\texttt{stimulus}         & condition active this frame          & label\\
+\texttt{f\{N\}\_x},\,\texttt{f\{N\}\_y} & fish centroid              & \textbf{pixels} (integer)\\
+\texttt{f\{N\}\_ori}      & body orientation (CCW, $0=$ right)   & radians $[0,2\pi)$\\
+\texttt{d\{i\}\_x},\,\texttt{d\{i\}\_y} & dot $i$ position ($i=0..7$) & pixels\\
+\texttt{d\{i\}\_stim}     & dot $i$ stimulus label               & label\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Important conventions.}
+\begin{itemize}
+  \item \textbf{Positions are integer pixels} -- sub-pixel precision was lost
+        upstream, which quantises short bouts (mitigated later by smoothing
+        \emph{for detection only}).
+  \item \textbf{The pixel$\to$mm scale is per dish.} The pipeline constant
+        \texttt{MM\_TO\_PX}$=3.67$ is a single \emph{nominal camera} scale (the
+        repo's own comment: a 50~mm-radius dish ``should'' be
+        $50\times3.67\approx183.5$~px), and it is applied \emph{only to the
+        stimulus dots}, never to the fish positions. Because each dish is imaged
+        at a different magnification, the real camera scale is recovered per fish
+        from
+        \[ s_f \;=\; \frac{50~\text{mm}}{\texttt{radius}_f~[\text{px}]}, \]
+        where $\texttt{radius}_f$ is that dish's radius in \texttt{ROIdef}
+        (physical dish radius $=50$~mm). The 15 dishes span
+        $2.5$--$4.7$~px\,mm$^{-1}$ (mean $\approx 3.33$, not $3.67$), so a single
+        global value would mis-scale a given fish's distances by up to
+        $\sim\pm45\%$. Only \emph{distances} depend on $s_f$; angles
+        ($\delta\theta$) do not.
+\end{itemize}
+
+\paragraph{Validation of the per-dish scale.}
+$s_f$ is only valid if \texttt{ROIdef}'s radius is in the same pixel frame as the
+fish positions. We verified this by overlaying each fish's trajectory with a
+circle of its ROI radius: the explored extent (99th-percentile radial distance
+from the fish's median position) is a consistent $0.96\pm0.01$ of the ROI radius
+for all 15 fish, confirming the radius is in the tracking-pixel frame (each fish
+explores $\sim$96\% of its dish). Note this per-dish scaling is \emph{not} in the
+original repo, which keeps fish positions in pixels throughout; it is introduced
+here so that bout distances are in millimetres and comparable across fish.
+
+\plotph{Per-fish trajectory extent vs.\ ROIdef radius -- 15-panel overlay
+        (notebook Sect.~3 validation).}
+
+
+\section{Bout discretization scheme}
+
+\subsection{Overview and origin}
+Locomotion is reduced from the continuous 30~fps track to a sequence of discrete
+swim \emph{bouts}, each summarised by three kinematic scalars: reorientation
+angle $\delta\theta$, inter-bout interval $\delta t$, and travelled distance $d$.
+The detection method follows Le Goc et al.\ 2021 (BMC Biology,
+\texttt{10.1186/s12915-021-01126-w}), with all time-based thresholds reconverted
+from their 25~fps to our 30~fps.
+
+\paragraph{Smoothing for detection, raw positions for measurement.}
+The trajectory is Gaussian-smoothed \emph{only to detect bout timing}: the
+integer-pixel jitter ($\approx0.4$~mm) otherwise spawns spurious speed peaks.
+Everything \emph{measured} from a bout -- heading, reorientation, distance,
+onset position -- is read from the \textbf{raw (unsmoothed)} positions, so the
+smoothing kernel never biases the reported direction.
+
+\paragraph{Two anchors per bout.}
+Each detected bout carries \emph{two} reference frames:
+\begin{itemize}
+  \item the \textbf{onset} $o_i$ -- the speed \emph{trough} just before the bout
+        (the rest point from which the fish accelerates). It marks the physical
+        bout start and is the anchor for \emph{timing}, \emph{position},
+        \emph{stimulus context}, and -- computed \emph{onset-to-onset}, see
+        Step~7 -- for \emph{heading}, \emph{reorientation} and \emph{distance};
+  \item the \textbf{peak} $p_i$ -- the speed \emph{maximum}. It is kept only as
+        an \emph{independent cross-check}: the tracked body orientation at the
+        peak (flip-corrected) gives a second estimate $\delta\theta^{\text{ori}}$
+        of the reorientation, used to validate the displacement-based one.
+\end{itemize}
+Heading is taken onset-to-onset (net displacement between two rest points)
+rather than from an instantaneous single-frame direction, because on raw
+integer-pixel data a single rest-frame direction is dominated by quantisation
+noise, whereas the net leg between successive onsets is a robust travel
+direction.
+
+\subsection{Parameters and thresholds}
+\begin{table}[h]\centering\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Parameter} & \textbf{Value (30~fps)} & \textbf{Origin}\\
+\midrule
+Frame rate $f_s$                  & 30~fps                  & acquisition\\
+Position smoothing $\sigma_{\text{pos}}$ & 2 frames (Gaussian, detection only) & noise control\\
+Speed smoothing window            & 3 frames (rolling mean) & noise control\\
+Speed-threshold factor $k$        & 1.0 (tunable)           & this work\\
+Bout onset                        & speed trough before peak (default) & this work\\
+Heading / distance                & onset-to-onset, raw positions & this work\\
+Onset ``lead'' option             & 2 frames ($\approx$80~ms) before peak & Le Goc\\
+Refractory (min.\ peak spacing)   & 12 frames (0.4~s)       & Le Goc\\
+Displacement window $\pm w$       & 15 frames ($\pm$0.5~s)  & Le Goc\\
+Displacement gate $[d_{\min},d_{\max}]$ & $[0.3,\,18]$~mm   & Le Goc\\
+Forward threshold $\delta\theta_0$ & $10^\circ$             & Le Goc / HMM\\
+Border shell                      & 5~mm from dish edge     & Le Goc ROI\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Step-by-step procedure}
+The procedure is applied independently to each fish. Below, $x,y$ denote the
+\emph{raw} scaled positions and $\tilde x,\tilde y$ the smoothed ones (used only
+in Steps~4--6 for detection).
+
+\paragraph{Step 1 -- Scale to millimetres.}
+Convert positions with the per-dish factor $s_f$:
+$\;x_{\text{mm}} = s_f\, x_{\text{px}},\; y_{\text{mm}} = s_f\, y_{\text{px}}$.
+
+\paragraph{Step 2 -- Smooth the trajectory (detection only).}
+Each coordinate time series is convolved with a one-dimensional Gaussian kernel
+$G_\sigma$ of standard deviation $\sigma_{\text{pos}}=2$~frames:
+\[
+\tilde x_t = \sum_{k=-K}^{K} G_\sigma(k)\, x_{t-k},
+\qquad
+G_\sigma(k) = \frac{1}{Z}\,\exp\!\Big(-\frac{k^2}{2\sigma_{\text{pos}}^2}\Big),
+\]
+and likewise for $\tilde y$, where $k$ indexes frame offsets, $Z=\sum_k
+\exp(-k^2/2\sigma_{\text{pos}}^2)$ normalises the weights to unit sum, and the
+kernel is truncated at $K=\lceil 4\sigma_{\text{pos}}\rceil$ (the default support
+of \texttt{scipy.ndimage.gaussian\_filter1d}, which we use). This restores a
+continuous, sub-pixel path so that the speed peaks used for detection are not
+corrupted by integer-pixel jitter. Because $\sigma_{\text{pos}}=2$~frames
+($\approx67$~ms) is short relative to the inter-bout interval ($\sim$1~s), it
+removes jitter without blurring distinct bouts together. \emph{The smoothed
+series is used only in Steps~4--6; heading, reorientation, distance and position
+(Step~7 onward) are read from the raw $x,y$.}
+
+\paragraph{Step 3 -- Segment continuous pieces.}
+Break the per-fish stream into continuous segments \textbf{only where tracking is
+lost} (NaN gaps). Trajectories are \emph{not} cut at stimulus boundaries, so the
+bout in which the fish first reacts to a newly-appeared stimulus keeps its
+reorientation; each bout is later tagged by the condition active at its onset.
+
+\paragraph{Step 4 -- Instantaneous speed.}
+Per segment, form the frame-to-frame speed from the \emph{smoothed} path and
+lightly smooth it (3-frame rolling mean):
+\[
+v(t) \;=\; f_s\,\sqrt{\big(\tilde x_{t}-\tilde x_{t-1}\big)^2
+                      +\big(\tilde y_{t}-\tilde y_{t-1}\big)^2}\quad[\text{mm\,s}^{-1}].
+\]
+
+\paragraph{Step 5 -- Detect bouts (peaks) and place onsets.}
+A bout is a local maximum of $v$ exceeding a data-driven threshold, with peaks
+forced at least one refractory period apart:
+\[
+v(p_i) > \mu_v + k\,\sigma_v ,\qquad
+\mu_v=\overline{v},\;\; \sigma_v=\mathrm{std}(v),
+\]
+consecutive peaks $\ge 12$ frames apart. The bout \emph{onset} $o_i$ is then
+placed at the local speed minimum preceding $p_i$ (the trough; ``walk back from
+$p_i$ until the speed stops decreasing''). A Le~Goc-literal alternative places it
+$o_i = p_i - 2$ frames ($\approx$80~ms before the peak).
+
+\paragraph{Step 6 -- Displacement gate.}
+Reject bouts whose $\pm 0.5$~s net displacement around the onset is too small
+(wobble) or too large (tracking jump):
+\[
+d_{\min} \;\le\;
+\big\lVert \mathbf{r}(o_i+w)-\mathbf{r}(o_i-w)\big\rVert \;\le\; d_{\max},
+\qquad d_{\min}=0.3,\; d_{\max}=18~\text{mm}.
+\]
+
+\plotph{Speed trace $v(t)$ over one stimulus block, with onsets (troughs) and
+        speed peaks marked (notebook \texttt{segment\_bouts.ipynb}, Sect.~5).}
+
+\paragraph{Step 7 -- Per-bout kinematics (onset-to-onset, raw positions).}
+With ordered onsets $o_i$, the \emph{travel direction} (heading) of bout $i$ is
+the direction of the net \emph{onset-to-onset} displacement, measured on the raw
+positions:
+\[
+\theta_i = \operatorname{atan2}\!\big(y_{o_{i+1}}-y_{o_i},\;
+                                      x_{o_{i+1}}-x_{o_i}\big).
+\]
+The \emph{reorientation angle} is the wrapped change of heading:
+\[
+\delta\theta_i = \operatorname{wrap}\!\big(\theta_i-\theta_{i-1}\big),\qquad
+\operatorname{wrap}(a)=\big((a+\pi)\bmod 2\pi\big)-\pi \in(-\pi,\pi].
+\]
+The \emph{inter-bout interval} and \emph{travelled distance} are the matching
+onset-to-onset quantities:
+\[
+\delta t_i = \frac{o_{i+1}-o_i}{f_s},\qquad
+d_i = \big\lVert \mathbf{r}_{o_{i+1}}-\mathbf{r}_{o_i}\big\rVert .
+\]
+As an independent check we also store $\delta\theta^{\text{ori}}$, computed from
+the tracked body orientation $f\_ori$ \emph{at the peak} after flip-correcting it
+to the travel direction ($\theta^{\text{ori}} \mapsto \theta^{\text{ori}}+\pi$
+when $\cos(\theta^{\text{ori}}-\theta)<0$).
+
+\plotph{2D trajectory coloured by detected bouts, with onset-to-onset heading
+        arrows (notebook Sect.~6).}
+
+\paragraph{Step 8 -- Stimulus context.}
+Tag each bout with the \texttt{stimulus} label at its \emph{onset}, parsed into
+$n_{\text{left}}$, $n_{\text{right}}$, the side, and dot speeds. The dot-group
+angle relative to the fish facing direction (evaluated at the onset) is
+\[
+\phi_i = \operatorname{wrap}\!\Big(
+\operatorname{atan2}\big(\bar y_{\text{dots}}-y_{o_i},\,
+                         \bar x_{\text{dots}}-x_{o_i}\big)-f\_ori_{o_i}\Big),
+\]
+with $(\bar x_{\text{dots}},\bar y_{\text{dots}})$ the centroid of the active
+dots and the sign convention $\phi_i>0 \Rightarrow$ dots on the fish's left.
+$\phi_i$ (\texttt{stim\_angle\_rad}) is the driving input of the stimulus-aware
+model in Sect.~4.
+
+\paragraph{Step 9 -- Bout-type label.}
+Classify by the $10^\circ$ threshold:
+\[
+\text{type}_i=
+\begin{cases}
+\text{forward}, & |\delta\theta_i| < 10^\circ,\\
+\text{left},    & \delta\theta_i \ge 10^\circ,\\
+\text{right},   & \delta\theta_i \le -10^\circ.
+\end{cases}
+\]
+
+\paragraph{Step 10 -- Border flag (non-destructive).}
+Mirroring Le Goc's 5~mm ROI, flag (do not drop) bouts in the outer shell. The
+dish centre and radius are estimated empirically per fish (median position;
+95th-percentile radial distance $R_f$), using the onset position:
+\[
+\texttt{near\_wall}_i = \Big[\;\big\lVert \mathbf{r}_{o_i}-\mathbf{c}_f\big\rVert
+> R_f - 5~\text{mm}\;\Big].
+\]
+
+\subsection{Output dataframe}
+One row per detected bout, with columns:
+\begin{table}[h]\centering\small
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Column} & \textbf{Meaning}\\
+\midrule
+\texttt{fish\_id, segment\_id, bout\_index} & fish, continuous segment, index within segment\\
+\texttt{frame\_onset, t\_onset\_s}          & bout onset (trough; frame and seconds)\\
+\texttt{dtheta\_rad, dtheta\_deg}           & reorientation $\delta\theta$ (onset-to-onset, raw)\\
+\texttt{dtheta\_ori\_deg}                   & orientation-based cross-check (at peak)\\
+\texttt{dt\_s}                              & inter-bout interval (onset-to-onset)\\
+\texttt{distance\_mm}                       & travelled distance (onset-to-onset, raw)\\
+\texttt{heading\_rad, f\_ori\_rad}          & travel direction; raw body orientation\\
+\texttt{x\_mm, y\_mm}                       & onset (trough) position, raw (mm)\\
+\texttt{stimulus, stim\_angle\_rad}         & condition at onset; dot-group bearing $\phi$\\
+\texttt{n\_dots\_left, n\_dots\_right}      & group size per side\\
+\texttt{speed\_left, speed\_right, moving}  & dot speeds; moving flag\\
+\texttt{side}                               & left / right / both / none\\
+\texttt{bout\_type, near\_wall}             & F/L/R label; border flag\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Deviations from Le Goc et al.}
+\begin{itemize}
+  \item \textbf{Smoothing for detection only}: bout \emph{timing} is found on the
+        Gaussian-smoothed track, but heading, $\delta\theta$, distance and
+        position are measured on the \emph{raw} positions, onset-to-onset. This
+        keeps the reported direction free of any smoothing bias.
+  \item \textbf{Heading from displacement}, not body axis: the tracked
+        \texttt{f\_ori} here suffers $180^\circ$ head/tail flips, so the
+        onset-to-onset travel direction is more robust; \texttt{f\_ori} is kept
+        only as the cross-check $\delta\theta^{\text{ori}}$.
+  \item \textbf{Split only at tracking gaps} (not at stimulus blocks), to keep
+        the onset reorientation toward newly-appeared stimuli.
+  \item \textbf{Per-dish pixel$\to$mm scale} (from \texttt{ROIdef}), not a single
+        global factor.
+  \item \textbf{No turn-displacement ($1/1.6$) correction}: it targets
+        temperature comparisons absent here, the $1.6$ factor is
+        setup-specific, and it is dominated by the resolution-driven distance
+        inflation.
+\end{itemize}
+
+\subsection{Validation}
+The segmented kinematics are compared against the freely-swimming HMM2023
+reference data (Le Goc data, 26~$^\circ$C): bout rate, distance and $\delta\theta$
+distributions. Our bouts remain coarser than the reference (lower rate, longer
+legs, broader $\delta\theta$: median $|\delta\theta|\approx39^\circ$ and forward
+fraction $\approx0.11$, vs.\ $\approx10^\circ$ and $0.50$ in the reference),
+consistent with adjacent bouts merging at the low integer-pixel tracking
+resolution and with the onset-to-onset (rather than peak-to-peak) heading, which
+we retain because it is the direction the fish actually travels until the next
+bout. The signed $\delta\theta$ is unbiased (no left/right handedness artefact).
+
+\plotph{Reorientation $\delta\theta$ histogram: displacement-derived vs.\
+        flip-corrected orientation (notebook Sect.~9).}
+\plotph{Inter-bout interval and bout-distance distributions (notebook Sect.~9).}
+\plotph{Reorientation by stimulus side -- left vs.\ right dots (notebook
+        Sect.~10).}
+\plotph{Overlay vs.\ HMM2023 paper data ($\delta\theta$, $\delta t$, distance)
+        (notebook \texttt{compare\_to\_paper.ipynb}).}
+
+
+\section{Behavioural-state models}
+\label{sec:hmm}
+
+\subsection{Rationale and state alphabet}
+Following Dommanget-Kott et al.\ 2026 (\emph{Linking brain and behavior states in
+zebrafish larvae locomotion using Hidden Markov Models}), we model the sequence
+of reorientation angles $\{\delta\theta_n\}$ produced by the discretization as
+emissions of a small number of latent locomotor states. We fit two nested
+models: (i) a \emph{Markov chain} on hard-thresholded states (baseline), and
+(ii) a 3-state \emph{hidden Markov model} (HMM) with continuous emissions. Both
+use three states -- one \emph{forward} and two \emph{turning} states -- but the
+HMM infers them probabilistically rather than by a hard cut.
+
+Throughout, the two turning states are written \textbf{sign-neutrally} as
+\emph{turn$-$} (emitting $\delta\theta<0$) and \emph{turn$+$} (emitting
+$\delta\theta>0$); ``left/right'' labels are avoided so that the sign of a turn is
+unambiguous, which matters for the stimulus coupling of Sect.~\ref{sec:iohmm}.
+
+\subsection{Markov chain baseline (thresholded)}
+Each bout is hard-classified with the forward threshold $\delta\theta_0=10^\circ$
+into a state $s_n\in\{F,L,R\}$,
+\[
+s_n=
+\begin{cases}
+F, & |\delta\theta_n|<\delta\theta_0,\\
+L, & \delta\theta_n \ge \delta\theta_0 \quad(\text{turn}+),\\
+R, & \delta\theta_n \le -\delta\theta_0 \quad(\text{turn}-),
+\end{cases}
+\]
+reproducing the paper's \texttt{utils/MarkovChains.py}. The transition matrix is
+estimated by counting and row-normalising,
+\[
+P_{ij}=\frac{N_{ij}}{\sum_{k}N_{ik}},
+\qquad
+N_{ij}=\#\{\,n:\ s_n=i,\ s_{n+1}=j\,\},
+\]
+and its stationary distribution $\boldsymbol\pi$ (the a-priori state
+occupancies) solves
+\[
+\boldsymbol\pi P = \boldsymbol\pi,\qquad \textstyle\sum_i \pi_i = 1 .
+\]
+On our data the forward occupancy is low ($\pi_F\approx0.11$) and the two turn
+states are near-symmetric ($\pi_L\approx\pi_R\approx0.44$), consistent with the
+broad $\delta\theta$ distribution.
+
+\plotph{MC transition matrix (heat map) and $\delta\theta$ histogram with the
+        $\pm10^\circ$ thresholds (notebook \texttt{fit\_hmm.ipynb}, Sect.~2).}
+
+\subsection{Hidden Markov model (\texttt{G3\_Sym})}
+\paragraph{Emissions.}
+The reorientation of state $j$ is drawn from a continuous density
+$b_j(\delta\theta)$ (angles in degrees):
+\[
+\begin{aligned}
+b_F(\delta\theta)      &= \mathcal N(\delta\theta;\,0,\sigma)
+   = \tfrac{1}{\sqrt{2\pi\sigma^2}}\,e^{-\delta\theta^2/2\sigma^2},\\
+b_{\text{turn}+}(\delta\theta) &=
+   \Gamma(\delta\theta;\,\alpha,\theta)\,\mathbf 1[\delta\theta>0],\qquad
+b_{\text{turn}-}(\delta\theta) =
+   \Gamma(-\delta\theta;\,\alpha,\theta)\,\mathbf 1[\delta\theta<0],
+\end{aligned}
+\]
+with the Gamma density
+$\Gamma(x;\alpha,\theta)=x^{\alpha-1}e^{-x/\theta}/(\Gamma(\alpha)\,\theta^{\alpha})$.
+Forward bouts are a centred Normal (small, symmetric wobble); turns are a
+\emph{single, shared} Gamma over the turn magnitude, reflected onto each sign.
+This is exactly the emission set stored in the paper's fitted models
+($\sigma_{\text{forw}}$ plus $\texttt{turn}=[\alpha,\theta]$), with the
+constraints $\alpha\ge1$, $\theta>0$.
+
+\paragraph{Left--right symmetry.}
+Transitions and the initial distribution are tied to be left/right symmetric:
+$P(F\!\to\!L)=P(F\!\to\!R)$, $P(L\!\to\!L)=P(R\!\to\!R)$,
+$P(L\!\to\!R)=P(R\!\to\!L)$, $P(L\!\to\!F)=P(R\!\to\!F)$, and the turn states
+share $(\alpha,\theta)$. This encodes the absence of an intrinsic turning bias.
+
+\paragraph{Likelihood.}
+For a trajectory $\delta\theta_{1:N}$ with hidden states $s_{1:N}$, transition
+matrix $A$ and initial distribution $\boldsymbol\pi$,
+\[
+\mathcal L
+=\sum_{s_{1:N}} \pi_{s_1}\,b_{s_1}(\delta\theta_1)\;
+\prod_{n=2}^{N} A_{s_{n-1}s_n}\,b_{s_n}(\delta\theta_n).
+\]
+
+\paragraph{Optimiser: Baum-Welch (EM).}
+The parameters $\Theta=(\boldsymbol\pi,A,\sigma,\alpha,\theta)$ are fit by
+Baum-Welch, the Expectation-Maximisation algorithm for HMMs. This is the
+optimiser used by the paper (a generic Baum-Welch specialised to this emission
+family); we reimplement it directly. Define the forward/backward variables
+\[
+\alpha_n(i)=P(\delta\theta_{1:n},s_n=i),\qquad
+\beta_n(i)=P(\delta\theta_{n+1:N}\mid s_n=i),
+\]
+computed by the usual recursions (in practice in the scaled form of Rabiner to
+avoid underflow). The \textbf{E-step} posteriors are
+\[
+\gamma_n(i)=\frac{\alpha_n(i)\beta_n(i)}{\mathcal L},\qquad
+\xi_n(i,j)=\frac{\alpha_n(i)\,A_{ij}\,b_j(\delta\theta_{n+1})\,\beta_{n+1}(j)}{\mathcal L}.
+\]
+The \textbf{M-step} re-estimates each parameter in closed form (then applies the
+symmetry tying):
+\[
+A_{ij}=\frac{\sum_n \xi_n(i,j)}{\sum_n \gamma_n(i)},\qquad
+\pi_i=\gamma_1(i),\qquad
+\sigma^2=\frac{\sum_n \gamma_n(F)\,\delta\theta_n^2}{\sum_n \gamma_n(F)} .
+\]
+The shared turn Gamma is fit by a \emph{weighted} maximum-likelihood on the turn
+magnitudes $m_n=|\delta\theta_n|$ with weights
+$w_n=\gamma_n(\text{turn}+)\,\mathbf 1[\delta\theta_n>0]
+     +\gamma_n(\text{turn}-)\,\mathbf 1[\delta\theta_n<0]$. Writing
+$W=\sum_n w_n$, $\bar m=\tfrac1W\sum_n w_n m_n$,
+$\overline{\log m}=\tfrac1W\sum_n w_n\log m_n$ and
+$s=\log\bar m-\overline{\log m}$, the shape is obtained from Minka's
+approximation refined by Newton,
+\[
+\alpha \approx \frac{3-s+\sqrt{(s-3)^2+24\,s}}{12\,s},\qquad
+\theta=\frac{\bar m}{\alpha},\qquad \alpha\leftarrow\max(\alpha,1),
+\]
+and the scale follows as $\theta=\bar m/\alpha$. EM is iterated until the
+log-likelihood gain falls below $10^{-6}$ (max 500 iterations), from several
+random left--right-symmetric initialisations; the best run is kept.
+
+\paragraph{Fitted values.}
+On \texttt{GsizeMotionSingle} the fit is stable across restarts and gives
+$\sigma\approx6.5^\circ$, $\alpha\approx2.3$, $\theta\approx21^\circ$ (mean turn
+$\alpha\theta\approx49^\circ$), with a sticky, symmetric transition matrix. The
+forward emission is much broader than the paper's clean data
+($\sigma\approx3.5^\circ$ at 26~$^\circ$C), as expected from the coarser
+tracking.
+
+\plotph{Fitted emission densities (forward Normal + signed turn Gamma) overlaid
+        on the $\delta\theta$ histogram (notebook \texttt{fit\_hmm.ipynb},
+        Sect.~4).}
+\plotph{Viterbi state labelling of a real trajectory, MC threshold vs.\ HMM
+        (notebook \texttt{fit\_hmm.ipynb}, Sect.~5).}
+
+\subsection{Trajectory generation}
+\label{sec:gen}
+To generate synthetic paths (paper Sect.~2.7) we (i) sample a state sequence
+$s_{1:N}$ from $(\boldsymbol\pi,A)$; (ii) sample a reorientation
+$\delta\theta_n\sim b_{s_n}$ from the corresponding emission; and (iii) resample
+the inter-bout interval $\delta t_n$ and distance $d_n$ \emph{independently} from
+the empirical pools of the data (ignoring any bout-type dependence, as the paper
+does). The 2D path follows by cumulative summation of heading and steps:
+\[
+\theta_n=\theta_0+\sum_{k\le n}\delta\theta_k,\qquad
+x_n=\sum_{k\le n} d_k\cos\theta_k,\qquad
+y_n=\sum_{k\le n} d_k\sin\theta_k .
+\]
+The generated angle distribution matches the data (median $|\delta\theta|$
+$38.8^\circ$ vs.\ $39.0^\circ$).
+
+\plotph{HMM-generated synthetic trajectories and real-vs-generated
+        $\delta\theta/\delta t/d$ distributions (notebook
+        \texttt{fit\_hmm.ipynb}, Sect.~6--7).}
+
+
+\section{Stimulus-driven (input-driven) HMM}
+\label{sec:iohmm}
+
+\subsection{Rationale}
+The spontaneous HMM ignores the stimulus. To capture the observed
+\emph{following} of the moving dots (Perrino thesis: fish orient toward and
+approach conspecific-like motion), we extend it to an \textbf{input-driven HMM}
+(IO-HMM / GLM-HMM), in which the transition and the forward emission depend, at
+each bout, on the egocentric bearing to the active dots. We first verify that the
+effect is present in the raw data: among moving-stimulus bouts that are turns,
+$62\%$ turn \emph{toward} the dots (vs.\ $50\%$ chance).
+
+\subsection{Driving input}
+The bearing $\phi_n$ (\texttt{stim\_angle\_rad}, Step~8) is turned into a bounded
+following signal
+\[
+b_n=\sin(\phi_n)\cdot\mathbf 1[\text{active moving stimulus at bout }n]
+    \in[-1,1],
+\]
+($b_n=0$ when no moving dot is present). $\sin\phi$ gives the sign of the turn
+needed to face the dots and vanishes when they are straight ahead or behind.
+Crucially, because $\delta\theta$ and $\phi$ share the same world frame, turning
+\emph{toward} the dots always means $\operatorname{sign}(\delta\theta)=\operatorname{sign}(\phi)$;
+so with sign-neutral states, $b_n>0$ (dots on the left) must favour turn$+$.
+During generation $b_n$ is \emph{recomputed each bout} from the fish's current
+pose and the real dot positions, so the synthetic fish reacts as it swims.
+
+\subsection{Model}
+Let $c=(c_F,c_{-},c_{+})=(0,-1,+1)$ index the sign push of each state. The
+\textbf{input-driven transition} from state $i$ is a multinomial logit whose turn
+columns are tilted by $b_n$,
+\[
+A^{(n)}_{ij}=\frac{\exp\!\big(\log T^{0}_{ij}+\kappa\,c_j\,b_n\big)}
+                  {\sum_{k}\exp\!\big(\log T^{0}_{ik}+\kappa\,c_k\,b_n\big)},
+\]
+with $T^0$ the (symmetric) baseline transition and $\kappa\ge0$ the learned
+\emph{following gain}. When $b_n=0$ this reduces to $A^{(n)}=T^0$, recovering the
+spontaneous HMM; when $b_n>0$ it multiplies $P(\text{turn}+)$ by $e^{+\kappa b_n}$
+and $P(\text{turn}-)$ by $e^{-\kappa b_n}$, biasing the turn toward the dots. The
+\textbf{forward emission} additionally drifts toward the stimulus,
+\[
+b_F(\delta\theta;b_n)=\mathcal N(\delta\theta;\,g\,b_n,\ \sigma),
+\]
+with gain $g$; the turn emissions are unchanged. The full parameter set is
+$\Theta=(T^0,\kappa,\,\sigma,g,\,\alpha,\theta,\boldsymbol\pi)$.
+
+\subsection{Optimiser: input-driven Baum-Welch}
+The EM skeleton is unchanged; only the transition/emission are now functions of
+$b_n$, so the forward--backward uses a \textbf{time-varying} transition
+$A^{(n)}=A(b_n)$ (and $b_F(\cdot;b_n)$). The E-step recursions and the posteriors
+$\gamma_n(i),\ \xi_n(i,j)$ keep the same form as above, with $A_{ij}$ replaced by
+$A^{(n-1)}_{ij}$ where appropriate.
+
+The M-step splits into a closed-form part and a small numerical part:
+\begin{itemize}
+  \item \textbf{Turn Gamma} $(\alpha,\theta)$: the same weighted MLE as the
+        spontaneous model -- independent of $b$.
+  \item \textbf{Forward drift and variance}: weighted least-squares through the
+        origin and weighted variance,
+        \[
+        g=\frac{\sum_n \gamma_n(F)\,b_n\,\delta\theta_n}
+               {\sum_n \gamma_n(F)\,b_n^{2}},\qquad
+        \sigma^2=\frac{\sum_n \gamma_n(F)\,(\delta\theta_n-g\,b_n)^2}
+                      {\sum_n \gamma_n(F)} .
+        \]
+  \item \textbf{Baseline transition and following gain} $(T^0,\kappa)$: no closed
+        form. They maximise the expected complete-data transition
+        log-likelihood
+        \[
+        Q(T^0,\kappa)=\sum_n\sum_{i,j}\xi_n(i,j)\,
+        \log A^{(n)}_{ij}(T^0,\kappa),
+        \]
+        i.e.\ a small multinomial-logit (GLM-HMM) fit, solved with L-BFGS. To
+        keep it cheap, the responsibilities $\xi_n$ are \emph{binned by the
+        scalar input} $b_n$ ($\sim$40 bins on $[-1,1]$), so the objective is a
+        sum over bins rather than over all $\sim7\times10^{4}$ transitions.
+\end{itemize}
+This is the standard GLM-HMM / IO-HMM M-step. EM converges under the same
+$10^{-6}$ criterion and is run from several restarts.
+
+\subsection{Fitted result}
+The fit is stable across restarts, with a slightly higher log-likelihood than the
+spontaneous model (as expected from the extra parameters), and recovers the same
+spontaneous parameters ($\sigma\approx6.5^\circ,\ \alpha\approx2.3,\
+\theta\approx21^\circ$, symmetric $T^0$) plus a \textbf{positive following gain}
+$\kappa\approx0.40>0$: the fish turns toward the dots. At full salience
+($b=1$, dots at $90^\circ$) this makes a turn-toward $\approx2.2\times$ more
+likely than a turn-away from a turn state. The forward drift $g$ is small, so the
+following acts mainly through the transition.
+
+\plotph{Following bias: $P(\text{turn}\pm\mid\text{turn state})$ vs.\ input
+        $b=\sin\phi$ (the $\kappa$ effect), and emissions vs.\ data (notebook
+        \texttt{fit\_hmm\_stim.ipynb}, Sect.~3).}
+
+\subsection{Stimulus-aware generation and comparison video}
+Synthetic paths are generated as in Sect.~\ref{sec:gen}, but each bout's state
+and forward mean use $A^{(n)}$ and $b_F(\cdot;b_n)$ with $b_n$ recomputed from the
+synthetic pose and the real dot centroid, so the fish steers toward the dots. In
+a controlled test with a fixed virtual stimulus, the fitted model spends $38\%$
+of its time within $30$~mm of the stimulus vs.\ $16\%$ at $\kappa=0$ -- following
+more than doubles time-near-stimulus.
+
+For a like-for-like video, the bout-level output is rendered back to a per-frame
+($30$~fps) trajectory: the fish holds its pose during the inter-bout interval and
+executes the sampled reorientation and step at the bout onset (``wait, then
+dart''); distances are converted to pixels with the per-dish scale
+$s_f^{-1}$. Each synthetic segment is seeded from the real fish for the first
+few seconds and carries the \emph{real} dot positions, so a 2$\times$N video
+shows the real fish (top) and the stimulus-driven HMM (bottom) under exactly the
+same stimuli.
+
+\plotph{Controlled following demo: paths for $\kappa{=}0$ vs.\ fitted $\kappa$
+        with a fixed stimulus (notebook \texttt{fit\_hmm\_stim.ipynb}, Sect.~4).}
+\plotph{Comparison video frames: real (top) vs.\ stimulus-driven HMM (bottom)
+        over the same dots (\texttt{runs/hmm\_stim/comparison.mp4}).}
+
+\end{document}

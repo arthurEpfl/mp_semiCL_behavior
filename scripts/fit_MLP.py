@@ -203,12 +203,22 @@ def _inv_softplus(y):
 # =========================================================================== #
 #  Feature builder -- the SINGLE source of truth (reused by fit/score/sample)
 # =========================================================================== #
-def _history_block(dtheta, K, dth_scale):
-    """(n, K) AR block: column k-1 = dtheta[t-k], zero-padded for t < k."""
+def _history_block(dtheta, K, dth_scale, run_pos=None):
+    """(n, K) AR block: column k-1 = dtheta[t-k], zero-padded for t < k.
+
+    ``run_pos`` (position within a quiescence-free run) additionally zeroes slot k-1 wherever
+    ``run_pos < k``, so a bout early in a run never carries a turn from BEFORE its gap. Without
+    it the padding happens once per record -- one per fish -- and ~11% of rows carry at least
+    one lag reaching across minutes of stillness. ``None`` reproduces the old behaviour exactly.
+    """
     n = len(dtheta)
     Hh = np.zeros((n, K))
     for k in range(1, K + 1):
         Hh[k:, k - 1] = dtheta[:-k]
+    if run_pos is not None:
+        rp = np.asarray(run_pos)
+        for k in range(1, K + 1):
+            Hh[rp < k, k - 1] = 0.0
     return Hh / dth_scale
 
 
@@ -230,10 +240,10 @@ def _stim_block(rec, stim_mode, rich_scales, phi_ref="ori"):
     instead of the raw body orientation -- matching the frame the closed-loop generator's
     per-bout recompute (``MX._dot_stim_row``) actually uses. Default = old behaviour."""
     n = rec.n
-    if phi_ref == "travel" and stim_mode not in ("dot", "dotb", "shoal", "shoalr", "shoalf"):
+    if phi_ref == "travel" and stim_mode not in ("dot", "dotb", "shoal", "shoalr", "shoalf", "s1", "s2"):
         raise ValueError(f"phi_ref='travel' is not supported for stim_mode {stim_mode!r}")
     _phi = None
-    if stim_mode in ("dot", "dotb", "shoal", "shoalr", "shoalf"):
+    if stim_mode in ("dot", "dotb", "shoal", "shoalr", "shoalf", "s1", "s2"):
         if phi_ref == "travel":
             if getattr(rec, "stim_angle_travel", None) is None:
                 raise RuntimeError("phi_ref='travel' needs rec.stim_angle_travel "
@@ -268,6 +278,36 @@ def _stim_block(rec, stim_mode, rich_scales, phi_ref="ori"):
         s = np.nan_to_num(np.sin(phi)); c = np.nan_to_num(np.cos(phi))  # 0 where no active dot
         mv = np.asarray(rec.moving, float)
         return np.stack([s, c, g * s, g * c, g, mv], axis=1).astype(float)   # (n, 6)
+    if stim_mode in ("s1", "s2"):
+        # The notebook's S1 / S2. Deliberately NOT `dot`: same width, different content.
+        #   [act, sin phi, cos phi, g, moving, nz]        (S1, 6)
+        #   + outside                                     (S2, 7)
+        # vs dot's [s, c, g*s, g*c, g, mv] -- S1 spends its budget on the ACTIVE gate and
+        # GROUP SIZE and has no range x bearing interaction, so the two are a real contrast
+        # rather than a relabelling. g is the monotone proximity weight 1/(1 + r_mm/20).
+        phi = _phi
+        act = np.isfinite(phi)
+        s_ = np.where(act, np.sin(np.nan_to_num(phi)), 0.0)
+        c_ = np.where(act, np.cos(np.nan_to_num(phi)), 0.0)
+        if getattr(rec, "dot_prox", None) is None:
+            raise RuntimeError(f"stim_mode={stim_mode!r} needs rec.dot_prox "
+                               "(run scripts/add_dot_geometry.py, then build_border_records).")
+        g_ = np.where(act, np.nan_to_num(np.asarray(rec.dot_prox, float)), 0.0)
+        N_ = np.nan_to_num(np.asarray(getattr(rec, "n_dots", np.zeros(n)), float))
+        nz_ = np.where(act, np.log2(np.clip(N_, 1.0, None)) / np.log2(SHOAL_N_MAX), 0.0)
+        mv_ = np.nan_to_num(np.asarray(rec.moving, float))
+        cols = [act.astype(float), s_, c_, g_, mv_, nz_]
+        if stim_mode == "s2":
+            # outside = the dot CENTROID lies beyond the dish wall. 11% of real stimulus
+            # bouts, and at MATCHED range the shoal is followed ~0.18 less often there, so it
+            # carries information a range channel cannot supply.
+            if getattr(rec, "dot_cx", None) is None or getattr(rec, "dish_R", None) is None:
+                raise RuntimeError("stim_mode='s2' needs rec.dot_cx/dot_cy and the dish "
+                                   "(build_border_records supplies both).")
+            r_dot = np.hypot(np.asarray(rec.dot_cx, float) - rec.dish_cx,
+                             np.asarray(rec.dot_cy, float) - rec.dish_cy) / float(rec.dish_R)
+            cols.append(np.where(act, (np.nan_to_num(r_dot) > 1.0).astype(float), 0.0))
+        return np.stack(cols, axis=1).astype(float)
     if stim_mode == "dotb":
         # bearing-only ablation of 'dot': [sin φ, cos φ, moving] present on ALL active-dot bouts
         # (moving AND static) -- unlike `simple` (sin φ on moving bouts only). Drops the proximity
