@@ -55,9 +55,34 @@ class MDNMix(nn.Module):
         return self._angle_params(self.head(self.body(x)))
 
 
+#  Scale floor for the mixture components. NOT cosmetic -- see mix_logdens.
+#  Far below anything physical (the smallest fitted sigmaF on the shipped rej checkpoint is 10.6
+#  DEGREES, and the smallest Gamma scale is 5.1) and far above the value at which the gradient
+#  overflows (1e-9). That separation is the whole point: on any sane model this never binds, so it
+#  cannot change a fitted result, while making the degenerate corner unreachable.
+SCALE_FLOOR = 1e-3
+
+
 def mix_logdens(dtheta, params):
-    """Per-bout log predictive density of the 5-component mixture (nats over degrees)."""
+    """Per-bout log predictive density of the 5-component mixture (nats over degrees).
+
+    THE SCALE FLOOR IS LOAD-BEARING, and it fixes a bug that silently discarded most of training.
+    An unused mixture component is unconstrained in scale -- once its weight goes to zero the
+    likelihood no longer cares how narrow it is -- so sigma drifts down toward ``M.EPS`` (1e-12).
+    At sigma <= 1e-9 the term ``dtheta**2 / (2 sigma**2)`` has a gradient that OVERFLOWS to inf,
+    while the same component's logsumexp weight underflows to exactly 0. The backward pass then
+    computes 0 * inf = NaN.
+
+    The loss stays perfectly FINITE throughout, so nothing looks wrong: only the gradient is
+    poisoned, and ``JT.guarded_step`` silently drops the update. Measured on the recurrent fit:
+    **264 of 351 steps (75%) discarded, 0 non-finite losses** -- i.e. the model was training on a
+    quarter of its budget while reporting a healthy curve. The failure rate rises with batch x
+    chunk simply because more bouts per loss means more chances to hit a collapsed component.
+    """
     logw, sF, aL1, tL1, aL2, tL2, aR1, tR1, aR2, tR2 = params
+    sF = sF.clamp(min=SCALE_FLOOR)
+    tL1 = tL1.clamp(min=SCALE_FLOOR); tL2 = tL2.clamp(min=SCALE_FLOOR)
+    tR1 = tR1.clamp(min=SCALE_FLOOR); tR2 = tR2.clamp(min=SCALE_FLOOR)
     logNF = -0.5 * (_LOG2PI + 2.0 * torch.log(sF)) - dtheta ** 2 / (2.0 * sF ** 2)
     gL1 = M._gamma_logpdf_torch(-dtheta, aL1, tL1)
     gL2 = M._gamma_logpdf_torch(-dtheta, aL2, tL2)
@@ -199,7 +224,7 @@ def generate_mix(model, rec, cfg_feat, dt_pool, dist_pool, rng):
                 dt_s=rng.choice(dt_pool, size=n), distance_px=rng.choice(dist_pool, size=n))
 
 
-def _dot_stim_row(stim_mode, dot_cx_t, dot_cy_t, x, y, h, moving_t, n_dots_t=0.0):
+def _dot_stim_row(stim_mode, dot_cx_t, dot_cy_t, x, y, h, moving_t, n_dots_t=0.0, dish=None):
     """Honest closed-loop recompute of the 'dot'/'dotb'/'shoal' stim row from the CURRENT generated
     pose (x, y, h) and the REAL dot centroid (dot_cx_t, dot_cy_t) -- so the fish reacts to its OWN
     bearing to the real dots (mirrors the wall recompute), NOT the teacher-forced real-fish bearing.
@@ -215,6 +240,26 @@ def _dot_stim_row(stim_mode, dot_cx_t, dot_cy_t, x, y, h, moving_t, n_dots_t=0.0
         phi = MB._wrap_pi(np.arctan2(dot_cy_t - y, dot_cx_t - x) - h)
         r_px = float(np.hypot(dot_cx_t - x, dot_cy_t - y))
         return M.shoal_channels([phi], [r_px], [n_dots_t], [moving_t], **kw)[0]
+    if stim_mode in ("s1", "s2"):
+        # column-for-column mirror of fit_MLP._stim_block's s1/s2 branch, from the GENERATED
+        # pose. `dish` = (cx, cy, R) is required for s2's `outside` -- passing None would
+        # silently emit 0 and the fish would never learn it had lost the shoal.
+        w = 6 + (stim_mode == "s2")
+        nz_ = (np.log2(max(float(n_dots_t), 1.0)) / np.log2(M.SHOAL_N_MAX)
+               if np.isfinite(dot_cx_t) else 0.0)
+        if not np.isfinite(dot_cx_t):
+            return np.array([0.0] * 4 + [moving_t, 0.0] + ([0.0] if w == 7 else []), float)
+        phi = MB._wrap_pi(np.arctan2(dot_cy_t - y, dot_cx_t - x) - h)
+        r_px = float(np.hypot(dot_cx_t - x, dot_cy_t - y))
+        g = 1.0 / (1.0 + (r_px / PX_PER_MM) / R0_MM)
+        row = [1.0, float(np.sin(phi)), float(np.cos(phi)), g, float(moving_t), nz_]
+        if stim_mode == "s2":
+            if dish is None:
+                raise RuntimeError("stim_mode='s2' needs dish=(cx, cy, R) to recompute "
+                                   "`outside` from the generated pose")
+            dcx_, dcy_, R_ = dish
+            row.append(float(np.hypot(dot_cx_t - dcx_, dot_cy_t - dcy_) / R_ > 1.0))
+        return np.array(row, float)
     if not np.isfinite(dot_cx_t):                       # no active dot at this bout onset
         return (np.array([0.0, 0.0, 0.0, 0.0, 0.0, moving_t], float) if stim_mode == "dot"
                 else np.array([0.0, 0.0, moving_t], float))
@@ -225,6 +270,19 @@ def _dot_stim_row(stim_mode, dot_cx_t, dot_cy_t, x, y, h, moving_t, n_dots_t=0.0
     r_px = np.hypot(dot_cx_t - x, dot_cy_t - y)          # proximity from the CURRENT pose
     g = 1.0 / (1.0 + (r_px / PX_PER_MM) / R0_MM)
     return np.array([s, c, g * s, g * c, g, moving_t], float)
+
+
+# Stimulus representations whose feature row can be REBUILT from a generated pose, i.e. the ones
+# with an online counterpart in `_dot_stim_row`. Anything not listed here falls back to replaying
+# the record's own stimulus track, which under a free-running rollout means the fish is at one
+# place and the dots it "sees" are wherever the REAL fish's dots were.
+#
+# It is a single constant because it was three copies, and s1/s2 were added to the trainer
+# (`M._stim_block`) and to the online builder (`_dot_stim_row`) without being added here. The
+# rollouts then silently teacher-forced the stimulus for every s1/s2 model while shoal*/dot*
+# models ran the honest closed loop -- so the two families' stimulus metrics were not measuring
+# the same thing at all. One name, one place to extend.
+ONLINE_STIM_MODES = ("dot", "dotb", "shoal", "shoalr", "shoalf", "s1", "s2")
 
 
 def generate_mix_loop(model, rec, cfg_feat, dt_pool, dist_pool, rng,
@@ -257,7 +315,7 @@ def generate_mix_loop(model, rec, cfg_feat, dt_pool, dist_pool, rng,
     use_border = cfg_feat.get("use_border")
     tf_border = MB._border_block(rec, cfg_feat) if use_border else np.zeros((n, 0))
     recompute_stim = (stim_loop and closed_loop
-                      and cfg_feat["stim_mode"] in ("dot", "dotb", "shoal", "shoalr", "shoalf"))
+                      and cfg_feat["stim_mode"] in ONLINE_STIM_MODES)
     use_adapt = cfg_feat.get("use_adapt")
     adapt_online = bool(use_adapt and closed_loop)       # advance the accumulator from the GENERATED pose
     if recompute_stim or adapt_online:                   # need the real dot positions in the loop
@@ -288,7 +346,7 @@ def generate_mix_loop(model, rec, cfg_feat, dt_pool, dist_pool, rng,
             if np.isfinite(dot_cx_a[t]):
                 phi_gen[t] = MB._wrap_pi(np.arctan2(dot_cy_a[t] - y, dot_cx_a[t] - x) - h)
             stim_t = _dot_stim_row(cfg_feat["stim_mode"], dot_cx_a[t], dot_cy_a[t],
-                                   x, y, h, mv_a[t], nd_a[t])
+                                   x, y, h, mv_a[t], nd_a[t], dish=(cx, cy, R))
             # the online row and the trained block must agree in width for EVERY stim_mode --
             # the layout is replicated by hand in several places with no other check
             assert stim_t.shape[0] == stim.shape[1], "closed-loop stim row width != block width"
@@ -770,7 +828,7 @@ def generate_mix_kin_loop(model, rec, cfg_feat, rng, closed_loop=True, guardrail
     use_border = cfg_feat.get("use_border")
     tf_border = MB._border_block(rec, cfg_feat) if use_border else np.zeros((n, 0))
     recompute_stim = (stim_loop and closed_loop
-                      and cfg_feat["stim_mode"] in ("dot", "dotb", "shoal", "shoalr", "shoalf"))
+                      and cfg_feat["stim_mode"] in ONLINE_STIM_MODES)
     use_adapt = cfg_feat.get("use_adapt")
     adapt_online = bool(use_adapt and closed_loop)
     if recompute_stim or adapt_online:
@@ -853,7 +911,7 @@ def generate_mix_kin_loop(model, rec, cfg_feat, rng, closed_loop=True, guardrail
             if np.isfinite(dot_cx_a[t]):
                 phi_gen[t] = MB._wrap_pi(np.arctan2(dot_cy_a[t] - y, dot_cx_a[t] - x) - h)
             stim_t = _dot_stim_row(cfg_feat["stim_mode"], dot_cx_a[t], dot_cy_a[t],
-                                   x, y, h, mv_a[t], nd_a[t])
+                                   x, y, h, mv_a[t], nd_a[t], dish=(cx, cy, R))
             # the online row and the trained block must agree in width for EVERY stim_mode --
             # the layout is replicated by hand in several places with no other check
             assert stim_t.shape[0] == stim.shape[1], "closed-loop stim row width != block width"
@@ -1154,14 +1212,95 @@ def _turnsign_acf1(dth):
     return float((x[1:] * x[:-1]).sum() / den) if den else np.nan
 
 
-def _gen_for(cfg_feat):
+_STATE_ROLL_CACHE = {}
+STATE_CALIB_CAP = 1800          # bouts; 30 windows of 60, vs the 12 win_acf1 needs
+
+
+def _gen_for(cfg_feat, records=None):
     """Which free-run generator this cfg belongs to.
 
     The generation-time calibrators (containment, vigor, artr, ...) all roll the model out, and
     the joint model has a different rollout because its heads are chained. Dispatching on the cfg
     rather than threading a `gen_fn` through every calibrator keeps the call sites unchanged and
     means a model can never be calibrated with the wrong generator.
+
+    THE RECURRENT CASE, which this function promised and did not deliver. A `state` model's heads
+    read ``[body(x), h]``, so the numpy predictor -- which has no GRU and builds a width-`hidden`
+    trunk -- raises a shape error the moment any calibrator rolls it out (measured: `160 vs 128` in
+    `_search_kin_feedback`). Every gru arm so far dodged this only by having contain / kin_fb /
+    innov all switched OFF; the first arm to turn them on found it immediately. Routing state models
+    to the torch rollout here fixes all ten call sites at once, which is exactly the property the
+    paragraph above claims.
     """
+    if int(cfg_feat.get("state", 0)):
+        import fit_MLP_fishre as _FR
+
+        # BATCH ACROSS THE CALIBRATOR'S FISH LOOP. Every search here iterates the SAME record list
+        # once per grid point, and a recurrent rollout is dispatch-bound -- so calling it once per
+        # fish at batch 1 is the worst possible shape. Measured: 25 s for 12 trajectories that way
+        # against 1.3 s batched, a 19x difference, and `srnn1` runs five such searches per fold.
+        # Passing `records` lets the first call of a loop roll the whole set out together and serve
+        # the rest from cache; without it this degrades to the correct-but-slow per-record path.
+        # MODULE-LEVEL, not closure-level: every call site below rebuilds `_gen_for(cf)`
+        # INSIDE its fish loop, so a per-closure cache would be discarded on every record and
+        # never hit once.
+        cache = _STATE_ROLL_CACHE
+
+        def _stream(rng, rec):
+            """A key for the rng STREAM, shared across a loop's fish but distinct across replicates.
+
+            The cfg alone is not enough. ``_search_drift_gain`` holds the cfg fixed and varies the
+            seed per REPLICATE (``[seed + rep, fish_id]``); keying on cfg alone would serve replicate
+            0's rollouts to every later one and silently make the replication inert -- which is the
+            one thing that search cannot afford, since its own docstring records the radial acf
+            swinging -0.035 to +0.117 across seeds, larger than the effect being fitted.
+
+            So: take the rng's seed entropy, and drop a trailing element ONLY when it is verifiably
+            this record's fish id. That is a check, not a positional guess -- per-fish streams
+            (``[seed, fish_id]``) collapse to one key across the loop, while shared streams
+            (``[seed, 7717, rep]``) keep theirs intact.
+            """
+            ent = getattr(getattr(rng, "bit_generator", None), "seed_seq", None)
+            ent = getattr(ent, "entropy", None)
+            if isinstance(ent, (list, tuple)) and ent and ent[-1] == int(getattr(rec, "fish_id", -1)):
+                return repr(tuple(ent[:-1]))
+            return repr(ent)
+
+        def _key(cfg, rng, rec):
+            # Only the keys a calibrator actually varies. The cache MUST invalidate when the search
+            # moves to the next grid point, or every point would score the first one's rollouts.
+            return repr([id(model_ref[0]), [id(r) for r in records], _stream(rng, rec)]
+                        + [cfg.get(k) for k in ("centre_bias", "wall_reject", "kin_feedback",
+                                                "kin_innov", "vigor", "indiv", "drift", "fish_re",
+                                                "dt_snap", "wall_mode")])
+
+        model_ref = [None]
+
+        def _state_gen(model, rec, cfg, rng, **gen_kw):
+            model_ref[0] = model
+            # gen_kw (closed_loop / guardrail / eps / stim_loop) is accepted and IGNORED: the torch
+            # rollout is closed-loop with a reflecting guardrail by construction, so those knobs
+            # have no counterpart rather than being silently dropped.
+            if not records:
+                return _FR.state_rollout_batch(model, rec, cfg, 1, rng)[0]
+            k = _key(cfg, rng, rec)
+            if cache.get("k") != k:
+                # One rng for the whole set, taken from whichever record opened the loop. That is
+                # deterministic (loop order is fixed) so the comparison ACROSS grid points -- which
+                # is what every one of these searches actually reads -- stays paired.
+                # CALIBRATION-ONLY LENGTH CAP. These searches read window-level statistics --
+                # occupancy rates, lag-1 acfs, across-window acf1 -- all of which converge long
+                # before a record's full ~3100 bouts. `win_acf1` needs 12 windows of 60; 1800 gives
+                # 30. Never applied to the metrics, where a shorter rollout would change the
+                # comparison with real trajectories rather than just its precision.
+                outs = _FR.state_rollout_many(model, list(records), cfg, 1, rng,
+                                              n_cap=STATE_CALIB_CAP)
+                cache.clear()
+                cache["k"] = k
+                cache["by"] = {id(r): o for r, o in zip(records, outs)}
+            got = cache["by"].get(id(rec))
+            return got if got is not None else _FR.state_rollout_batch(model, rec, cfg, 1, rng)[0]
+        return _state_gen
     if cfg_feat.get("joint"):
         import fit_MLP_joint as _J
         return _J.generate_mix_joint_loop
@@ -1216,8 +1355,9 @@ def _search_containment(model, records, cfg_feat, grid=(0.0, 1.0, 1.75, 2.5, 3.2
         """(mean wall occupancy, mean r/R, mean P(r/R>0.95)) over the calibration fish."""
         cf["centre_bias"] = cb
         o_, m_, p_ = [], [], []
+        _gen = _gen_for(cf, recs)
         for r in recs:
-            g = _gen_for(cf)(model, r, cf, np.random.default_rng([seed, int(r.fish_id)]), **gen_kw)
+            g = _gen(model, r, cf, np.random.default_rng([seed, int(r.fish_id)]), **gen_kw)
             u = np.hypot(np.asarray(g["x_px"], float) - r.dish_cx,
                          np.asarray(g["y_px"], float) - r.dish_cy) / r.dish_R
             o_.append(float(np.mean(u > 0.85))); m_.append(float(np.mean(u)))
@@ -1333,8 +1473,15 @@ def _search_containment(model, records, cfg_feat, grid=(0.0, 1.0, 1.75, 2.5, 3.2
 # sub-millimetre mass is tracking glitch. Letting a two-moment statistical objective run below
 # 1 mm would be fitting that glitch. J20 pins at 1.0 (2026-08-24); 1.5 gives the search resolution
 # inside the supported band instead of range outside it.
-REJECT_D0_GRID = (1.0, 1.5, 2.0, 3.0)     # hard floor, mm from the physical wall
-REJECT_D1_GRID = (6.0, 10.0, 14.0)        # full acceptance beyond this, mm
+# d0 is PINNED, not swept. Round 2a measured it scattering 1.0-3.0 across folds while the fitted
+# moments stayed on target -- i.e. the two-moment objective does NOT identify d0, so sweeping it
+# spent ~9 extra rollout-sets per fit choosing between configurations the objective cannot tell
+# apart. 2.0 mm is the physically measured rim: pooled over 4.7 M real frames there is 0.021%
+# inside 1 mm, EXACTLY NOTHING between 1 and 2 mm, and 0.005% in 2-3 mm -- and an occupied band
+# above an empty one is a discontinuity a continuous trajectory cannot make, so the sub-millimetre
+# mass is tracking glitch. Physics fixes d0; the fit gets d1.
+REJECT_D0_MM = 2.0
+REJECT_D1_GRID = (6.0, 8.0, 10.0, 12.0, 14.0)   # full acceptance beyond this, mm
 REJECT_BULK_GRID = (0.0, 2.0, 4.0)        # residual constant inward turn bias, deg (0 first)
 
 
@@ -1354,7 +1501,7 @@ def _radial_targets(records):
 
 
 def _search_wall_reject(model, records, cfg_feat, seed=0, max_fish=12, w_occ=2.6,
-                        d0_grid=REJECT_D0_GRID, d1_grid=REJECT_D1_GRID,
+                        d0=REJECT_D0_MM, d1_grid=REJECT_D1_GRID,
                         bulk_grid=REJECT_BULK_GRID, tail_max=None, max_draws=20,
                         decouple=False, graded=False, **gen_kw):
     """Fit ``(bulk, d0, d1)`` -- the shallow-border boundary condition -- returning
@@ -1399,8 +1546,9 @@ def _search_wall_reject(model, records, cfg_feat, seed=0, max_fish=12, w_occ=2.6
         cf["centre_bias"] = {"bulk": float(bulk), "shell": 0.0, "u0": 0.75}
         cf["wall_reject"] = {"d0": float(d0), "d1": float(d1), "max_draws": int(max_draws)}
         o_, m_, p_, dr_, fb_ = [], [], [], [], []
+        _gen = _gen_for(cf, recs)
         for r in recs:
-            g = _gen_for(cf)(model, r, cf, np.random.default_rng([seed, int(r.fish_id)]), **gen_kw)
+            g = _gen(model, r, cf, np.random.default_rng([seed, int(r.fish_id)]), **gen_kw)
             u = np.hypot(np.asarray(g["x_px"], float) - r.dish_cx,
                          np.asarray(g["y_px"], float) - r.dish_cy) / r.dish_R
             nb = max(len(u), 1)
@@ -1420,15 +1568,26 @@ def _search_wall_reject(model, records, cfg_feat, seed=0, max_fish=12, w_occ=2.6
         return s
 
     b0 = float(bulk_grid[0])
-    pairs = [(d0, d1) for d0 in d0_grid for d1 in d1_grid if d1 > d0]
-    d0b, d1b = min(pairs, key=lambda p: _score(_eval(b0, p[0], p[1])))
+    d0b = float(d0)
+    cand = [x for x in d1_grid if x > d0b]
+    d1b = min(cand, key=lambda x: _score(_eval(b0, d0b, x)))
     bulk_b = min(bulk_grid, key=lambda bk: _score(_eval(bk, d0b, d1b)))
-    if bulk_b != b0:                                   # bulk moved -> the (d0,d1) optimum may too
-        d0b, d1b = min(pairs, key=lambda p: _score(_eval(bulk_b, p[0], p[1])))
+    if bulk_b != b0:                                   # bulk moved -> the d1 optimum may too
+        d1b = min(cand, key=lambda x: _score(_eval(bulk_b, d0b, x)))
     o_, m_, p_, dr_, fb_ = _eval(bulk_b, d0b, d1b)
-    if d0b in (d0_grid[0], d0_grid[-1]) or d1b in (d1_grid[0], d1_grid[-1]):
-        print(f"    WARNING: shallow-border ramp pinned at a grid edge (d0={d0b}, d1={d1b}); "
-              "widen the grid before trusting this arm")
+    # WARN ON THE RESULT, NOT ON GRID POSITION. The previous check fired whenever the argmin sat on
+    # an endpoint, and with a 3-point d1 grid two of the three points WERE endpoints -- so ~83% of
+    # fits warned by chance and the warning carried no information (measured: 4 of 5 folds on every
+    # arm). What actually matters is whether the fitted moments landed on target.
+    _z_occ = abs(o_ - tgt) / sd_occ
+    _z_mn = abs(m_ - tgt_mean) / sd_mean
+    if _z_occ > 1.0 or _z_mn > 1.0:
+        print(f"    WARNING: shallow-border fit missed its targets (occ {o_:.4f} vs {tgt:.4f}, "
+              f"{_z_occ:.1f} sd; mean r/R {m_:.4f} vs {tgt_mean:.4f}, {_z_mn:.1f} sd) "
+              f"at d1={d1b}, bulk={bulk_b}")
+    elif d1b in (cand[0], cand[-1]):
+        print(f"    note: d1 landed on the grid edge ({d1b}) but the moments are on target "
+              f"(occ {_z_occ:.1f} sd, mean {_z_mn:.1f} sd)")
     if fb_ > 0.005:
         print(f"    WARNING: rejection fell back to the guardrail on {100 * fb_:.2f}% of bouts "
               f"(mean {dr_:.2f} draws/bout) -- max_draws={max_draws} may be too small")
@@ -1439,6 +1598,136 @@ def _search_wall_reject(model, records, cfg_feat, seed=0, max_fish=12, w_occ=2.6
     wr = {"d0": float(d0b), "d1": float(d1b), "max_draws": int(max_draws),
           "draws_per_bout": dr_, "fallback_frac": fb_}
     return cb, wr
+
+
+# =========================================================================== #
+#  Drift: fit the spatial loading against the ACROSS-WINDOW autocorrelation
+# =========================================================================== #
+WIN_W = 60                       # must match GM.window_features_traj's W
+# Must BRACKET the solution in both directions -- a gain pinned at a grid edge is a documented trap
+# in this repo (the fishre core gain sat at 0.4, the edge, for two arms before it was noticed).
+# Measured on rej with loadings turn 0.076 / dist 0.464 / dt 0.077: dt overshot to +0.437 and
+# distance to +0.529 against targets +0.332 / +0.337, i.e. the answer is BELOW 1, and an old grid
+# starting at 0.5 could not have expressed it. Hence the low end.
+DRIFT_GAIN_GRID = (0.15, 0.3, 0.6, 1.0, 1.8, 3.0)
+
+
+def window_acf1(series, W=WIN_W):
+    """Lag-1 autocorrelation of the WINDOW-MEAN series, computed within one trajectory.
+
+    This is the statistic the whole drift mechanism exists to move, and it is deliberately a
+    WITHIN-fish quantity: demeaning removes any static per-trajectory latent, so `fish_re`,
+    `rad_indiv`, `rad_gate` and `re_bgain` all score exactly zero on it by construction. That is
+    why six mechanisms in a row could not touch it.
+    """
+    ch = np.asarray(series, float)
+    nw = len(ch) // int(W)
+    if nw < 12:
+        return np.nan
+    w = ch[:nw * int(W)].reshape(nw, int(W))
+    w = w[np.isfinite(w).all(1)]
+    if len(w) < 12:
+        return np.nan
+    x = w.mean(1); x = x - x.mean()
+    d = float((x * x).sum())
+    return float((x[1:] * x[:-1]).sum() / d) if d > 0 else np.nan
+
+
+def _radial_series(rec, x, y):
+    return np.hypot(np.asarray(x, float) - rec.dish_cx,
+                    np.asarray(y, float) - rec.dish_cy) / rec.dish_R
+
+
+def _drift_acfs(model, recs, cf, seed, reps, gen_kw):
+    """Mean generated across-window acf1 for (dt, distance, radial) over ``reps`` replicates."""
+    o = {"dt": [], "dist": [], "rad": []}
+    _gen = _gen_for(cf, recs)
+    for r in recs:
+        for rep in range(reps):
+            g = _gen(model, r, cf,
+                     np.random.default_rng([seed + rep, int(r.fish_id)]), **gen_kw)
+            o["dt"].append(window_acf1(np.log(np.clip(g["dt_s"], 1e-6, None))))
+            o["dist"].append(window_acf1(np.log(np.clip(g["distance_px"], 1e-6, None))))
+            o["rad"].append(window_acf1(_radial_series(r, g["x_px"], g["y_px"])))
+    return {k: float(np.nanmean(v)) for k, v in o.items()}
+
+
+def _search_drift_gain(model, records, cfg_feat, seed=0, max_fish=8, reps=2,
+                       gain_grid=DRIFT_GAIN_GRID, **gen_kw):
+    """Fit the two KINEMATIC gains against the measured across-window acf of dt and distance.
+
+    WHY A SEARCH AND NOT A GRADIENT. The likelihood-fitted loadings optimise one-step predictive
+    density, which does not identify an across-window autocorrelation -- the same mis-identification
+    that put dt_latent's tau at 107-152 against a much shorter real timescale. So the amplitudes are
+    fitted by likelihood and then put on target against a ROLLOUT statistic.
+
+    RADIAL IS REPORTED, NOT OPTIMISED. The spatial channel (`bord`) was built and refuted; see
+    DRIFT_DEFAULT for the grid that shows it either fails to move the acf or destroys occupancy.
+
+    WHY THIS OBJECTIVE AND NOT THE PREVIOUS ONE. The energy-distance policy gradient in
+    ``rollout_aware.py`` diluted a 4-of-39-feature defect across a 39-dimensional omnibus and then
+    estimated it with a score-function gradient; its between-arm differences came out SMALLER than
+    its own within-arm noise. Here TWO scalars are fitted against THREE statistics the model misses
+    by >6 sigma each (measured, 15 fish x 3 replicates: dt +0.332 vs -0.001, distance +0.337 vs
+    -0.002, radial +0.377 vs +0.043). Same well-posed shape as ``_search_wall_reject``.
+
+    ``reps`` matters and is not padding: the radial acf on a single replicate of 6 fish swung
+    -0.035 to +0.117 across seeds, which is larger than the effect being fitted. Replicating is
+    what makes this a measurement rather than noise-fitting.
+    """
+    tg = {"dt": [], "dist": [], "rad": []}
+    for r in records:
+        tg["dt"].append(window_acf1(np.log(np.clip(r.dt_s, 1e-6, None))))
+        tg["dist"].append(window_acf1(np.log(np.clip(r.distance_px, 1e-6, None))))
+        tg["rad"].append(window_acf1(_radial_series(r, r.x_px, r.y_px)))
+    tgt = {k: float(np.nanmean(v)) for k, v in tg.items()}
+    recs = list(records)[:max_fish]
+    base = dict(cfg_feat.get("drift") or {})
+    if not base:
+        raise ValueError("_search_drift_gain needs cfg_feat['drift'] (publish it after the fit)")
+    d_dist, d_dt = float(base.get("dist", 0.0)), float(base.get("dt", 0.0))
+
+    def _cfg(gd, gt):
+        # Re-centring so a scaled loading cannot inflate the kinematic marginals -- see the
+        # generator's drift block. exp((g^2-1) d^2 / 2) is the exact inflation for a unit-variance
+        # zero-mean state, so subtracting its log from the location cancels it.
+        cf = dict(cfg_feat)
+        cf["drift"] = dict(base, g_dist=float(gd), g_dt=float(gt),
+                           dist_c=0.5 * (gd * gd - 1.0) * d_dist * d_dist,
+                           dt_c=0.5 * (gt * gt - 1.0) * d_dt * d_dt)
+        return cf
+
+    # TWO INDEPENDENT 1-D searches, not a product grid: each kinematic channel's across-window acf
+    # responds to its OWN loading, and a single shared gain provably cannot serve both (measured --
+    # the gain that put dt on target left distance at +0.118 against +0.253).
+    curve_d = [(float(g), _drift_acfs(model, recs, _cfg(g, 1.0), seed, reps, gen_kw))
+               for g in gain_grid]
+    gd = min(curve_d, key=lambda c: abs(c[1]["dist"] - tgt["dist"]))[0]
+    curve_t = [(float(g), _drift_acfs(model, recs, _cfg(gd, g), seed + 50, reps, gen_kw))
+               for g in gain_grid]
+    gt = min(curve_t, key=lambda c: abs(c[1]["dt"] - tgt["dt"]))[0]
+    got = dict(curve_t)[gt]
+    rep = dict(target=tgt, got=got, g_dist=gd, g_dt=gt,
+               curve_dist=curve_d, curve_dt=curve_t)
+    edge = [n for n, g in (("g_dist", gd), ("g_dt", gt))
+            if g in (gain_grid[0], gain_grid[-1])]
+    if edge:
+        # The fishre core gain sat at its grid edge (0.4) for two arms before anyone noticed, and
+        # an edge value means the grid could not express the answer -- not that the answer is 0.4.
+        print(f"    WARNING: drift gain pinned at a GRID EDGE for {edge} "
+              f"(g_dist {gd}, g_dt {gt}, grid {list(gain_grid)}). Widen DRIFT_GAIN_GRID -- the "
+              f"search could not bracket the target, so this is not a fitted value.")
+    miss = [k for k in ("dt", "dist") if abs(got[k] - tgt[k]) > 0.5 * abs(tgt[k])]
+    if miss:
+        # Loud, because "the grid could not reach the target" and "the mechanism does not work" look
+        # identical in the results table, and they need opposite responses.
+        print(f"    WARNING: drift could not reach the acf target on {miss} "
+              f"(got { {k: round(got[k], 3) for k in miss} } vs real "
+              f"{ {k: round(tgt[k], 3) for k in miss} }). Widen DRIFT_GAIN_GRID before reading "
+              f"this arm as a refutation of the mechanism.")
+    # radial is REPORTED, never optimised -- see DRIFT_DEFAULT for the measurements that refuted
+    # the spatial channel. Printing it keeps the open gap visible next to the two that closed.
+    return gd, gt, rep
 
 
 def _search_wall(model, records, cfg_feat, *, mode="bias", **kw):
@@ -1470,8 +1759,9 @@ def _fit_qmap(model, records, cfg_feat, n_grid=256, seed=0, max_fish=10, **gen_k
     HELD-OUT fish's marginal and is therefore a diagnostic upper bound only.
     """
     recs = list(records)[:max_fish]
-    gen = [_gen_for(cfg_feat)(model, r, cfg_feat, np.random.default_rng([seed, int(r.fish_id)]),
-                                 **gen_kw) for r in recs]
+    _gen = _gen_for(cfg_feat, recs)
+    gen = [_gen(model, r, cfg_feat, np.random.default_rng([seed, int(r.fish_id)]),
+                **gen_kw) for r in recs]
     q = np.linspace(0.0, 1.0, n_grid)
     out = {}
     for ch, gkey, rget in (("dtheta", "dtheta", lambda r: np.asarray(r.dtheta, float)),
@@ -1541,8 +1831,8 @@ def _search_kin_feedback(model, records, cfg_feat, targets, var_targets, grid=(1
     curve = []
     for g in grid:
         cf["kin_feedback"] = g
-        gen = [_gen_for(cf)(model, r, cf, np.random.default_rng([seed, int(r.fish_id)]),
-                            **gen_kw) for r in records]
+        gen = [_gen_for(cf, records)(model, r, cf, np.random.default_rng([seed, int(r.fish_id)]),
+                                     **gen_kw) for r in records]
         curve.append((g, float(np.nanmean([_a(x["distance_px"]) for x in gen])),
                       float(np.nanmean([_a(x["dt_s"]) for x in gen])),
                       float(np.nanmean([_v(x["distance_px"]) for x in gen])),
@@ -1659,8 +1949,8 @@ def _search_indiv(model, records, cfg_feat, targets, *, closed_loop, guardrail, 
         for rep in range(reps):
             rng = np.random.default_rng([seed, 7717, rep])
             for r in sub:
-                g = _gen_for(trial)(model, r, trial, rng, closed_loop=closed_loop,
-                                    guardrail=guardrail, eps=eps, stim_loop=stim_loop)
+                g = _gen_for(trial, sub)(model, r, trial, rng, closed_loop=closed_loop,
+                                         guardrail=guardrail, eps=eps, stim_loop=stim_loop)
                 a = np.abs(np.asarray(g["dtheta"], float))
                 fw.append(float(np.mean(a < M.DTHETA0))); ad.append(a)
                 u = _radial_frac(r, g.get("x_px"), g.get("y_px"))
@@ -1718,8 +2008,8 @@ def _search_rad_indiv(model, records, cfg_feat, tgt_rad, *, closed_loop, guardra
                 # generator makes each fish's spawn children depend on how many spawns earlier
                 # fish consumed, and the base-vs-probe contrast stops being CRN-paired.
                 rng = np.random.default_rng([seed, 7719, rep, int(r.fish_id)])
-                g = _gen_for(trial)(model, r, trial, rng, closed_loop=closed_loop,
-                                    guardrail=guardrail, eps=eps, stim_loop=stim_loop)
+                g = _gen_for(trial, sub)(model, r, trial, rng, closed_loop=closed_loop,
+                                         guardrail=guardrail, eps=eps, stim_loop=stim_loop)
                 u = _radial_frac(r, g.get("x_px"), g.get("y_px"))
                 if u is not None:
                     rad.append(float(np.mean(u)))
@@ -1766,8 +2056,8 @@ def _search_rad_gate(model, records, cfg_feat, tgt_rad, *, closed_loop, guardrai
         for rep in range(reps):
             for r in sub:
                 rng = np.random.default_rng([seed, 7723, rep, int(r.fish_id)])
-                g = _gen_for(trial)(model, r, trial, rng, closed_loop=closed_loop,
-                                    guardrail=guardrail, eps=eps, stim_loop=stim_loop)
+                g = _gen_for(trial, sub)(model, r, trial, rng, closed_loop=closed_loop,
+                                         guardrail=guardrail, eps=eps, stim_loop=stim_loop)
                 u = _radial_frac(r, g.get("x_px"), g.get("y_px"))
                 if u is not None:
                     rad.append(float(np.mean(u)))
@@ -1803,8 +2093,8 @@ def _search_innov_comp(model, records, cfg_feat, *, closed_loop, guardrail, eps,
         rng = np.random.default_rng([seed, 5501])
         gd, gt = [], []
         for r in sub:
-            g = _gen_for(trial)(model, r, trial, rng, closed_loop=closed_loop,
-                                guardrail=guardrail, eps=eps, stim_loop=stim_loop)
+            g = _gen_for(trial, sub)(model, r, trial, rng, closed_loop=closed_loop,
+                                     guardrail=guardrail, eps=eps, stim_loop=stim_loop)
             gd.append(np.log(np.clip(np.asarray(g["distance_px"], float), 1e-6, None)))
             gt.append(np.log(np.clip(np.asarray(g["dt_s"], float), 1e-6, None)))
         sd_d = float(np.std(np.concatenate(gd))); sd_t = float(np.std(np.concatenate(gt)))

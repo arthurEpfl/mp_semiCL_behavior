@@ -1,0 +1,56 @@
+% =====================================================================
+%  Nomenclature for fig_architecture.tex.
+%  Requires: \usepackage{booktabs}  \usepackage{array}  \usepackage{amsmath}
+%  Use with: \input{fig_architecture_symbols}
+% =====================================================================
+\begin{table}[t]
+\centering\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabular}{@{}l l p{0.56\linewidth}@{}}
+\toprule
+\textbf{symbol} & \textbf{space} & \textbf{meaning}\\
+\midrule
+\multicolumn{3}{@{}l}{\emph{Shared trunk}}\\
+$x$        & $\mathbb{R}^{n_{\mathrm{feat}}}$ & input feature vector for one bout: the
+             concatenated turn-history, symbol, stimulus, border, adaptation and
+             kinematic-history blocks; $n_{\mathrm{feat}}$ is their total width\\
+$W_x$      & $\mathbb{R}^{128\times n_{\mathrm{feat}}}$ & weight matrix of the single hidden layer\\
+$b_0$      & $\mathbb{R}^{128}$ & bias vector of that layer\\
+$h$        & $\mathbb{R}^{128}$ & hidden (body) representation $h=\mathrm{ReLU}(W_x x + b_0)$,
+             read by all three heads; $128$ is the layer width\\
+$\phi$     & --- & all trainable parameters ($W_x$, $b_0$ and the three head weight matrices
+             and biases); the subscript in $p_\phi$\\
+\addlinespace
+\multicolumn{3}{@{}l}{\emph{The three emitted channels of a bout}}\\
+$\Delta\theta$ & $(-180,180]$ deg & signed reorientation angle (the turn)\\
+$\ell$     & $(0,\infty)$ px & travel distance of the bout, onset to onset\\
+$\tau$     & $(0,\infty)$ s  & inter-bout interval\\
+\addlinespace
+\multicolumn{3}{@{}l}{\emph{Within-bout conditioners (the chain-rule wires)}}\\
+$a$        & $\mathbb{R}_{\ge 0}$ & rescaled absolute turn, $a=|\Delta\theta|/s_\theta$\\
+$c$        & $\mathbb{R}$ & centred log travel distance, $c=(\log\ell-m_\ell)/s_\ell$\\
+$s_\theta$ & $>0$ & turn scale, $\max(\mathrm{sd}(\Delta\theta),1)$ on the training fold\\
+$m_\ell,\,s_\ell$ & $\mathbb{R},>0$ & mean and sd of $\log\ell$ on the training fold\\
+\addlinespace
+\multicolumn{3}{@{}l}{\emph{Turn-head parameters (14 raw outputs)}}\\
+$w_0,w_{L1},w_{L2},w_{R1},w_{R2}$ & simplex & the five mixture weights ($\log\mathrm{softmax}$)\\
+$\sigma_F$ & $>0$ & standard deviation of the forward Normal, centred at $0$\\
+$\alpha_{Lk},\theta_{Lk}$ & $\ge\alpha_{\min},>0$ & shape and scale of left Gamma $k$, on $-\Delta\theta$\\
+$\alpha_{Rk},\theta_{Rk}$ & $\ge\alpha_{\min},>0$ & shape and scale of right Gamma $k$, on $+\Delta\theta$\\
+\addlinespace
+\multicolumn{3}{@{}l}{\emph{Travel- and interval-head parameters}}\\
+$n_{\mathrm{dist}},\,n_{\mathrm{dt}}$ & $\mathbb{N}$ & number of log-normal components (2 and 3)\\
+$w_j,\mu_j,\sigma_j$ & simplex, $\mathbb{R}$, $>0$ & weight, log-scale location and log-scale
+             spread of component $j$; $3n$ raw outputs per head\\
+\addlinespace
+\multicolumn{3}{@{}l}{\emph{Constants and distributions}}\\
+$\varepsilon$ & $10^{-12}$ & softplus floor keeping every scale strictly positive\\
+$\alpha_{\min}$ & $1$ & floor on the Gamma shape, so no component diverges at $\Delta\theta\!\to\!0$\\
+$\mathcal{N}(0,\sigma^2)$ & --- & Normal density\\
+$\Gamma(u;\alpha,\theta)$ & --- & Gamma density on $u>0$, shape $\alpha$, scale $\theta$\\
+$\mathrm{LogN}(\mu,\sigma^2)$ & --- & log-normal: $\log X\sim\mathcal{N}(\mu,\sigma^2)$\\
+\bottomrule
+\end{tabular}
+\caption{Symbols used in Fig.~\ref{fig:architecture}.}
+\label{tab:architecture-symbols}
+\end{table}

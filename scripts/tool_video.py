@@ -25,6 +25,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+_DEFAULT_TRANSFORMED = Path(__file__).resolve().parents[1] / "data" / "data" / "df_transformed"
+
 N_STIMULI = 8
 FPS = 30
 TRAIL_S = 6.0                 # seconds of path kept behind the fish
@@ -73,6 +75,8 @@ def _anchor_for(g, program, block, lo):
     60 s block at ~1.3 s/bout, but handled rather than crashed: fall back to the fish's own
     interpolated pose at the block-onset frame, which is what the latch would have produced.
     """
+    if not getattr(program, "needs_anchor", True):
+        return None            # PhysicalProgram: placement is already absolute
     a = g.get("anchors", {}).get(int(block))
     if a is not None:
         return a
@@ -226,6 +230,20 @@ def make_tool_video(rollouts, program, out_mp4, panel_dir=None, windows=None,
             print(f"  row {r}: {lab}")
         print(f"  {man['n_frames']} frames/panel -> {out_mp4}")
 
+    render_panels(panel_dir, out_mp4, speed=speed)
+    return out_mp4, man
+
+
+def render_panels(panel_dir, out_mp4, speed=1.0):
+    """Render an already-written panel directory to ``out_mp4`` in a SUBPROCESS.
+
+    Split out of ``make_tool_video`` so real-fish panels (``write_real_panels``) render through
+    exactly the same path as generated ones -- the two videos are then comparable frame for frame
+    rather than being drawn by two code paths that can drift.
+    """
+    import bout_video as BV
+
+    out_mp4 = Path(out_mp4)
     cmd = [sys.executable, str(Path(__file__).resolve()), "--render", str(panel_dir),
            "--output", str(out_mp4), "--speed", str(speed)]
     env, rc_dir = BV._render_env(out_mp4)          # UTF-8 + bundled ffmpeg when none on PATH
@@ -235,7 +253,64 @@ def make_tool_video(rollouts, program, out_mp4, panel_dir=None, windows=None,
         if rc_dir is not None:
             import shutil
             shutil.rmtree(rc_dir, ignore_errors=True)
-    return out_mp4, man
+    return out_mp4
+
+
+# --------------------------------------------------------------------------- #
+# Real-fish panels (needs the recorded experiment; not shipped with the repo)
+# --------------------------------------------------------------------------- #
+def write_real_panels(fish_ids, windows, out_dir, transformed_dir=None, roi_path=None,
+                      n_stimuli=N_STIMULI, fps=FPS):
+    """Panel CSVs straight from the recording: rows = windows, columns = ``fish_ids``.
+
+    Same grid semantics and same ``df_base`` schema as :func:`write_panels`, so the resulting mp4
+    is directly comparable with the generated one. Each panel carries that fish's OWN dots -- which
+    is the point: the same programme is anchored to each fish separately, so the three columns show
+    the same stimulus sequence landing in three different places.
+    """
+    import pandas as pd
+    from segment_bouts import STIM_NONE, load_physical_dish
+
+    transformed_dir = Path(transformed_dir) if transformed_dir is not None else _DEFAULT_TRANSFORMED
+    out_dir = Path(out_dir); out_dir.mkdir(parents=True, exist_ok=True)
+    lens = []
+    for r, (lo, hi, _lab) in enumerate(windows):
+        lo, hi = int(lo), int(hi)
+        for c, fid in enumerate(fish_ids):
+            cands = sorted(transformed_dir.glob(f"*_f{int(fid)}_transformed_abs.csv"))
+            if not cands:
+                raise FileNotFoundError(f"no transformed CSV for fish {fid} in {transformed_dir}")
+            use = ([f"f{fid}_x", f"f{fid}_y", f"f{fid}_ori"]
+                   + [f"d{k}_{v}" for k in range(n_stimuli) for v in ("x", "y")]
+                   + [f"d{k}_stim" for k in range(n_stimuli)])
+            # `frame` equals the row index 1:1 in these files, so nrows+iloc is exact and avoids
+            # reading a 115 MB CSV in full for a 60 s window.
+            w = pd.read_csv(cands[0], usecols=use, nrows=hi).iloc[lo:hi].reset_index(drop=True)
+            cols = {"f_x": w[f"f{fid}_x"].to_numpy(float),
+                    "f_y": w[f"f{fid}_y"].to_numpy(float),
+                    "f_ori": w[f"f{fid}_ori"].to_numpy(float)}
+            for k in range(n_stimuli):
+                x = w[f"d{k}_x"].to_numpy(float)
+                cols[f"d{k}_x"] = x
+                cols[f"d{k}_y"] = w[f"d{k}_y"].to_numpy(float)
+                cols[f"d{k}_stim"] = ((~w[f"d{k}_stim"].astype(str).isin(STIM_NONE).to_numpy())
+                                      & np.isfinite(x)).astype(int)
+            df = pd.DataFrame(cols)
+            df.to_csv(out_dir / f"panel_r{r}c{c}.csv", index=False)
+            lens.append(len(df))
+
+    dish_tab = load_physical_dish(roi_path) if roi_path is not None else None
+    if dish_tab is not None:
+        d = dish_tab.loc[list(fish_ids)]
+        dish = [float(d["cx"].median()), float(d["cy"].median()), float(d["radius"].median())]
+    else:
+        dish = [180.0, 174.0, 183.5]
+    manifest = dict(n_rows=len(windows), n_cols=len(fish_ids), fps=fps, dish=dish,
+                    row_labels=[f"{w[2]}\n[frames {int(w[0])}-{int(w[1])}]" for w in windows],
+                    col_labels=[f"REAL fish {int(f)}" for f in fish_ids],
+                    n_frames=int(min(lens)), program="recorded experiment")
+    (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return manifest
 
 
 if __name__ == "__main__":

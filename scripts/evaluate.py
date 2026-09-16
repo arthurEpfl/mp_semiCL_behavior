@@ -90,8 +90,19 @@ def symbols_from_dtheta(dtheta, dtheta0=DTHETA0):
     return sym
 
 
-def load_bouts(path="data/bouts_GsizeMotionSingle.csv"):
+def load_bouts(path=None):
+    """Load the bout table. Defaults to the CLEANED table (tracking excursions repaired,
+    plus run_id / active / the modelling features). The old
+    ``data/bouts_GsizeMotionSingle.csv`` has neither ``run_id`` nor ``active``, so every
+    run-aware metric path silently falls back to its flat form -- pass it explicitly only
+    when reproducing an archived number.
+
+    ``path=None`` resolves against the REPO ROOT, not the working directory -- the previous
+    relative default only worked when run from the root."""
     import pandas as pd
+    from pathlib import Path as _P
+    if path is None:
+        path = _P(__file__).resolve().parents[1] / "clean_data" / "bouts_clean.csv"
     return pd.read_csv(path)
 
 
@@ -594,6 +605,18 @@ def cross_validate_likelihood(records, model_factories, folds, cfg=None, verbose
     """
     import pandas as pd
     cfg = cfg or {}
+    # SKIP THE GENERATION-TIME CALIBRATORS HERE. `score()` reads dth_scale, kin_scales and the
+    # fitted latents -- it never touches centre_bias, wall_reject, kin_feedback or kin_innov. So
+    # every calibrator fitted during this pass is fitted and then never read, and each one rolls the
+    # whole fish set out once per grid point. On a recurrent arm that is ~30 min per fold spent on
+    # nothing. Metric B refits from scratch anyway (quick_results runs two independent CV passes),
+    # so the calibrated model is still built exactly once, where it is actually used.
+    #
+    # Opt-out rather than opt-in, and set HERE rather than inside fit(): a model must not have to
+    # guess which pass it is in, and any future scorer that DOES read a calibrator would silently
+    # get the wrong answer from a guess.
+    cfg = dict(cfg)
+    cfg.setdefault("skip_calibrators", True)
     rows = []
     total = len(folds) * len(model_factories)      # for the optional progress callback
     done = 0

@@ -72,11 +72,11 @@ POS_SMOOTH_SIGMA = 2.0     # Gaussian trajectory smoothing (frames) -- DETECTION
 
 BOUT_LEAD_FR = round(0.08 * FPS)   # 80 ms before peak  -> bout onset
 REFRACTORY_FR = round(0.40 * FPS)  # min frames between bouts
-DISP_WIN_FR = round(0.50 * FPS)    # +/- window for displacement gate
+DISP_WIN_FR = round(0.50 * FPS)    # +/- window for displacement gate (around the PEAK)
 DISP_MIN_MM = 0.3                  # Le Goc: reject sub-threshold wobble (physical)
-DISP_MAX_MM = 18.0                 # Le Goc: reject tracking jumps (physical)
+DISP_MAX_MM = 25.0                 # Le Goc: reject tracking jumps (physical)
 DISP_MIN_PX = DISP_MIN_MM * PX_PER_MM   # = 1.101 px (gate applied in pixels)
-DISP_MAX_PX = DISP_MAX_MM * PX_PER_MM   # = 66.06 px
+DISP_MAX_PX = DISP_MAX_MM * PX_PER_MM   # = 91.75 px
 WALL_SHELL_PX = 5.0 * PX_PER_MM         # = 18.35 px (Le Goc 5 mm near-wall shell)
 SMOOTH_FR = 3                      # speed smoothing window (frames)
 FORWARD_THRESH_DEG = 10.0          # |dtheta| < 10 deg -> forward (Le Goc / HMM)
@@ -211,11 +211,16 @@ def detect_bouts_in_segment(x, y, speed_thresh_k, onset_mode="trough"):
     else:  # "lead": fixed offset before the peak (Le Goc, 80 ms)
         onsets = np.clip(peaks - BOUT_LEAD_FR, 0, n - 1)
 
-    # displacement gate (+/- DISP_WIN_FR around onset), keeping (onset, peak) pairs
+    # Displacement gate (+/- DISP_WIN_FR around the PEAK), keeping (onset, peak)
+    # pairs. The window is centred on the peak, not the onset: in "trough" mode
+    # the walk-back can cross a flat stationary stretch (quiescence) and land the
+    # onset seconds earlier, which would put the +/-0.5 s window entirely inside
+    # the still period and read ~0 travel for a perfectly real bout. The burst
+    # the gate is meant to test is the one at the peak.
     keep = []
     for o, p in zip(onsets, peaks):
-        a = max(o - DISP_WIN_FR, 0)
-        b = min(o + DISP_WIN_FR, n - 1)
+        a = max(p - DISP_WIN_FR, 0)
+        b = min(p + DISP_WIN_FR, n - 1)
         disp = np.hypot(x[b] - x[a], y[b] - y[a])
         if DISP_MIN_PX <= disp <= DISP_MAX_PX:
             keep.append((o, p))

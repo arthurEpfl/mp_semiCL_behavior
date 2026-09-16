@@ -234,6 +234,149 @@ def load_program(path, n_dots=N_DOTS, px_per_mm=PX_PER_MM, fps=FPS, drop_bout=Tr
 
 
 # --------------------------------------------------------------------------- #
+# A programme resolved into ONE real fish's dish coordinates
+# --------------------------------------------------------------------------- #
+@dataclass
+class PhysicalProgram:
+    """The stimulus programme as **real fish N actually saw it**, in absolute dish pixels.
+
+    A :class:`StimulusProgram` is fish-relative, so it only becomes physical once anchored; with a
+    real fish, that anchoring already happened in the rig and is recorded in the transformed CSVs.
+    This wraps that resolved track so a rollout can be driven by a FIXED stimulus instead of
+    re-anchoring to each simulated fish.
+
+    Why that matters: with the same physical programme, every rollout sees dots in the *same
+    absolute places*, so differences between rollouts are behaviour rather than stimulus placement
+    -- which is what isolates individuality.
+
+    The trade: the onset-distance control is gone. The real fish was ~70 px from the shoal at each
+    block onset by construction; a rollout that has wandered elsewhere is wherever it is. These
+    rollouts are therefore NOT comparable to re-anchored ones on any fish-to-shoal distance metric.
+
+    Exposes the same surface ``tool_video`` and ``pick_windows`` use, with ``needs_anchor = False``
+    so the video path skips anchoring entirely.
+    """
+    fish_id: int
+    base: "StimulusProgram"
+    X: np.ndarray                 # (F, K) absolute px
+    Y: np.ndarray
+    active: np.ndarray            # (F, K) bool
+    cx: np.ndarray                # (F,) active-dot centroid, NaN where nothing is on
+    cy: np.ndarray
+    start_pose: tuple             # (x, y, ori) of the real fish at its first tracked frame
+    dish: tuple                   # (cx, cy, R) physical dish of THIS fish
+    needs_anchor: bool = False
+
+    # -- the StimulusProgram surface, delegated / truncated to F ------------ #
+    @property
+    def n_frames(self):
+        return self.X.shape[0]
+
+    @property
+    def n_dots(self):
+        return self.X.shape[1]
+
+    @property
+    def fps(self):
+        return self.base.fps
+
+    @property
+    def duration_s(self):
+        return self.n_frames / self.fps
+
+    @property
+    def block_id(self):
+        return self.base.block_id[:self.n_frames]
+
+    @property
+    def path(self):
+        return f"{Path(self.base.path).name} @ fish {self.fish_id}"
+
+    def __getattr__(self, name):
+        # starts / ends / labels / is_stim_of / moving_of / n_dots_of come from the base programme
+        if name in ("starts", "ends", "labels", "is_stim_of", "moving_of", "side_of", "n_dots_of"):
+            return getattr(self.base, name)
+        raise AttributeError(name)
+
+    def frame_of(self, time_s):
+        return int(round(float(time_s) * self.fps))
+
+    def dots_absolute_all(self, frame, anchor=None):
+        """Absolute dot positions. ``anchor`` is accepted and IGNORED -- the placement is already
+        physical, which is the whole point of this class."""
+        return self.X[frame], self.Y[frame]
+
+    def dots_absolute(self, frame, anchor=None):
+        m = self.active[frame]
+        if not m.any():
+            return np.empty(0), np.empty(0)
+        return self.X[frame][m], self.Y[frame][m]
+
+    def centroid(self, frame, anchor=None):
+        return float(self.cx[frame]), float(self.cy[frame])
+
+    def block_table(self):
+        t = self.base.block_table()
+        return t[t["start_frame"] < self.n_frames]
+
+    def summary(self):
+        on = np.isfinite(self.cx)
+        return (f"physical programme {self.fish_id}: {self.path}\n"
+                f"  {self.n_frames} frames ({self.duration_s / 60:.1f} min); "
+                f"dots active on {100 * on.mean():.1f}% of frames\n"
+                f"  fish start pose ({self.start_pose[0]:.0f}, {self.start_pose[1]:.0f}, "
+                f"{self.start_pose[2]:.2f} rad); dish {tuple(round(v, 1) for v in self.dish)}")
+
+
+def build_physical_program(fish_id, program, transformed_dir="data/data/df_transformed",
+                           roi_path="data/data/Original_data/ROIdef2025-02-20T12_09_16.csv"):
+    """Resolve ``program`` through real fish ``fish_id``'s recording -> :class:`PhysicalProgram`.
+
+    Reads the absolute dot columns the transform pipeline already produced, rather than re-deriving
+    them: those are the ground truth for what that dish displayed (and this module's ``--verify``
+    proves our own anchoring reproduces them to 1e-13 px).
+    """
+    from segment_bouts import load_physical_dish
+
+    cands = sorted(Path(transformed_dir).glob(f"*_f{int(fish_id)}_transformed_abs.csv"))
+    if not cands:
+        raise FileNotFoundError(f"no transformed CSV for fish {fish_id} in {transformed_dir} "
+                                "(the recorded experiment is not shipped with the repo)")
+    K = program.n_dots
+    use = ([f"f{fish_id}_x", f"f{fish_id}_y", f"f{fish_id}_ori"]
+           + [f"d{k}_{v}" for k in range(K) for v in ("x", "y")]
+           + [f"d{k}_stim" for k in range(K)])
+    df = pd.read_csv(cands[0], usecols=use)
+
+    X = np.stack([df[f"d{k}_x"].to_numpy(np.float64) for k in range(K)], axis=1)
+    Y = np.stack([df[f"d{k}_y"].to_numpy(np.float64) for k in range(K)], axis=1)
+    A = np.stack([~df[f"d{k}_stim"].astype(str).isin(list(STIM_NONE)).to_numpy()
+                  for k in range(K)], axis=1) & np.isfinite(X)
+    F = min(len(df), program.n_frames)
+    X, Y, A = X[:F], Y[:F], A[:F]
+
+    # Mean over ACTIVE dots only, done as sum/count rather than nanmean: the all-inactive rows
+    # (every pause frame -- 45% of them) would otherwise each raise "Mean of empty slice".
+    cnt = A.sum(axis=1)
+    ok = cnt > 0
+    den = np.maximum(cnt, 1)
+    cx = np.where(ok, np.where(A, X, 0.0).sum(axis=1) / den, np.nan)
+    cy = np.where(ok, np.where(A, Y, 0.0).sum(axis=1) / den, np.nan)
+
+    fx = df[f"f{fish_id}_x"].to_numpy(float)[:F]
+    fy = df[f"f{fish_id}_y"].to_numpy(float)[:F]
+    fo = df[f"f{fish_id}_ori"].to_numpy(float)[:F]
+    i0 = int(np.flatnonzero(np.isfinite(fx) & np.isfinite(fy) & np.isfinite(fo))[0])
+
+    d = load_physical_dish(roi_path)
+    return PhysicalProgram(
+        fish_id=int(fish_id), base=program, X=X, Y=Y, active=A, cx=cx, cy=cy,
+        start_pose=(float(fx[i0]), float(fy[i0]), float(fo[i0])),
+        dish=(float(d.loc[fish_id, "cx"]), float(d.loc[fish_id, "cy"]),
+              float(d.loc[fish_id, "radius"])))
+
+
+# --------------------------------------------------------------------------- #
 # Verification against the shipped transformed CSVs
 # --------------------------------------------------------------------------- #
 def verify_against_transformed(program, fish_id=0,
