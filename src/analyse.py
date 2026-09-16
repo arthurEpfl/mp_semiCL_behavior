@@ -211,7 +211,7 @@ def rotate_trajectory(F_ID, fish_group, stim_group, n_stimuli, experiment_type):
     new_fish[f'f{F_ID}_y_ego'] = np.round(y_ego,3)
     new_fish[f'f{F_ID}_x_rot'] = np.round(x_rot,3)
     new_fish[f'f{F_ID}_y_rot'] = np.round(y_rot, 3)
-    new_fish[f'f{F_ID}_theta_adj'] = np.round(theta_adjusted, 3)
+    new_fish[f'f{F_ID}_theta_rot'] = np.round(theta_adjusted, 3)
 
     # Compute stimuli displacement (egocentric) for each dot.
     for dot in range(n_stimuli):
