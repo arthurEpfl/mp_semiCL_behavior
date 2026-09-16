@@ -16,11 +16,8 @@ Caveat: trial_id/stimulus_block_id are exact (they only depend on condition *tra
 unaffected by dropped rows), but if a fish's export ever dropped leading rows of its first
 stimulus block, that block's frame_count_stimulus would be off by a constant offset.
 """
-from __future__ import annotations
-
 import re
 from pathlib import Path
-from typing import Callable
 
 import numpy as np
 import pandas as pd
@@ -31,8 +28,23 @@ _NAME_RE = re.compile(r'^(?P<date>.+)_(?P<experiment>[^_]+)_f(?P<fish>\d+)_trans
 _ID_COLS = ['frame', 'trial_id', 'condition', 'stimulus_block_id', 'frame_count_stimulus', 'trial_start']
 
 
-def _load_fish_raw(data_dir: Path) -> tuple[dict[int, pd.DataFrame], str]:
-    """Per-fish CSVs -> {fish_id: df}, plus the experiment name parsed from the filenames."""
+def _load_fish_raw(data_dir):
+    """Load every fish's raw per-frame CSV in a data directory.
+
+    Args:
+        data_dir (str or pathlib.Path): Directory containing the per-fish
+            ``*_transformed_abs.csv`` files.
+
+    Returns:
+        tuple: ``(fish_raw, experiment)`` where ``fish_raw`` (dict[int,
+        pandas.DataFrame]) maps fish id to its raw dataframe, and ``experiment``
+        (str) is the experiment name parsed from the filenames.
+
+    Raises:
+        FileNotFoundError: If ``data_dir`` contains no matching CSV files.
+        ValueError: If a file name doesn't match the expected
+            ``{date}_{experiment}_f{fish}_transformed_abs.csv`` pattern.
+    """
     csvs = sorted(Path(data_dir).glob('*_transformed_abs.csv'))
     if not csvs:
         raise FileNotFoundError(f'no *_transformed_abs.csv files in {data_dir}')
@@ -46,12 +58,25 @@ def _load_fish_raw(data_dir: Path) -> tuple[dict[int, pd.DataFrame], str]:
     return fish_raw, experiment
 
 
-def _add_derived_columns(fdf: pd.DataFrame, fish_id: int, n_stimuli: int,
-                         dish_for: Callable[[int], tuple[float, float, float]]) -> None:
-    """In place: trial/block ids from condition transitions, dots_center from shown dots,
-    dots_out from the dish circle ``dish_for(fish_id) -> (center_x, center_y, radius)`` --
-    AllFish's own logic, replayed on the base columns. ``dish_for`` abstracts over a per-fish
-    ROI lookup (real data) vs. a single shared dish (every generated rollout uses the same one)."""
+def _add_derived_columns(fdf, fish_id, n_stimuli, dish_for):
+    """Add derived columns to one fish's raw dataframe, in place.
+
+    Adds trial/block ids from condition transitions and ``dots_center``/
+    ``dots_out`` from the shown dots -- replaying ``AllFish``'s own logic on the
+    base columns.
+
+    Args:
+        fdf (pandas.DataFrame): One fish's raw per-frame dataframe. Modified in
+            place.
+        fish_id (int): The fish's id, passed through to ``dish_for``.
+        n_stimuli (int): Number of dot slots (``d0``..``d{n_stimuli-1}``).
+        dish_for (callable): ``dish_for(fish_id) -> (center_x, center_y, radius)``.
+            Abstracts over a per-fish ROI lookup (real data) vs. a single shared
+            dish (every generated rollout uses the same one).
+
+    Returns:
+        None
+    """
     fdf['trial_start'] = (fdf['stimulus'] == 'inter_stim_pause') & (fdf['stimulus'].shift(1) != 'inter_stim_pause')
     fdf['trial_id'] = fdf['trial_start'].cumsum()
     fdf['stimulus_block_id'] = (fdf['stimulus'] != fdf['stimulus'].shift(1)).cumsum()
@@ -67,14 +92,32 @@ def _add_derived_columns(fdf: pd.DataFrame, fish_id: int, n_stimuli: int,
                           for d in range(n_stimuli))
 
 
-def _assemble_fish_df_long(fish_raw: dict[int, pd.DataFrame], experiment: str, n_stimuli: int,
-                           dish_for: Callable[[int], tuple[float, float, float]],
-                           framerate: int = 30, px_to_mm: float = 3.67) -> pd.DataFrame:
-    """Shared by real (``build_fish_df_long``) and generated (``gen_frame_long.
-    build_gen_fish_df_long``) data: given a per-individual raw frame table (``frame``,
-    ``stimulus``, ``x``, ``y``, ``theta``, ``d{i}_x/y/stim``), do everything downstream of
-    that -- derived columns, rotate-to-egocentric, melt to long format, distances, labels,
-    speed. Returns just the long dataframe; callers attach their own ``meta``."""
+def _assemble_fish_df_long(fish_raw, experiment, n_stimuli, dish_for, framerate=30, px_to_mm=3.67):
+    """Build the shared frame-level long-format dataframe from raw per-fish tables.
+
+    Shared by real (``build_fish_df_long``) and generated
+    (``gen_frame_long.build_gen_fish_df_long``) data: given a per-individual raw
+    frame table (``frame``, ``stimulus``, ``x``, ``y``, ``theta``, ``d{i}_x/y/stim``),
+    does everything downstream of that -- derived columns, rotate-to-egocentric,
+    melt to long format, distances, labels, speed.
+
+    Args:
+        fish_raw (dict[int, pandas.DataFrame]): Mapping from fish id to that fish's
+            raw per-frame dataframe.
+        experiment (str): Experiment name, passed to
+            ``src.analyse.rotate_trajectory``/``convert_label``/``group_condition_name``.
+        n_stimuli (int): Number of dot slots (``d0``..``d{n_stimuli-1}``).
+        dish_for (callable): ``dish_for(fish_id) -> (center_x, center_y, radius)``.
+            Abstracts over a per-fish ROI lookup (real data) vs. a single shared
+            dish (every generated rollout uses the same one).
+        framerate (int): Frames per second, used for the speed columns. Defaults
+            to 30.
+        px_to_mm (float): Pixels-per-millimetre scale factor. Defaults to 3.67.
+
+    Returns:
+        pandas.DataFrame: The long-format dataframe, one row per (fish, frame).
+        Callers attach their own ``meta``.
+    """
     fish_ids = sorted(fish_raw)
     for f in fish_ids:
         _add_derived_columns(fish_raw[f], f, n_stimuli, dish_for)
@@ -134,8 +177,24 @@ def _assemble_fish_df_long(fish_raw: dict[int, pd.DataFrame], experiment: str, n
     return long_df
 
 
-def build_fish_df_long(data_dir, roi_file, framerate: int = 30, px_to_mm: float = 3.67):
-    """Return ``(fish_df_long, meta)`` with ``meta = {experiment, n_fish, n_stimuli}``."""
+def build_fish_df_long(data_dir, roi_file, framerate=30, px_to_mm=3.67):
+    """Build the frame-level long-format dataframe for real fish.
+
+    Args:
+        data_dir (str or pathlib.Path): Directory containing the per-fish
+            ``*_transformed_abs.csv`` files.
+        roi_file (str or pathlib.Path): Path to the ROI definition CSV
+            (``xoff, yoff, diameter, x, y, radius`` columns, no header, one row per
+            fish).
+        framerate (int): Frames per second, used for the speed columns. Defaults
+            to 30.
+        px_to_mm (float): Pixels-per-millimetre scale factor. Defaults to 3.67.
+
+    Returns:
+        tuple: ``(fish_df_long, meta)`` where ``fish_df_long`` (pandas.DataFrame)
+        is the frame-level long-format dataframe and ``meta`` (dict) has keys
+        ``experiment``, ``n_fish``, ``n_stimuli``.
+    """
     fish_raw, experiment = _load_fish_raw(data_dir)
     fish_ids = sorted(fish_raw)
     n_stimuli = sum(1 for c in fish_raw[fish_ids[0]].columns if re.fullmatch(r'd\d+_x', c))

@@ -13,8 +13,6 @@ just stopped one step earlier (per-bout records instead of a final histogram).
 Generated -> bouts needs no segmentation at all: ``stim_rollout.rollout_many`` already
 returns bout-onset arrays, so ``rollout_bout_dict`` only reshapes them.
 """
-from __future__ import annotations
-
 import re
 from pathlib import Path
 
@@ -24,15 +22,34 @@ import pandas as pd
 from segment_bouts import add_dist_to_dot, fish_prefix, flag_near_wall, parse_stimulus, segment_fish
 
 
-def real_bout_dict(data_dir, speed_thresh_k: float = 1.0) -> dict[str, pd.DataFrame]:
-    """One bout dataframe per real fish, from ``*_f{N}_transformed_abs.csv`` files in
-    ``data_dir``. No cross-fish concatenation -- each fish keeps its own dataframe."""
+def real_bout_dict(data_dir, speed_thresh_k=1.0):
+    """Build one bout dataframe per real fish.
+
+    Reads every ``*_f{N}_transformed_abs.csv`` file in ``data_dir``, segments each
+    fish's raw per-frame trajectory into bouts, and enriches each bout with its
+    distance to the active dot and a near-wall flag. No cross-fish concatenation --
+    each fish keeps its own dataframe.
+
+    Args:
+        data_dir (str or pathlib.Path): Directory containing the per-fish
+            ``*_f{N}_transformed_abs.csv`` files.
+        speed_thresh_k (float): Speed-threshold multiplier passed through to
+            ``segment_bouts.segment_fish`` for bout-onset detection. Defaults to
+            1.0.
+
+    Returns:
+        dict: Mapping from ``"f{fish_id}"`` (str) to that fish's bout dataframe
+        (pandas.DataFrame).
+
+    Raises:
+        FileNotFoundError: If ``data_dir`` contains no matching CSV files.
+    """
     data_dir = Path(data_dir)
     csvs = sorted(data_dir.glob("*_transformed_abs.csv"))
     if not csvs:
         raise FileNotFoundError(f"No *_transformed_abs.csv files in {data_dir}")
 
-    real_bouts: dict[str, pd.DataFrame] = {}
+    real_bouts = {}
     for path in csvs:
         m = re.search(r"_f(\d+)_transformed_abs", path.name)
         if not m:
@@ -50,16 +67,27 @@ def real_bout_dict(data_dir, speed_thresh_k: float = 1.0) -> dict[str, pd.DataFr
     return real_bouts
 
 
-def rollout_bout_dict(rollouts) -> dict[int, pd.DataFrame]:
-    """One bout dataframe per simulated rollout, from ``SR.rollout_many(...)`` output.
-    Rollouts are already bout-indexed -- this only reshapes, no segmentation.
+def rollout_bout_dict(rollouts):
+    """Build one bout dataframe per simulated rollout.
 
-    Also carries a per-bout ``f_ori_rad``: the model's own latched CLsemi anchor heading for
-    that bout's block (``g["anchors"][block_id][2]``) -- the TRUE fish heading at the instant the
-    block was entered, independent of anything the fish did afterwards. ``enrich_bout_df`` uses
-    this (not a heading derived from the rollout's own subsequent bout-to-bout displacement, which
-    would bias the rotated frame toward whatever direction the fish happened to move next)."""
-    gen_bouts: dict[int, pd.DataFrame] = {}
+    Rollouts are already bout-indexed (``stim_rollout.rollout_many`` output) -- this
+    only reshapes them, no segmentation needed.
+
+    Also carries a per-bout ``f_ori_rad``: the model's own latched CLsemi anchor
+    heading for that bout's block (``g["anchors"][block_id][2]``) -- the TRUE fish
+    heading at the instant the block was entered, independent of anything the fish
+    did afterwards. ``enrich_bout_df`` uses this (not a heading derived from the
+    rollout's own subsequent bout-to-bout displacement, which would bias the
+    rotated frame toward whatever direction the fish happened to move next).
+
+    Args:
+        rollouts (list): Rollout records as produced by ``stim_rollout.rollout_many``.
+
+    Returns:
+        dict: Mapping from rollout index (int) to that rollout's bout dataframe
+        (pandas.DataFrame).
+    """
+    gen_bouts = {}
     for k, g in enumerate(rollouts):
         block_id = np.asarray(g["block_id"], dtype=int)
         anchors = g.get("anchors", {})
@@ -83,9 +111,18 @@ def rollout_bout_dict(rollouts) -> dict[int, pd.DataFrame]:
 
 
 def _block_speeds(program):
-    """Actual stimulus speed (mm/s) per block, read from each block's own raw label -- not a
-    hardcoded number, so labelling adapts to any programme (different dot counts, different
-    speeds), not just the shipped 3.5-mm/s one."""
+    """Compute the actual stimulus speed per block.
+
+    Read from each block's own raw label -- not a hardcoded number -- so labelling
+    adapts to any programme (different dot counts, different speeds), not just the
+    shipped 3.5-mm/s one.
+
+    Args:
+        program: A ``stim_program.StimulusProgram``.
+
+    Returns:
+        numpy.ndarray: Speed in mm/s per block, shape ``(program.n_blocks,)``.
+    """
     speeds = np.zeros(program.n_blocks)
     for b, lbl in enumerate(program.labels):
         ctx = parse_stimulus(lbl)
@@ -95,21 +132,51 @@ def _block_speeds(program):
 
 
 def _rotate(px, py, ax, ay, aori, px_to_mm):
-    """Translate to the anchor and rotate into the fish-relative frame where left = +x (matching
-    stim_program.anchor_offsets's convention, exactly, not just its style) -- anchor_offsets maps
-    (dx, dy) -> (ox, oy) via a matrix that is its own inverse, so this is that same matrix applied
-    to (px - ax, py - ay)."""
+    """Translate to the anchor and rotate into the fish-relative frame.
+
+    Left = +x, matching ``stim_program.anchor_offsets``'s convention exactly (not
+    just its style) -- ``anchor_offsets`` maps ``(dx, dy) -> (ox, oy)`` via a matrix
+    that is its own inverse, so this is that same matrix applied to
+    ``(px - ax, py - ay)``.
+
+    Args:
+        px (array-like): X position(s) to rotate, in pixels.
+        py (array-like): Y position(s) to rotate, in pixels.
+        ax (array-like): Anchor X position(s), in pixels.
+        ay (array-like): Anchor Y position(s), in pixels.
+        aori (array-like): Anchor orientation(s), in radians.
+        px_to_mm (float): Pixels-per-millimetre scale factor.
+
+    Returns:
+        tuple: ``(x_rot, y_rot)`` -- rotated position, in millimetres.
+    """
     ox, oy = px - ax, py - ay
     s, c = np.sin(aori), np.cos(aori)
     return (-ox * s + oy * c) / px_to_mm, (ox * c + oy * s) / px_to_mm
 
 
-def enrich_bout_df(fish_df: pd.DataFrame, program, framerate: float = 30.0,
-                   px_to_mm: float = 3.67) -> pd.DataFrame:
-    """Add block/condition/trial-relative-time/rotated-position/distance columns to ONE
-    individual's (real fish or simulated rollout) bout dataframe. Call once per dict value
-    from real_bout_dict/rollout_bout_dict -- real and generated never need to occupy the
-    same dataframe to go through this identically."""
+def enrich_bout_df(fish_df, program, framerate=30.0, px_to_mm=3.67):
+    """Add block/condition/trial-relative-time/rotated-position/distance columns.
+
+    Enriches ONE individual's (real fish or simulated rollout) bout dataframe. Call
+    once per dict value from ``real_bout_dict``/``rollout_bout_dict`` -- real and
+    generated never need to occupy the same dataframe to go through this
+    identically.
+
+    Args:
+        fish_df (pandas.DataFrame): One individual's bout dataframe, as produced by
+            ``real_bout_dict`` or ``rollout_bout_dict``.
+        program: A ``stim_program.StimulusProgram`` describing the stimulus
+            programme this fish/rollout was run against.
+        framerate (float): Frames per second. Defaults to 30.0.
+        px_to_mm (float): Pixels-per-millimetre scale factor. Defaults to 3.67.
+
+    Returns:
+        pandas.DataFrame: ``fish_df``, sorted by bout onset and enriched with
+        ``block_id``, ``n_dots``, ``moving``, ``is_stim``, ``stimulus``,
+        ``t_since_onset_s``, ``anchor_x``/``anchor_y``/``anchor_ori``, ``x_rot``/
+        ``y_rot``, ``dot_cx_rot``/``dot_cy_rot``, ``dist_mm``, and ``stim_side``.
+    """
     df = fish_df.sort_values("t_onset_s").reset_index(drop=True)
     n_frames = program.n_frames
 

@@ -25,8 +25,6 @@ through pauses too. Reproduced here once at the programme level (shared by every
 since the programme itself is exogenous/fish-agnostic) so the ``'inter_stim_pause'`` control
 curve isn't spuriously empty for generated data while real data shows a real one.
 """
-from __future__ import annotations
-
 import re
 import time
 from pathlib import Path
@@ -36,19 +34,33 @@ import pandas as pd
 
 import bout_video as BV
 import tool_video as TV
-from stim_program import StimulusProgram, anchor_offsets
+from stim_program import anchor_offsets
 from real_frame_long import _assemble_fish_df_long
 
 _NAME_RE = re.compile(r'trajectory_(?P<experiment>[^_]+)_')
 
 
-def _pause_corrected_dots(program: StimulusProgram):
-    """``(dx_eff, dy_eff, label_col, dstim_cols)`` -- ``program.dx``/``dy``/``active`` with
-    each pause block's dots overwritten by a copy of the following stimulus block's first
-    frames (matching ``src.analyse.pause_copy_trajectory``), plus the per-frame raw condition
-    label and per-dot ``d{i}_stim`` string columns real per-fish CSVs carry. The trailing
-    pause block (if any -- the programme need not end mid-stimulus) has no following block to
-    copy from and is left inactive, same as it would be for a real fish with no next trial."""
+def _pause_corrected_dots(program):
+    """Fill in dot positions during inter-stimulus pauses.
+
+    ``program.dx``/``dy``/``active`` with each pause block's dots overwritten by a
+    copy of the following stimulus block's first frames (matching
+    ``src.analyse.pause_copy_trajectory``), plus the per-frame raw condition label
+    and per-dot ``d{i}_stim`` string columns real per-fish CSVs carry. The trailing
+    pause block (if any -- the programme need not end mid-stimulus) has no
+    following block to copy from and is left inactive, same as it would be for a
+    real fish with no next trial.
+
+    Args:
+        program: A ``stim_program.StimulusProgram``.
+
+    Returns:
+        tuple: ``(dx_eff, dy_eff, label_col, dstim_cols)`` where ``dx_eff``/
+        ``dy_eff`` (numpy.ndarray) are the pause-corrected dot offsets,
+        ``label_col`` (numpy.ndarray of str) is the per-frame condition label, and
+        ``dstim_cols`` (dict[int, numpy.ndarray]) maps dot index to its per-frame
+        ``d{i}_stim`` string column.
+    """
     n_frames, n_dots = program.dx.shape
     dx_eff, dy_eff, active_eff = program.dx.copy(), program.dy.copy(), program.active.copy()
     label_col = np.empty(n_frames, dtype=object)
@@ -70,12 +82,27 @@ def _pause_corrected_dots(program: StimulusProgram):
     return dx_eff, dy_eff, label_col, dstim_cols
 
 
-def build_gen_fish_df_long(rollouts, program: StimulusProgram, bout_frames: int = 3,
-                           framerate: int = 30, px_to_mm: float = 3.67):
-    """Return ``(gen_fish_df_long, meta)``, shaped like
-    ``real_frame_long.build_fish_df_long``'s return, for the ``rollouts`` list
-    ``stim_rollout.rollout_many`` produced against ``program``. See module docstring for the
-    bout -> frame synthesis this relies on."""
+def build_gen_fish_df_long(rollouts, program, bout_frames=3, framerate=30, px_to_mm=3.67):
+    """Synthesize a frame-level long-format dataframe for simulated rollouts.
+
+    Shaped like ``real_frame_long.build_fish_df_long``'s return. See the module
+    docstring for the bout -> frame synthesis this relies on.
+
+    Args:
+        rollouts (list): Rollout records, as produced by
+            ``stim_rollout.rollout_many`` run against ``program``.
+        program: The ``stim_program.StimulusProgram`` the rollouts were generated
+            against.
+        bout_frames (int): Number of frames over which the synthesized pose ramps
+            from one bout's position to the next before holding. Defaults to 3.
+        framerate (int): Frames per second. Defaults to 30.
+        px_to_mm (float): Pixels-per-millimetre scale factor. Defaults to 3.67.
+
+    Returns:
+        tuple: ``(gen_fish_df_long, meta)`` where ``gen_fish_df_long``
+        (pandas.DataFrame) is the frame-level long-format dataframe and ``meta``
+        (dict) has keys ``experiment``, ``n_fish``, ``n_stimuli``.
+    """
     t0 = time.time()
     m = _NAME_RE.search(Path(program.path).name)
     experiment = m.group('experiment') if m else 'unknown'
