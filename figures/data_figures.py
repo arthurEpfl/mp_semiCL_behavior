@@ -282,18 +282,6 @@ def fig_detection(c):
     _save(fig, "fig_bout_detection")
 
 
-def _fig_detection_turnhist_retired(c):
-    """Kept for reference: the turn-angle histogram panel, no longer used."""
-    fig, ax1 = plt.subplots(1, 1, figsize=(3.0, 2.3))
-    dth = c.loc[c.active, "dtheta_deg"].to_numpy()
-    ax1.hist(dth, bins=np.arange(-180, 182, 4), color=BLUE, lw=0)
-    for s in (-10, 10):
-        ax1.axvline(s, color=INK, lw=0.7, ls=(0, (3, 2)))
-    ax1.set_xlabel(r"$\Delta\theta$ (deg)"); ax1.set_ylabel("bouts")
-    ax1.set_xlim(-180, 180); ax1.set_xticks([-180, -90, 0, 90, 180])
-    ax1.grid(axis="y"); ax1.set_axisbelow(True)
-    _panel(ax1, "B", r"Turn angle, all active bouts")
-    _save(fig, "fig_turn_histogram_unused")
 
 
 # --------------------------------------------------------------------------- #
@@ -518,21 +506,6 @@ def _toward_blocks(g, thr=0.0):
     return per.loc[per["size"] >= MIN_TURNS, "mean"].to_numpy()
 
 
-def _fwdbias_blocks(g):
-    """Per block, P(straight | shoal ahead) - P(straight | shoal behind).
-
-    The half of the response the turn-toward index cannot see: it conditions on
-    turning, so it necessarily drops forward bouts -- but the information in
-    those was never in the sign, it is in the decision NOT to turn.
-    """
-    out = []
-    for _, gg in g.groupby("blk"):
-        phi = np.degrees(np.abs(gg.stim_angle_travel))
-        fwd = (gg.dtheta_deg.abs() <= DTHETA0).to_numpy(float)
-        ah, be = (phi < AHEAD_DEG).to_numpy(), (phi > BEHIND_DEG).to_numpy()
-        if ah.sum() >= MIN_EACH and be.sum() >= MIN_EACH:
-            out.append(fwd[ah].mean() - fwd[be].mean())
-    return np.asarray(out, float)
 
 
 BLIND_REPS, BLIND_SEED = 10, 0

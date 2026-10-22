@@ -351,62 +351,6 @@ def analyse(workers=10):
     print("wrote screen_eval.json", flush=True)
 
 
-def our_windows():
-    """Our own 15 real fish (active bouts, windows inside one run): the 30 turn / step / interval features."""
-    from twin import generative_metrics as GM
-    from twin import evaluate as E
-    d = pd.read_csv(HERE.parent / "clean_data" / "bouts_clean.csv",
-                    usecols=["fish_id", "dtheta_deg", "dt_s", "distance_px", "active", "run_id"])
-    d = d[d.active == 1]
-    X, g = [], []
-    for fid, s in d.groupby("fish_id"):
-        x = GM.window_features_traj(s.dtheta_deg.values, E.symbols_from_dtheta(s.dtheta_deg.values),
-                                    s.distance_px.values, s.dt_s.values, None, W=W, runs=s.run_id.values)
-        X.append(x); g.append(np.full(len(x), int(fid) + 2 * 10 ** 7))
-    return np.vstack(X), np.concatenate(g)
-
-
-def analyse_ref(workers=10):
-    """The scale for the screen classifier: OUR real fish against the screen's real fish, on the 30 features that
-    carry over between the two experiments (turns, displacement, interval; not the dot or the dish), next to the
-    floor and the models on the same features."""
-    from twin import repulsion_fit as RF
-    R = pickle.load(open(OUT / "screen_raw_real.pkl", "rb"))
-    wr = windows_of(R["res"], workers)
-    real_ids = np.array(sorted(wr))
-    halves = RF.clutch_split()
-    idA = np.array([i for i in real_ids if R["clutch"].get(int(i)) in set(halves["fit"])])
-    idB = np.array([i for i in real_ids if R["clutch"].get(int(i)) in set(halves["test"])])
-    XO, gO = our_windows()
-    k30 = lambda X: X[:, :30]
-    rows = {"real vs real": [], "our real fish": []}
-    for rep in range(REPS):
-        rng = np.random.default_rng([2026, rep])
-        a = rng.choice(idA, N_REAL, replace=False); b = rng.choice(idB, N_REAL, replace=False)
-        XA, gA = stack(wr, a); XB, gB = stack(wr, b)
-        rows["real vs real"].append(c2st(k30(XA), gA, k30(XB), gB, seed=rep)[0])
-        rng = np.random.default_rng([2027, rep])
-        a = rng.choice(real_ids, N_REAL, replace=False)
-        XR, gR = stack(wr, a)
-        rows["our real fish"].append(c2st(k30(XR), gR, XO, gO, seed=rep)[0])
-    print(f"  ref: real vs real {np.mean(rows['real vs real']):.3f}, our real fish {np.mean(rows['our real fish']):.3f}",
-          flush=True)
-    for model, keys in C2ST_UNITS.items():
-        for sd, k in zip(SEEDS, keys):
-            for show in ("sighted", "blind"):
-                ws = windows_of(pickle.load(open(OUT / f"screen_raw_sim_{k}_{show}.pkl", "rb")), workers)
-                XS, gS = stack(ws, np.array(sorted(ws)), offset=10 ** 7)
-                vals = []
-                for rep in range(REPS):
-                    rng = np.random.default_rng([2027, rep])
-                    a = rng.choice(real_ids, N_REAL, replace=False)
-                    XR, gR = stack(wr, a)
-                    vals.append(c2st(k30(XR), gR, k30(XS), gS, seed=rep)[0])
-                rows[f"{model} s{sd} {show}"] = vals
-                print(f"  ref: {model} s{sd} {show} {np.mean(vals):.3f}", flush=True)
-    kin = dict(our=np.median(XO[:, [12, 20, 25, 26]], 0).tolist())
-    (OUT / "screen_eval_ref.json").write_text(json.dumps(dict(auc=rows, n_our_windows=int(len(XO)), kin=kin), indent=1))
-    print("wrote screen_eval_ref.json", flush=True)
 
 
 PBINS = np.arange(-60, 301, 10)                  # s from the switch to bout-like motion
@@ -490,4 +434,4 @@ def profiles(workers=10):
 if __name__ == "__main__":
     cmd = sys.argv[1]
     w = int(sys.argv[2]) if len(sys.argv) > 2 else 10
-    {"real": run_real, "sim": run_sim, "analyse": analyse, "ref": analyse_ref, "profiles": profiles}[cmd](w)
+    {"real": run_real, "sim": run_sim, "analyse": analyse, "profiles": profiles}[cmd](w)

@@ -357,13 +357,5 @@ if __name__ == "__main__":
         so = "--sighted-only" in args
         args = [a for a in args if a != "--sighted-only"]
         run_sim([k for j, k in enumerate(args) if k != "--workers" and (j == 0 or args[j - 1] != "--workers")], w, so)
-    elif cmd == "screen":                     # the screen's own per-fish readouts (sanity check), parquet -> pickle
-        OUT.mkdir(parents=True, exist_ok=True)
-        s = pd.read_parquet(PKG / "fish_summaries.parquet")
-        s = s[s.fish_id.isin(fish_table().fish_id)]
-        cols = ["fish_id", "si", "si_Continuous", "boutDur", "mean_dist_mm", "tmn_near", "appr_mvt_mn", "thigmoIndex"]
-        pickle.dump({c: s[c].astype(float if c != "fish_id" else int).tolist() for c in cols if c in s},
-                    open(OUT / "screen.pkl", "wb"))
-        print(f"wrote {OUT / 'screen.pkl'}: {len(s)} fish")
     else:
         raise SystemExit(__doc__)

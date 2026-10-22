@@ -873,9 +873,6 @@ def drift_phi(tau):
     return float(np.exp(-1.0 / max(float(tau), 1e-6)))
 
 
-def _ndtr(x):
-    """Standard normal CDF, differentiable, without depending on torch.special's availability."""
-    return 0.5 * (1.0 + torch.erf(x / np.sqrt(2.0)))
 
 
 def ar1_chain(phi, n_levels, span=None):
@@ -969,22 +966,6 @@ def _ghq(m, sd, k=7):
     return nodes.astype(np.float32), lw
 
 
-@torch.no_grad()
-def _node_logliks(net, X, a_z, ld_c, y_ang, y_dist, y_dt, nodes):
-    """(n, Q) total per-bout log-likelihood at each quadrature node, masked channels excluded."""
-    Xt = torch.tensor(np.asarray(X, np.float32))
-    az = torch.tensor(a_z); lc = torch.tensor(ld_c)
-    ya = torch.tensor(np.asarray(y_ang, np.float32))
-    yd = torch.tensor(np.asarray(y_dist, np.float32))
-    yt = torch.tensor(np.asarray(y_dt, np.float32))
-    n, Q = Xt.shape[0], nodes.shape[0]
-    out = np.empty((n, Q), dtype=np.float64)
-    for q in range(Q):
-        zq = torch.tensor(nodes[q]).reshape(1, -1).expand(n, -1)
-        la, ld, lt, md, mt = _chan_logliks(net, Xt, az, lc, ya, yd, yt, zq)
-        tot = la + torch.where(md, ld, torch.zeros_like(ld)) + torch.where(mt, lt, torch.zeros_like(lt))
-        out[:, q] = tot.numpy().astype(np.float64)
-    return out
 
 
 def _marginal_predictive(L, log_pi):

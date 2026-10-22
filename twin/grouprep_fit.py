@@ -377,8 +377,6 @@ if __name__ == "__main__":
     cmd = sys.argv[1]
     if cmd == "check":
         check()
-    elif cmd == "lik":
-        lik()
     else:
         for k in sys.argv[2:]:
             {"fit": fit, "build": build, "test": test}[cmd](k)

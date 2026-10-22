@@ -114,46 +114,6 @@ def _no_dots():
     return np.empty(0), np.empty(0), np.empty(0, bool), np.empty(0), 0.0
 
 
-class PhysicalStimProvider:
-    """Drive a rollout from a FIXED physical programme (``stim_program.PhysicalProgram``).
-
-    Where :class:`ProgramStimProvider` re-anchors the dot track to each simulated fish, this one
-    hands back the absolute positions real fish N saw at that frame, whoever is swimming. So every
-    rollout on the same programme sees dots in the same places, and differences between rollouts
-    are behaviour rather than stimulus placement -- the point being to isolate individuality.
-
-    Stateless (no anchor to latch), so one instance can serve every rollout. The model still
-    computes bearing and range from its OWN pose, so it reacts honestly to where it actually is.
-    """
-
-    def __init__(self, phys):
-        self.p = phys
-        self.n_calls = 0
-        self.n_out_of_range = 0
-
-    def __call__(self, t, time_s, x, y, h):
-        p = self.p
-        self.n_calls += 1
-        f = p.frame_of(time_s)
-        if f < 0 or f >= p.n_frames:
-            self.n_out_of_range += 1
-            return np.nan, np.nan, 0.0, 0.0
-        b = int(p.block_id[f])
-        if not p.is_stim_of[b] or not np.isfinite(p.cx[f]):
-            return np.nan, np.nan, 0.0, 0.0
-        return p.cx[f], p.cy[f], float(p.moving_of[b]), float(p.n_dots_of[b])
-
-    def dots(self, t, time_s, x, y, h):
-        p = self.p
-        f = p.frame_of(time_s)
-        self.last_time_s = f / p.fps          # when these dots were read (the dot-drift channels need it)
-        if f < 0 or f >= p.n_frames:
-            return _no_dots()
-        b = int(p.block_id[f])
-        if not p.is_stim_of[b] or not np.isfinite(p.cx[f]):
-            return _no_dots()
-        X, Y = p.dots_absolute(f)
-        return X, Y, np.ones(len(X), bool), np.full(len(X), float(p.moving_of[b])), float(p.n_dots_of[b])
 
 
 class RecordAnchoredProvider:
@@ -426,36 +386,6 @@ def rollout_many(model, program, n_rollouts, seed=0, records=None, dish=None,
     return out
 
 
-def rollout_physical_many(model, phys, n_rollouts, seed=0, same_start=True, verbose=True):
-    """``n_rollouts`` synthetic fish on ONE physical programme -- the individuality experiment.
-
-    Both confounds are held fixed by default: every rollout sees the SAME absolute dot track (fish
-    ``phys.fish_id``'s), and every rollout starts from that fish's real start pose in that fish's
-    dish. What is left to vary is the model's own per-trajectory draws (``indiv``/``vigor``) and its
-    emission noise -- so any divergence between rollouts IS the individuality.
-
-    ``same_start=False`` keeps the shared stimulus but lets each rollout start wherever it likes,
-    which re-introduces initial condition as a source of divergence.
-    """
-    prov = PhysicalStimProvider(phys)                 # stateless -> shared across rollouts
-    out = []
-    for k in range(int(n_rollouts)):
-        rng = np.random.default_rng([int(seed), k])
-        pose = phys.start_pose if same_start else (phys.dish[0], phys.dish[1],
-                                                   float(rng.uniform(-np.pi, np.pi)))
-        t0 = time.time()
-        g = rollout_program(model, phys, rng, pose, phys.dish, fish_id=k, provider=prov)
-        g["seed"] = [int(seed), k]
-        g["wall_s"] = time.time() - t0
-        g["physical_fish"] = int(phys.fish_id)
-        out.append(g)
-        if verbose:
-            r = np.hypot(g["x_px"] - phys.dish[0], g["y_px"] - phys.dish[1]) / phys.dish[2]
-            print(f"  rollout {k}: {len(g['dtheta'])} bouts, last onset "
-                  f"{g['last_onset_s'] / 60:.2f} of {g['program_s'] / 60:.2f} min, "
-                  f"median dt {np.median(g['dt_s']):.2f}s, max r/R {r.max():.3f}, "
-                  f"{g['wall_s']:.1f}s")
-    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -525,53 +455,3 @@ def verify_provider_parity(program, records, fish_id=0,
                   f"-- real-fish drift between block onset and its next bout; "
                   f"exactly 0 for a synthetic fish (dart-and-hold).")
     return mx, pol
-
-
-# --------------------------------------------------------------------------- #
-if __name__ == "__main__":
-    import argparse
-
-    from twin import stim_program as SP
-
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--traj", default=str(_ROOT / "data" / "data" / "Original_data"
-                                         / "2025.02.20-0957_trajectory_GsizeMotionSingle_180min.csv"))
-    ap.add_argument("--model", default=str(_ROOT / "notebooks" / "_zip_full" / "ladder_b_indiv.pt"))
-    ap.add_argument("--bouts", default=str(_ROOT / "data" / "bouts_GsizeMotionSingle.csv"))
-    ap.add_argument("--n", type=int, default=2)
-    ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--smoke", action="store_true", help="short programme, plus all checks")
-    a = ap.parse_args()
-
-    from twin import fit_MLP_border as MB
-
-    print("loading programme ...")
-    prog = SP.load_program(a.traj)
-    print(prog.summary())
-    print("\nanchoring check ...")
-    SP.verify_against_transformed(prog)
-
-    print("\nloading model + records ...")
-    model = MX.load_mix(a.model)
-    records = MB.build_border_records(E.load_bouts(a.bouts))
-    print(f"  {model.name}")
-
-    print("\nprovider parity ...")
-    verify_provider_parity(prog, records)
-
-    if a.smoke:                       # first 6 blocks only, so the whole path runs in seconds
-        cut = int(prog.ends[5])
-        prog = SP.StimulusProgram(
-            dx=prog.dx[:cut], dy=prog.dy[:cut], active=prog.active[:cut],
-            block_id=prog.block_id[:cut], labels=prog.labels[:6],
-            starts=prog.starts[:6], ends=prog.ends[:6], n_dots_of=prog.n_dots_of[:6],
-            moving_of=prog.moving_of[:6], side_of=prog.side_of[:6],
-            is_stim_of=prog.is_stim_of[:6], fps=prog.fps, path=prog.path)
-        print(f"\n[smoke] truncated to {prog.duration_s / 60:.1f} min")
-
-    print(f"\nrolling out {a.n} synthetic fish ...")
-    gs = rollout_many(model, prog, a.n, seed=a.seed, records=records)
-    for g in gs:
-        r = np.hypot(g["x_px"] - g["dish"][0], g["y_px"] - g["dish"][1]) / g["dish"][2]
-        assert (r <= 1.0 + 1e-9).all(), "containment violated"
-    print("containment: 0 bouts outside the dish  -> PASS")

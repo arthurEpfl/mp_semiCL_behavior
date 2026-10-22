@@ -1335,22 +1335,6 @@ def generate_mlp(model, rec, cfg_feat, dt_pool, dist_pool, rng):
                 dt_s=rng.choice(dt_pool, size=n), distance_px=rng.choice(dist_pool, size=n))
 
 
-# =========================================================================== #
-#  Save / load
-# =========================================================================== #
-def save_mlp(path, model, config):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({"state_dict": model.state_dict(), "config": config}, path)
-
-
-def load_mlp(path):
-    ck = torch.load(path, map_location="cpu", weights_only=False)
-    cfg = ck["config"]
-    model = MDN(cfg["n_features"], cfg["hidden"], mode=cfg["mode"])
-    model.load_state_dict(ck["state_dict"])
-    model.eval()
-    return model, cfg
 
 
 # =========================================================================== #
@@ -1430,60 +1414,3 @@ class MLPDensity(E.GenerativeModel):
     def sample(self, rec, rng):
         return generate_mlp(self._model, rec, self._cfg_feat,
                             self._dt_pool, self._dist_pool, rng)
-
-
-# =========================================================================== #
-#  CLI
-# =========================================================================== #
-def main():
-    import pandas as pd
-
-    p = argparse.ArgumentParser(description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--bouts", type=Path, default=Path("data/bouts_GsizeMotionSingle.csv"))
-    p.add_argument("--output", type=Path, default=Path("data/mlp_basic.pt"))
-    p.add_argument("--mode", choices=["basic", "full"], default="basic")
-    p.add_argument("--K", type=int, default=5, help="AR history window (bouts)")
-    p.add_argument("--stim-mode", choices=["none", "simple", "rich", "rich_csv", "dot", "dotb"], default="simple")
-    p.add_argument("--include-symbols", action="store_true")
-    p.add_argument("--hidden", type=int, default=64)
-    p.add_argument("--epochs", type=int, default=60)
-    p.add_argument("--lr", type=float, default=1e-3)
-    p.add_argument("--min-len", type=int, default=10)
-    p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--gen-output", type=Path, default=None)
-    p.add_argument("--n-gen", type=int, default=2000)
-    args = p.parse_args()
-
-    df = pd.read_csv(args.bouts)
-    records = E.build_records(df, min_len=args.min_len)   # rich mode needs abs_dict/roi
-    recs = list(records.values())
-    print(f"loaded {len(recs)} fish ({sum(r.n for r in recs)} bouts, min_len={args.min_len})")
-
-    ctx = E.make_context(recs, cfg=dict(mlp_epochs=args.epochs, mlp_hidden=args.hidden,
-                                        mlp_K=args.K, mlp_stim_mode=args.stim_mode,
-                                        mlp_lr=args.lr,
-                                        mlp_include_symbols=args.include_symbols))
-    m = MLPDensity(mode=args.mode, K=args.K, stim_mode=args.stim_mode,
-                   include_symbols=args.include_symbols, hidden=args.hidden,
-                   epochs=args.epochs, lr=args.lr, seed=args.seed)
-    m.fit(recs, ctx)
-    print(f"trained {m.name}: features D={m.config['n_features']}, "
-          f"final val NLL={m.history['val'][-1]:.4f} ({len(m.history['val'])} epochs)")
-
-    # in-sample mean bits/bout as a quick sanity readout
-    ld = np.concatenate([m.score(r)["logdens"] for r in recs])
-    print(f"in-sample: {np.mean(ld):.4f} nats/bout | {-np.mean(ld) / np.log(2):.4f} bits/bout")
-
-    save_mlp(args.output, m._model, m.config)
-    print("saved ->", args.output)
-
-    if args.gen_output is not None:
-        rng = np.random.default_rng(args.seed)
-        gen = m.sample(recs[0], rng)
-        pd.DataFrame({"bout_angle": gen["dtheta"][:args.n_gen]}).to_csv(args.gen_output, index=False)
-        print(f"generated {min(args.n_gen, len(gen['dtheta']))} bouts -> {args.gen_output}")
-
-
-if __name__ == "__main__":
-    main()

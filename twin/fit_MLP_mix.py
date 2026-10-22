@@ -691,10 +691,6 @@ def _dt_logpdf(x, logw, mu, sigma, hi=None):
     return base - torch.logsumexp(logw + torch.special.log_ndtr(zc), dim=1)
 
 
-def _ln2_logpdf(x, logw, mu, sigma):                     # 2-component log-normal; logw/mu/sigma (n,2)
-    lx = torch.log(x).reshape(-1, 1)
-    comp = logw + (-lx - torch.log(sigma) - 0.5 * _LOG2PI - (lx - mu) ** 2 / (2.0 * sigma ** 2))
-    return torch.logsumexp(comp, dim=1)
 
 
 class MDNMixKin(MDNMix):
@@ -2125,47 +2121,6 @@ def _search_rad_indiv(model, records, cfg_feat, tgt_rad, *, closed_loop, guardra
                 tgt=float(tgt_rad))
 
 
-def _search_rad_gate(model, records, cfg_feat, tgt_rad, *, closed_loop, guardrail, eps,
-                     stim_loop, seed=0, n_fish=10, reps=2, probe=0.10, clip=0.20):
-    """Per-trajectory containment GATE offset sd (cfg ``rad_gate={'sd': s}``) by moments.
-
-    Radial-individuality mechanism v2. v1 (u_rad/rad_sd, multiplicative on the bias) is measured
-    INERT on graded bulk=0 biases -- scaling a bias that only acts in the outer ring cannot move
-    a trajectory's MEAN r/R. Shifting the GATE moves where avoidance engages: the recal sweeps
-    measured u0 0.60 -> 0.45 moving mean r/R by ~0.03, so a +-1 sd swing of ~0.1 in u0 is a real
-    lever. The generator clips each personal gate to [0.20, 0.90]. JOINT-family generator only
-    (generate_mix_joint_loop); the kin generator ignores the key.
-
-    Same discipline as _search_rad_indiv: rng keyed per rollout, spawn gated on KEY presence so
-    base (sd=0.0) and probe are CRN-paired; two-point solve with an inertness guard; matched
-    moment = across-rollout spread of per-rollout mean r/R (target = real between-fish SD
-    ~0.075). Per-checkpoint radial VALIDATION still needs all 15 fish."""
-    sub = list(records)[:n_fish]
-
-    def measure(s):
-        trial = dict(cfg_feat)
-        trial["rad_gate"] = {"sd": float(s)}
-        rad = []
-        for rep in range(reps):
-            for r in sub:
-                rng = np.random.default_rng([seed, 7723, rep, int(r.fish_id)])
-                g = _gen_for(trial, sub)(model, r, trial, rng, closed_loop=closed_loop,
-                                         guardrail=guardrail, eps=eps, stim_loop=stim_loop)
-                u = _radial_frac(r, g.get("x_px"), g.get("y_px"))
-                if u is not None:
-                    rad.append(float(np.mean(u)))
-        return float(np.std(rad)) if len(rad) > 1 else 0.0
-
-    base = measure(0.0)
-    got = measure(probe)
-    s_raw = (float("inf") if got - base <= 1e-6
-             else probe * (float(tgt_rad) - base) / (got - base))
-    if s_raw > 2 * clip:
-        print(f"    rad_gate: lever inert (solve wants sd {s_raw:.2f}, clip is {clip}; "
-              f"base {base:.4f} -> probe {got:.4f}, target {float(tgt_rad):.4f}); returning 0")
-        return dict(sd=0.0, base_sd=base, probe_sd=got, tgt=float(tgt_rad), inert=True)
-    return dict(sd=float(np.clip(s_raw, 0.0, clip)), base_sd=base, probe_sd=got,
-                tgt=float(tgt_rad))
 
 
 def _search_innov_comp(model, records, cfg_feat, *, closed_loop, guardrail, eps, stim_loop,

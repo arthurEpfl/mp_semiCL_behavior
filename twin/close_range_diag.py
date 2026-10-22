@@ -219,10 +219,6 @@ def readouts_p(S, phase=None):
     return r
 
 
-def phase_share(S):
-    """Share of bouts (0-20 mm from the dot) per jump-phase bin: is the bout timing locked to the dot's jumps?"""
-    v = np.asarray(S["n"], float).reshape(NB, NPH)[:8].sum(0)
-    return v / v.sum()
 
 
 # --------------------------------------------------------------------------- #
@@ -433,53 +429,6 @@ PFX = {"diag": "crd", "pursuit": "crp"}
 P_VARS = ("F", "grT", "grT2")
 
 
-def report_pursuit(nb=200):
-    from twin import repulsion_fit as RF
-    R = pickle.load(open(OUT / "crp_real.pkl", "rb"))
-    keep = set(RF.clutch_split()["test"])
-    by = {}
-    for fid, c in R["clutch"].items():
-        if c in keep and fid in R["res"]:
-            by.setdefault(c, []).append(fid)
-    sides = {"real": (R["res"], list(by.values()))}
-    for k in KEYS:
-        for v in P_VARS:
-            pth = OUT / f"crp_sim_{k}_{v}.pkl"
-            if pth.exists():
-                res = pickle.load(open(pth, "rb"))
-                sides[f"{v} s{0 if k == '14f' else 101}"] = (res, [[i] for i in res])
-    rng = np.random.default_rng(0)
-    scopes = lambda S: ({"all": readouts_p(S)} | {f"ph{p}": readouts_p(S, p) for p in range(NPH)}
-                        | {"phase_share": {"share": phase_share(S)}})
-    out = {}
-    for nm, (res, groups) in sides.items():
-        est = scopes(pool(res, [i for g in groups for i in g]))
-        bs = [scopes(pool(res, [i for j in rng.integers(0, len(groups), len(groups)) for i in groups[j]]))
-              for _ in range(nb)]
-        out[nm] = {sc: {q: dict(est=np.asarray(est[sc][q]).tolist(),
-                                lo=np.nanpercentile([b[sc][q] for b in bs], 2.5, 0).tolist(),
-                                hi=np.nanpercentile([b[sc][q] for b in bs], 97.5, 0).tolist())
-                        for q in est[sc]} for sc in est}
-    (GOUT / "close_range_pursuit.json").write_text(json.dumps(dict(bins=DBINS.tolist(), phase_bins=PH_BINS.tolist(),
-                                                                   sides=out), indent=1))
-    lab = [f"{DBINS[i]:g}-{DBINS[i + 1]:g}" for i in range(8)]
-
-    def fmt(d, i):
-        return f"{d['est'][i]:+.2f} [{d['lo'][i]:+.2f},{d['hi'][i]:+.2f}]"
-    for q in ("toward", "along", "heading", "align", "apart_d"):
-        for suf in ("_x", "", "_null"):
-            print(f"\n## {q}{suf}  (all phases; [95 % CI])")
-            print(pd.DataFrame({nm: [fmt(out[nm]["all"][q + suf], i) for i in range(8)] for nm in out}, index=lab).T
-                  .to_string())
-    print("\n## share of bouts per jump phase (frames since the last jump: 0-4 / 5-9 / 10-14 / 15-19)")
-    for nm in out:
-        print(f"{nm:10s} " + "  ".join(fmt(out[nm]["phase_share"]["share"], p) for p in range(NPH)))
-    for q in ("along_x", "toward_x", "apart_d_x"):
-        print(f"\n## {q} per jump phase, 2-8 mm bins (2-4 / 4-6 / 6-8)")
-        for p in range(NPH):
-            print(f"phase {PH_BINS[p]}-{PH_BINS[p + 1] - 1}")
-            print(pd.DataFrame({nm: [fmt(out[nm][f"ph{p}"][q], i) for i in (1, 2, 3)] for nm in out},
-                               index=lab[1:4]).T.to_string())
 
 
 if __name__ == "__main__":
@@ -488,13 +437,9 @@ if __name__ == "__main__":
         run_real(int(sys.argv[2]) if len(sys.argv) > 2 else 10)
     elif cmd == "sim":
         run_sim(int(sys.argv[2]) if len(sys.argv) > 2 else WORKERS)
-    elif cmd == "report":
-        report()
     elif cmd == "real-pursuit":
         run_real(int(sys.argv[2]) if len(sys.argv) > 2 else 10, fn="pursuit")
     elif cmd == "sim-pursuit":
         run_sim(int(sys.argv[2]) if len(sys.argv) > 2 else WORKERS, fn="pursuit", variants=P_VARS)
-    elif cmd == "report-pursuit":
-        report_pursuit()
     else:
         raise SystemExit(__doc__)

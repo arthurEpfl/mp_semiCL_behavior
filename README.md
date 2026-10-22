@@ -1,351 +1,80 @@
-# <center> Zebrafish Behavior Modeling 
+# A behavioural digital twin of larval zebrafish
 
-## Quick start — generate trajectories from a stimulus file
+Code of Arthur Pollet's MSc thesis (EPFL, 2026): a generative model of larval zebrafish swimming. Fifteen fish, each alone in a dish, were shown groups of one to eight moving or static dots in a
+semi-closed-loop assay (Perrino, 2026); their swimming was cut into bouts, and generative models of the bout sequence
+were trained on it, simulated in closed loop, evaluated against held-out fish and taken beyond the data (two groups of
+dots, several fish in one dish, a second data set).
 
-Give the tool a Bonsai **stimulus trajectory file** and a trained model; it simulates fish and
-writes an mp4. No training, no real fish data, nothing to download separately.
+Everything in the thesis is reproduced by the notebooks in `notebooks/`, from the code in `twin/` (the library) and
+`figures/` (one script per thesis figure).
 
-```bash
-# 1. install uv if you do not have it  (https://docs.astral.sh/uv/)
-#    macOS/Linux:  curl -LsSf https://astral.sh/uv/install.sh | sh
-#    Windows:      powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+## Layout
 
-# 2. clone
-git clone -b script-workflow https://github.com/arthurEpfl/mp_semiCL_behavior.git
-cd mp_semiCL_behavior
-
-# 3. install everything (uv fetches Python 3.13+ itself if needed)
-uv sync
-
-# 4. open the notebook and run it top to bottom
-uv run jupyter lab notebooks/stimulus_tool.ipynb
-```
-
-`uv run` is what puts the project environment on the path — a bare `jupyter lab` will not see it
-unless you have activated `.venv` yourself.
-
-Without uv: `python -m venv .venv && .venv/bin/pip install -e . && .venv/bin/jupyter lab
-notebooks/stimulus_tool.ipynb` (on Windows use `.venv\Scripts\`). Needs Python ≥ 3.13.
-
-Output lands in `tool_videos/`: a 2×3 mp4 (two stimulus blocks × three simulated fish) plus the
-per-frame panel CSVs behind it.
-
-**Cost:** rollouts are fast — about **3 s per simulated fish** over a 175-minute programme. The
-**mp4 is the slow step, ~3.5 minutes**, because it renders 6 panels × 1800 frames; it runs in a
-subprocess so it cannot take down the kernel.
-
-### Using your own stimulus file
-
-Point `TRAJ_FILE` at it in the config cell. It must keep the rig's format: headerless CSV, one row
-per frame at 30 fps, **8 dot slots × 6 fields** in the order `name, x, y, size, color, backg`
-(48 columns), with
-
-- `x`, `y` in **millimetres relative to the fish**, left = positive `x`;
-- `size` 4 when a dot is on, 0 when off, and unused slots written literally as `none,0,0,0,1,0`;
-- block labels matching `CLsemi..._g{L}-{R}_s{sL}-{sR}` (e.g. `CLsemi1800_g4-0_s3.5-3.5`), and
-  `none` for inter-stimulus pauses.
-
-Anything not starting with `CLsemi` is treated as no stimulus. Because the paradigm is
-semi-closed-loop, the dot track is anchored to the *simulated* fish's pose at each block onset — so
-the same file produces a different absolute dot track on every rollout, exactly as it would for a
-different real fish.
-
-### What ships in `assets/` (≈2 MB)
-
-| File | What it is |
+| Path | What it holds |
 |---|---|
-| `stimulus/…_180min.csv.gz` | An example stimulus programme. This is rig **input** — the experimental design — and contains no animal data. |
-| `ROIdef2025-02-20T12_09_16.csv` | Physical dish geometry. |
-| `models/ladder_b_indiv.pt` | The **J10** model (`mlp_joint_h128_shoal_contain_kfb_vig_indiv`). |
-| `real_reference.npz` | A ~13 kB aggregate summary of the recorded experiment: an occupancy histogram for start poses, plus the real comparison curves. |
+| `twin/` | the library: preprocessing (`segment_bouts`, `cleaning`), the models (`fit_MLP*`), training (`training`, `profile_finetune`, `correction`), simulation (`stim_rollout`, `rollout_*`), evaluation (`unit_eval`, `rollout_eval`, `generative_metrics`, `model_figures`, `tables`), the analyses beyond the data (`missing_pieces`, `two_targets`, `multi_fish`, the `screen_*` modules) |
+| `twin/registry.py` | every thesis model: its name, recipe, seeds and checkpoint folder |
+| `twin/paths.py` | where the data, the trained models and every result live |
+| `figures/` | one script per thesis figure, writing `figures/out/<name>.pdf` |
+| `pipelines/` | the command lines: train and evaluate a model |
+| `notebooks/` | one notebook per part of the thesis, with its outputs |
+| `assets/` | the stimulus programme the rig played and the dish geometry (no animal data) |
+| `data/` | the recordings (not in git, see `data/README.md`) |
+| `output/` | checkpoints, evaluations and caches (not in git) |
 
-The raw recordings (`PositionTxt`, `df_transformed/`, `bouts_GsizeMotionSingle.csv`) are **not**
-published. `real_reference.npz` holds histograms only — no fish identity, no timing, no
-trajectories — which is enough for the tool to place a plausible starting fish and to draw the real
-baseline in the sanity panel. If you do have the full dataset locally under `data/`, the notebook
-detects it and uses it automatically.
-
-The sanity panel's real curves are a **population baseline, not a matched control**: they are
-reusable for any programme whose conditions stay in the recorded vocabulary (N ∈ {1,2,4,6,8},
-moving/static), but a programme with a different *mix* of conditions will shift the marginal
-histograms for compositional reasons. The following-index-by-N panel is robust to that.
-
-### Checking it still works
+## Setup
 
 ```bash
-python scripts/smoke_stim_program.py    # 22 checks; needs the full local dataset
+uv sync                      # Python >= 3.13 and every dependency, from uv.lock
 ```
 
----
-
-## The rest of this repository
-
-Below is the original per-frame pipeline (`src/`), which the bout-level pipeline in `scripts/`
-supersedes. It is kept for reference and provenance.
-
-This repository contains pipelines and models used to learn and sample zebrafish trajectories from visual stimuli using a probabilistic neural network.
-
-The code is organized as a modular pipeline covering:
-
-1. Raw data transformation  
-2. Feature engineering and preprocessing  
-3. Model training  
-4. Autoregressive sampling and trajectory visualization  
-
-This repository is intended for further scaling, GPU training, and experimentation.
-
----
-
-## Project Structure
-
-All core code is located in:
-
-```
-src/
-│
-├── transformed_data_pipeline.py   # Raw experiment → transformed dataframe
-├── preprocessing.py               # Feature engineering and preprocessing pipeline
-├── model_NN.py                    # Neural network definition and training
-├── sampling.py                    # Autoregressive sampling and trajectory generation
-├── functions.py                   # Utility functions used by preprocessing pipeline
-```
-
-Notebooks used for experiments demonstrate the full pipeline from raw data to trajectory sampling and visualization.
-
----
-
-
-
-
-## Pipeline Overview
-
-
-### 1. Data Transformation
-
-File:  
-`src/transformed_data_pipeline.py`
-
-Purpose:  
-Transforms raw experiment files into analysis-ready dataframes with consistent coordinate systems.
-
-Input:
-
-- Stimuli trajectory file
-- Fish position file
-- ROI file
-
-Output:
-
-- Absolute coordinate dataframe
-- Polar coordinate dataframe
-
-
-
-### 2. Preprocessing Pipeline
-
-File:  
-`src/preprocessing.py`
-
-Purpose:
-
-- Feature engineering
-- Lag feature creation
-- Stimulus feature construction
-- Dataset preparation for training and sampling
-
-Input:
-
-- Absolute coordinate dataframe
-- Feature configuration parameters (lags, horizon_frames, subsample)
-
-This pipeline relies heavily on utility functions defined in:
-
-`src/functions.py`
-
-Output:
-
-- Preprocessed dataframe for model training
-- Preprocessed dataframe for trajectory sampling
-
-
-
-### 3. Model Training Pipeline
-
-File:  
-`src/model_NN.py`
-
-Purpose:
-
-- Split data into training, validation, and test sets
-- Train probabilistic neural network
-- Learn behavioral distribution parameters
-
-Input:
-
-- Preprocessed training dataframe
-
-Model outputs 5 parameters per timestep:
-
-- μ_st      → mean of Student-t distribution (orientation change)
-- σ_st      → scale of Student-t distribution
-- p_pos     → probability of positive speed
-- μ_ln      → mean of lognormal speed distribution (log-space)
-- σ_ln      → std of lognormal speed distribution
-
-Output:
-
-- Trained model
-- Scalers
-- Dataset splits
-
-
-
-### 4. Sampling Pipeline
-
-File:  
-`src/sampling.py`
-
-Purpose:
-
-- Generate autoregressive trajectories
-- Sample speed and orientation from learned distributions
-- Generate trajectory videos
-
-Input:
-
-- Preprocessed sampling dataframe segment
-- Trained model
-- Scalers
-
-Important:
-
-- Stimulus positions are not generated by the model.
-- The sampling pipeline uses exactly the stimulus positions provided in the input dataframe.
-- To test specific stimulus conditions, modify the stimulus columns (`d{k}_x`, `d{k}_y`, `d{k}_stim`) in the sampling dataframe before running sampling.
-- Autoregressive sampling requires `horizon_frames = 1`, since the model must generate trajectories frame-by-frame.
-
-Output:
-
-- Sampled trajectories
-- Distribution parameters
-- Visualization videos
-
----
-
-## Typical Usage
-
-
-
-### Recommended Data Loading Workflow
-
-Because the raw pipeline transformation is computationally expensive, the recommended workflow is:
-
-1. Run the transformation pipeline once
-2. Save the transformed data locally as a .pkl file
-3. Load the .pkl file for all subsequent experiments
-
-This avoids recomputing transformations every time.
-
-
-### Run transformation pipeline and save
-
-```python
-from src.transformed_data_pipeline import generate_transformed_datasets
-import pickle
-
-results = generate_transformed_datasets(stimuli_df, position_df, roi_df)
-
-abs_dict = results["absolute"]
-
-with open("abs_dict.pkl", "wb") as f:
-    pickle.dump(abs_dict, f)
+Put the recordings in `data/` as described in `data/README.md`. Trained checkpoints and computed results go to
+`output/`; to use folders elsewhere, set `TWIN_DATA`, `TWIN_OUTPUT` and `TWIN_FIGURES`. Open the notebooks with
+`uv run jupyter lab`.
+
+## The notebooks
+
+| Notebook | Thesis | What it reproduces |
+|---|---|---|
+| `01_bout_discretisation` | Data | from the 30 fps tracking to the bout table (Figures fig:detection, fig:bouttraj), checked identical to the training table |
+| `02_data_exploration` | Data | every figure and number of the Data chapter |
+| `03_models` | Methods, Results | the main line M1-M6 and the drift branch D1-D4, F: Tables tab:storyline, tab:realism, tab:app-imp-*, tab:profile-spread; Figures fig:slow, fig:profiles, fig:app-bands-*, fig:app-latent-gain, fig:app-drift-gain, fig:app-correction-trace; every model's measurements |
+| `04_other_results` | Appendix (negative results) | Tables tab:app-negres-net, tab:app-negres-drift, tab:app-negres-other |
+| `05_ablations` | Results | Tables tab:abl-all, tab:abl-indiv; Figure fig:abl-profiles |
+| `06_turn_rule_and_individuals` | Results, Appendix | Figures fig:rule, fig:range-law; Tables tab:range-law, tab:nrn; the classifier's real-against-real floor |
+| `07_two_groups` | Results, Appendix | Figures fig:bifurcation, fig:app-bif-* |
+| `08_second_data_set` | Results, Appendix | Tables tab:screen-auc, tab:app-screen-kin, tab:app-screen-importances, tab:app-grouprep; Figures fig:screen-response, fig:screen-switch, fig:app-grouprep |
+| `09_shoaling` | Results | Tables tab:shoal-grid, tab:shoal-pairs; the shoaling videos |
+
+The notebooks read saved results and say how to recompute them; each runs in minutes once `output/` holds the
+checkpoints and caches. Every figure script also runs on its own, e.g. `uv run python -m figures.fig_profiles`.
+
+## Models
+
+A model is a *unit*: five fold models, each trained with three fish held out, at one cross-validation seed (0 or
+101; seeds are never pooled). `twin/registry.py` lists every thesis model with its recipe;
+`uv run python pipelines/train.py --list` prints them.
+
+```bash
+uv run python pipelines/train.py M6 --seed 0      # train (five folds in parallel, one thread each)
+uv run python pipelines/train.py F --seed 0       # F = the profile correction fitted on D4 (needs D4's unit)
+uv run python pipelines/evaluate.py M6 F --seed 0 101
 ```
 
-This saves the transformed absolute-coordinate dataset.
+Training takes 1-3 min per fold without the per-fish latent (M1), 10-60 min with it and 1-2 h with the slow drift;
+the correction 45-80 min per fold; evaluating a unit about 15 min. Training is deterministic given the seed, and so
+is evaluation: re-evaluating a unit reproduces its saved numbers exactly. On another machine or with other library
+versions, retrained models differ within the seed-to-seed noise.
 
+## How this was checked
 
+The code was cleaned from the development repository (tag `pre-cleanup`) and checked against it: the training
+recipes against the ones that trained every thesis checkpoint; two-epoch fits bit-identical; the evaluation of M6
+reproducing its saved summary exactly; the bout table and the training table rebuilt identically from the 30 fps
+tracking; every thesis figure pixel-identical; the thesis tables reproduced from the saved evaluations.
 
-### Now to run experiments
+## Second data set
 
-Recommended workflow for experiments:
-
-```python
-# Load transformed dataset
-with open("abs_dict.pkl", "rb") as f:
-    abs_dict = pickle.load(f)
-
-# Stack fish into single dataframe
-df_abs_raw = functions.stack_dict_pipeline(abs_dict)
-
-# Run preprocessing pipeline
-df_for_training, df_for_sampling = preprocessing_pipeline(df_abs_raw, cols_to_lag=cols_to_lag,horizon_frames=horizon_frames, subsample=subsample) # data for training
-
-# Run Model pipeline
-model, scalers, splits = train_nn_pipeline(df_for_training, early_stopping=True)
-
-# IMPORTANT:
-# Do NOT pass the full df_for_sampling to sample_trajectory.
-# Instead, select a short segment (e.g., one trial or ~1000–2000 frames),
-# since sampling is autoregressive and starts from the beginning of the provided dataframe.
-
-df_sampling_segment = df_for_sampling.iloc[:1800].copy()
-
-
-# Run Sampling and video pipeline
-window, prediction_sampling, params_sampling = sample_trajectory(df_sampling_segment, model, scalers, cols_to_lag=cols_to_lag, horizon_frames=horizon_frames, subsample=subsample)
-anim = generate_trajectory_video(window, horizon_frames=horizon_frames)
-HTML(anim.to_jshtml())
-
-
-
-# Train model or run sampling
-```
-
-This avoids recomputing transformations and ensures consistent data usage.
-
---- 
-
-
-## Key Parameters
-
-Important parameters used throughout pipelines:
-
-General:
-
-- fps → frames per second  
-- horizon_frames → prediction horizon  
-- subsample → lag subsampling factor  
-- max_lag_seconds → history window size 
-- cols_to_lag → list of features for which lagged versions are created  
-
-Sampling:
-
-- N_sampling_seconds → duration of generated trajectory  
-
-Important:
-
-- Sampling and preprocessing before training the model must use consistent feature configurations.
-
-- Autoregressive sampling requires horizon_frames = 1. Because the model predicts the next state autoregressively, it must generate frame t+1 from frame t. If horizon_frames > 1, intermediate frames are missing and autoregressive sampling cannot be performed correctly. Some assumptions can be done to perform autoregressive sampling with horizon_frame > 1 with interpolation or a second model that predicts the intermediate states.
-
----
-
-## Model Description
-
-The neural network predicts parameters of two probabilistic distributions:
-
-Orientation change:
-
-Student-t distribution  
-Parameters: μ_st, σ_st  
-
-Speed:
-
-Zero-inflated lognormal distribution  
-Parameters: p_pos, μ_ln, σ_ln  
-
-This allows realistic probabilistic trajectory generation.
-
----
-
-Tested with Python 3.9.13 on macOS.
+The screen of the Larsch lab (Center for Integrative Genomics, University of Lausanne) is unpublished. Neither the
+data nor the caches computed from them are in this repository (`data/` and `output/` are not versioned); notebook 08
+shows the results. Its terms of use are in its own `DATA_USE.md`.

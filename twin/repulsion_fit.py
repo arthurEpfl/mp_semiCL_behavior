@@ -266,9 +266,3 @@ def build(key):
         with contextlib.redirect_stdout(io.StringIO()):
             PF.write_likA(dst, arm)
         print(f"built {dst} ({len(list(dst.glob('*_fold*.pt')))} folds) with {rep}", flush=True)
-
-
-if __name__ == "__main__":
-    cmd, keys = sys.argv[1], sys.argv[2:]
-    for k in keys:
-        {"fit": fit, "extend": extend, "select": select, "build": build}[cmd](k)

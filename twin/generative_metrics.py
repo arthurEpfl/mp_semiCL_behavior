@@ -1187,44 +1187,6 @@ def c2st_negative_control(windows_by_fish, seed=0):
     return auc
 
 
-def mmd2_permutation(real_feats, gen_feats, gamma=None, n_perm=2000, seed=0):
-    """Unbiased MMD^2 between two feature sets (per-fish vectors) with an RBF kernel
-    and a label-permutation test. Returns (mmd2, p_value)."""
-    rng = np.random.default_rng(seed)
-    X = np.asarray(real_feats, float); Y = np.asarray(gen_feats, float)
-    if len(X) < 2 or len(Y) < 2:
-        return np.nan, np.nan
-    Z = np.vstack([X, Y])
-    Z = (Z - Z.mean(0)) / (Z.std(0) + EPS)
-    n, m = len(X), len(Y)
-    if gamma is None:
-        # median heuristic on pairwise sq distances
-        from scipy.spatial.distance import pdist
-        d2 = pdist(Z, "sqeuclidean")
-        gamma = 1.0 / (np.median(d2) + EPS)
-    K = np.exp(-gamma * _sq_dists(Z))
-
-    def _mmd2(idx_x, idx_y):
-        Kxx = K[np.ix_(idx_x, idx_x)]; Kyy = K[np.ix_(idx_y, idx_y)]
-        Kxy = K[np.ix_(idx_x, idx_y)]
-        nx, ny = len(idx_x), len(idx_y)
-        sx = (Kxx.sum() - np.trace(Kxx)) / (nx * (nx - 1))
-        sy = (Kyy.sum() - np.trace(Kyy)) / (ny * (ny - 1))
-        sxy = Kxy.mean()
-        return sx + sy - 2 * sxy
-
-    obs = _mmd2(np.arange(n), np.arange(n, n + m))
-    count = 0
-    for _ in range(n_perm):
-        perm = rng.permutation(n + m)
-        if _mmd2(perm[:n], perm[n:]) >= obs:
-            count += 1
-    return float(obs), float((count + 1) / (n_perm + 1))
-
-
-def _sq_dists(Z):
-    sq = np.sum(Z * Z, axis=1)
-    return np.maximum(sq[:, None] + sq[None, :] - 2 * Z @ Z.T, 0.0)
 
 
 # =========================================================================== #
@@ -1463,16 +1425,3 @@ PANEL_METRICS = ["abs_dtheta_w1", "symbol_js", "dt_w1", "dist_w1", "trans_js",
 PANEL_METRICS_TEACHER_FORCED = ["following_gap", "following_gap_static"]
 
 
-def summarize_panel(panel_df, metrics=PANEL_METRICS, n_boot=10000, seed=0):
-    """Per-model mean of each panel metric across fish with fish-level bootstrap CI
-    (lower = closer to real)."""
-    import pandas as pd
-    out = []
-    for model, g in panel_df.groupby("model"):
-        row = dict(model=model, n_fish=len(g))
-        for mt in metrics:
-            if mt in g.columns:
-                mean, lo, hi = E.fish_bootstrap_ci(g[mt].to_numpy(), n_boot=n_boot, seed=seed)
-                row[mt] = mean; row[mt + "_lo"] = lo; row[mt + "_hi"] = hi
-        out.append(row)
-    return pd.DataFrame(out)

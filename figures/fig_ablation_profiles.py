@@ -72,14 +72,6 @@ def curves():
     return c
 
 
-def _band(per_fish, cond):
-    M = per_fish.loc[cond].unstack("tbin").sort_index(axis=1)
-    M = M.loc[:, M.columns < 60]
-    A = M.to_numpy(float)
-    idx = np.random.default_rng(0).integers(0, A.shape[0], (N_BOOT, A.shape[0]))
-    bs = np.array([np.nanmean(A[i], 0) for i in idx])
-    lo, hi = np.nanpercentile(bs, [2.5, 97.5], 0)
-    return M.columns.to_numpy(float), lo, hi
 
 
 def _draw_unit(ax, mean, bands, cm):

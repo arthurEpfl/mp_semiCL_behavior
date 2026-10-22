@@ -36,6 +36,8 @@ def assert_code_scale(px_per_mm, name):
     if abs(float(px_per_mm) - 3.67) > 1e-12:
         raise SystemExit(f"{name} = {px_per_mm} px/mm, not 3.67: MM_3P67_TO_3P60 does not apply")
 
+
+
 # ---- colours (Okabe-Ito; the Chapter 3 trio first) ---------------------------------------------
 BLUE, VERM, GREEN = "#0072B2", "#D55E00", "#009E73"
 ORANGE, SKY, PURPLE, YELLOW = "#E69F00", "#56B4E9", "#CC79A7", "#F0E442"

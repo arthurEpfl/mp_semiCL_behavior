@@ -166,8 +166,3 @@ def add_dot_positions(bouts, frames_dir=paths.FRAMES):
     return df
 
 
-def build(frames_dir=paths.FRAMES):
-    """The training table and the repaired-frame list, from the 30 fps tables."""
-    frames, report, repaired = repair_frames(frames_dir)
-    bouts = add_model_columns(flag_gaps(segment(frames, frames_dir)))
-    return add_dot_positions(bouts, frames_dir), repaired, report

@@ -181,30 +181,3 @@ def load_reference(path):
                           h_edges=z["h_edges"], curves=curves, n_bouts=int(z["n_bouts"]))
 
 
-def reference_from_records(records):
-    """The same summary computed in-memory, for contributors who DO have the bouts CSV -- so the
-    notebook draws identical curves either way instead of having two code paths that can disagree."""
-    import tempfile
-    with tempfile.TemporaryDirectory() as td:
-        p = build_reference(records, Path(td) / "ref.npz")
-        return load_reference(p)
-
-
-if __name__ == "__main__":
-    import argparse
-    import sys
-
-    from twin import evaluate as E
-    from twin import fit_MLP_border as MB
-
-    _ROOT = Path(__file__).resolve().parents[1]
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--bouts", default=str(_ROOT / "data" / "bouts_GsizeMotionSingle.csv"))
-    ap.add_argument("--out", default=str(_ROOT / "assets" / "real_reference.npz"))
-    a = ap.parse_args()
-
-    recs = MB.build_border_records(E.load_bouts(a.bouts))
-    p = build_reference(recs, a.out)
-    ref = load_reference(p)
-    print(f"wrote {p} ({p.stat().st_size / 1024:.0f} kB)")
-    print(ref.summary())

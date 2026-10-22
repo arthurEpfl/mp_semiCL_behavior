@@ -46,15 +46,14 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-HERE = Path(__file__).resolve().parent
-ROOT = HERE.parent
+from twin import paths
 from twin import twin_test as TT  # noqa: E402
 
 TABLE = TT.OUT / "screen_train_bouts.npz"      # plain arrays: built in one interpreter, trained in another
 TABLE_META = TT.OUT / "screen_train_bouts.json"
 FISH_JSON = TT.OUT / "screen_train_fish.json"
-RUNS = ROOT / "Model" / "screen_trained_runs"
-DST = {0: ROOT / "Model" / "screen_trained_s0_ckpts", 101: ROOT / "Model" / "screen_trained_s101_ckpts"}
+RUNS = paths.TRAIN_RUNS / "screen"
+DST = {0: paths.CKPTS / "screen_s0", 101: paths.CKPTS / "screen_s101"}
 ARMS = {"M6": "S4xlo_adt_z2_cdt_tr_rc_al_w3ft", "D4": "S4lo_adt_z2_drift_cdt_tr_rc_al_w3ft_st",
         "M6dm": "S4xlo_adt_z2_cdt_tr_rc_al_w3ft_dm",     # + the dot motion direction input (Model 51)
         "D4dm": "S4lo_adt_z2_drift_cdt_tr_rc_al_w3ft_st_dm"}
@@ -62,7 +61,6 @@ SEEDS = (0, 101)
 CX, CY = 180.0, 174.0                         # the training dish centre (model px), as repulsion_lik
 R_PX = TT.R_MM * TT.PX
 LATE_S = 60.0
-PY = ROOT / ".venv" / "Scripts" / "python.exe"
 SKEYS = {f"s{m}_s{s}": (m, s) for m in ARMS for s in SEEDS}       # sM6_s0, sM6_s101, sD4_s0, sD4_s101
 ZERO = {"M6": ("26e", "30d"), "F": ("14f", "32b")}                    # the zero-shot units (screen_eval.py)
 
@@ -167,14 +165,15 @@ def build(workers=10):
 
 
 def fold(seed, k, arm, outdir, smoke=False):
-    """One fit of train_model1_colab.py, with the screen patched in (see the module docstring)."""
+    """One fit (twin.training.train_fold) of a screen recipe, with the screen patched in (see the module docstring);
+    writes the fold's checkpoint, manifest and held-out likelihood into ``outdir``."""
     outdir = Path(outdir); outdir.mkdir(parents=True, exist_ok=True)
+    from twin import registry
     from twin import training as T
     from twin import fit_MLP_border as MB
     z = np.load(TABLE, allow_pickle=False)
     df = pd.DataFrame({c: z[c] for c in z.files})
     fish = sorted(df.fish_id.unique())
-    T.OUT = outdir
     T.E.load_bouts = lambda path=None: df
     MB.load_physical_dish = lambda path=None: pd.DataFrame(
         dict(cx=CX, cy=CY, radius=R_PX), index=pd.Index([int(f) for f in fish], name="fish_id"))
@@ -184,16 +183,17 @@ def fold(seed, k, arm, outdir, smoke=False):
         fr = np.asarray(getattr(rec, "frame_onset", np.arange(rec.n) * fps), float)
         return fr - LATE_S * fps, np.zeros(rec.n, np.int64), fr
     MB.block_onsets = late
-    sys.argv = ["train_model1_colab.py", "--ladder", "rzlo_dm" if arm.endswith("_dm") else "rzlo", "--arms", arm, "--fold", str(k), "--seed", str(seed),
-                "--threads", "1"] + (["--smoke"] if smoke else [])
-    T.main()
+    name = next(n for n, r in registry.RECIPES.items() if r["arm"] == arm and n.endswith("screen"))
+    entry, lik, _ = T.train_fold(name, seed, k, outdir, recs=T.records(),
+                                 **(dict(epochs=3, patience=2) if smoke else {}))
+    (outdir / "manifest_model1.json").write_text(json.dumps([entry], indent=1))
+    pd.DataFrame(lik).to_csv(outdir / "likA_model1.csv", index=False)
     print("SCREEN FIT DONE", flush=True)
 
 
 def run(slots=18, only=None):
     from twin.rollout_eval import merge_ckpt_dirs
-    env = dict(os.environ, PYTHONPATH=os.pathsep.join([str(HERE), str(ROOT), str(ROOT / "Model")]),
-               PYTHONIOENCODING="utf-8", MPLBACKEND="Agg", OMP_NUM_THREADS="1", MKL_NUM_THREADS="1")
+    env = dict(os.environ, PYTHONIOENCODING="utf-8", MPLBACKEND="Agg", OMP_NUM_THREADS="1", MKL_NUM_THREADS="1")
     sem = threading.Semaphore(slots)
     arms = [a for m, a in ARMS.items() if only is None or m == only]
     jobs = [(s, a, k) for s in SEEDS for a in arms for k in range(5)]
@@ -209,7 +209,7 @@ def run(slots=18, only=None):
             d.mkdir(parents=True, exist_ok=True)
             with open(lg, "w", encoding="utf-8") as fh:
                 rc_of[(s, a, k)] = subprocess.Popen(
-                    [str(PY), "-u", "-W", "ignore", str(HERE / "screen_train.py"), "fold", str(s), str(k), a, str(d)],
+                    [sys.executable, "-u", "-W", "ignore", "-m", "twin.screen_train", "fold", str(s), str(k), a, str(d)],
                     cwd=str(d), env=env, stdout=fh, stderr=subprocess.STDOUT).wait()
         print(f"[{time.time() - t0:6.0f}s] seed {s} {a} fold {k}: exit {rc_of[(s, a, k)]}", flush=True)
     ths = [threading.Thread(target=one, args=j) for j in jobs]

@@ -852,30 +852,6 @@ def groups_readout(cond, n_pseudo=200):
                 iid_ratio=iid / iid_s.mean(), big=big, big_shuf=big_s, big_blind=big_b, pol=pol, pol_shuf=pol_s, G=G)
 
 
-def close_contacts(cond, step=1.0):
-    """Nearest-neighbour distance of every fish at every second (1 Hz grid after t_read), pooled over groups: the share of
-    fish-seconds with the nearest neighbour within 2 / 4 / 6 / 10 / 25 mm, its median and 10th percentile, and its
-    histogram (0-60 mm, 1 mm bins). For pairs this is the pair distance."""
-    blob = load(cond)
-    T, _ = tracks(blob, step=step)                                   # (groups, fish, frames, 2) mm
-    nn = []
-    for P in T:
-        D = np.linalg.norm(P[:, None] - P[None, :], axis=-1)
-        D[np.arange(len(P)), np.arange(len(P))] = np.inf
-        nn.append(D.min(1).ravel())
-    nn = np.concatenate(nn)
-    out = {f"share_nn_le_{k}mm": float(np.mean(nn <= k)) for k in (2, 4, 6, 10, 25)}
-    out.update(nn_median=float(np.median(nn)), nn_p10=float(np.percentile(nn, 10)),
-               hist=np.histogram(nn, np.arange(0, 61, 1.0))[0].tolist())
-    return out
-
-
-def check_rep_blind(T=300.0):
-    """F + repulsion blind == F blind, byte for byte (the term needs a visible neighbour)."""
-    spec = dict(CONDS["A1_blind"], T=T)
-    a = run_group(spec, 0, models("14f"))
-    b = run_group(dict(spec, tag="14f_rep"), 0, models("14f_rep"))
-    return all(np.array_equal(u[k], v[k]) for u, v in zip(a, b) for k in ("t", "x", "y", "dth", "d", "dt"))
 
 
 def cotravel(cond, thr=SHOAL_MM, n_pseudo=100):
@@ -1027,75 +1003,11 @@ def analyse(save=True, conds=None, out=None):
     return S
 
 
-def analyse_rep(out=None):
-    """F + repulsion against F on the same scenes: every readout of ``analyse`` for both, plus the close contacts
-    (``close_contacts``) -> Model/multi_fish/summary_rep.json (summary.json is left as it was)."""
-    conds = list(REP_CONDS) + [REP_BASE[c] for c in REP_CONDS] + [c for c in REPS_CONDS if (OUT / f"{c}.pkl").exists()]
-    S = analyse(save=False, conds=conds)
-    S["contacts"] = {c: close_contacts(c) for c in conds if (OUT / f"{c}.pkl").exists()}
-    S["rep_base"] = dict(REP_BASE)
-    S["reps_base"] = {c: b for c, b in REPS_BASE.items() if (OUT / f"{c}.pkl").exists()}
-    Path(out or (OUT / "summary_rep.json")).write_text(json.dumps(S, indent=1, default=_json_default),
-                                                      encoding="utf-8")
-    return S
-
-
-def close_contacts_n(cond, N=None, G=None, step=1.0):
-    """``close_contacts`` on the first N fish of the first G groups (a blind pool of larger groups as the chance level
-    of smaller ones)."""
-    spec = CONDS[cond]
-    N = N or spec["N"]; G = G or spec["G"]
-    T, taus = tracks(load(cond), N)
-    nn = []
-    for g in range(G):
-        P = T[g]
-        D = np.linalg.norm(P[:, None] - P[None, :], axis=-1)
-        D[np.arange(len(P)), np.arange(len(P))] = np.inf
-        nn.append(D.min(1).ravel())                                   # tracks() is already in mm
-    nn = np.concatenate(nn)
-    out = {f"share_nn_le_{k}mm": float(np.mean(nn <= k)) for k in (2, 4, 6, 10, 25)}
-    out.update(nn_median=float(np.median(nn)), nn_p10=float(np.percentile(nn, 10)),
-               hist=np.histogram(nn, np.arange(0, 61, 1.0))[0].tolist())
-    return out
 
 
 PAIR_BINS = np.array([0, 2, 4, 6, 8, 10, 12, 15, 20, 25, 30, 40, 70], float)
 
 
-def pair_shape(cond):
-    """Every fish-to-neighbour distance (all ordered pairs, 1 Hz readout grid) per bin, as a share, against the same for
-    the blind pool (same fish, same dish): occupancy relative to chance per distance bin, and its 0-2 / 2-4 mm levels
-    relative to 4-8 mm (real fish near a dot on the Larsch screen: 0.84 / 0.92)."""
-    spec = CONDS[cond]
-    N, G = spec["N"], spec["G"]
-    T, _ = tracks(load(cond))
-    TB, _ = tracks(load(blind_of(cond)), N)
-    TB = TB[:G]
-
-    def h(X):
-        D = np.linalg.norm(X[:, :, None] - X[:, None, :], axis=-1)       # tracks() is already in mm
-        v = D[:, ~np.eye(X.shape[1], dtype=bool)].ravel()
-        return np.histogram(v, PAIR_BINS)[0].astype(float) / len(v)
-    ratio = h(T) / h(TB)
-    ref = float(np.nanmean(ratio[2:4]))
-    return dict(bins=PAIR_BINS.tolist(), ratio=ratio.tolist(), shape_0_2=float(ratio[0] / ref),
-                shape_2_4=float(ratio[1] / ref))
-
-
-def analyse_grouprep(out=None):
-    """Every readout of ``analyse`` for the group-repulsion conditions (and F in the 5x dish), the close contacts of
-    each condition and of its blind pool (N-fish groups), and the close-range shape -> summary_grouprep.json."""
-    coupled = [c for c in GR_CONDS if (OUT / f"{c}.pkl").exists()] + [c for c in GR_F5.values()
-                                                                      if (OUT / f"{c}.pkl").exists()]
-    S = analyse(save=False, conds=coupled)
-    S["contacts"] = {c: close_contacts(c) for c in coupled}
-    S["contacts_blind"] = {c: close_contacts_n(blind_of(c), CONDS[c]["N"], CONDS[c]["G"]) for c in coupled}
-    S["pair_shape"] = {c: pair_shape(c) for c in coupled}
-    S["blind_of"] = {c: blind_of(c) for c in coupled}
-    S["specs"] = {c: CONDS[c] for c in coupled}
-    Path(out or (OUT / "summary_grouprep.json")).write_text(json.dumps(S, indent=1, default=_json_default),
-                                                           encoding="utf-8")
-    return S
 
 
 def grid_readout(cond, n_pseudo=200, nb=500):
@@ -1236,17 +1148,6 @@ def analyse_grid(out=None, workers=8):
     return res
 
 
-def analyse_shoal(out=None):
-    """Every readout of ``analyse`` for the shoaling-notebook conditions, plus the close contacts of each condition and
-    of its blind pool (non-interacting fish in the same dish = the chance level of close contacts) ->
-    Model/multi_fish/summary_shoal.json."""
-    coupled = [c for c in SH_CONDS if not SH_CONDS[c]["blind"] and (OUT / f"{c}.pkl").exists()]
-    S = analyse(save=False, conds=coupled)
-    S["contacts"] = {c: close_contacts(c) for c in SH_CONDS if (OUT / f"{c}.pkl").exists()}
-    S["blind_of"] = {c: blind_of(c) for c in coupled}
-    Path(out or (OUT / "summary_shoal.json")).write_text(json.dumps(S, indent=1, default=_json_default),
-                                                        encoding="utf-8")
-    return S
 
 
 def _minute_curve(taus, X):
@@ -1272,8 +1173,6 @@ def _json_default(o):
     raise TypeError(type(o))
 
 
-def load_summary():
-    return json.loads((OUT / "summary.json").read_text(encoding="utf-8"))
 
 
 # --------------------------------------------------------------------------- #
@@ -1482,69 +1381,6 @@ def frames_xy(f, taus):
     return np.stack([x0 + a * (x1 - x0), y0 + a * (y1 - y0)], 1)
 
 
-def pick_window(cond, length_s=90.0, step_s=5.0):
-    """The group and window best showing a shoal forming and then moving together: over 1 Hz frames, score =
-    (largest-cluster size late in the window - early) + distance the cluster centroid travels while >= 3 fish stay
-    together (/50 mm). Returns (group, t_start, score)."""
-    blob = load(cond)
-    spec = blob["spec"]
-    taus = np.arange(0.0, spec["T"], 1.0)
-    best = (None, None, -np.inf)
-    for g, grp in enumerate(blob["groups"]):
-        P = np.array([pos_at(f, taus) for f in grp]) / PX_MM
-        big = _largest(P)
-        D = np.linalg.norm(P[:, None] - P[None, :], axis=-1) <= SHOAL_MM
-        cen = np.full((len(taus), 2), np.nan)
-        for fr in range(len(taus)):                          # centroid of the fish linked to the most others
-            A = D[:, :, fr]
-            hub = int(np.argmax(A.sum(1)))
-            mem = np.flatnonzero(A[hub])
-            if len(mem) >= 3:
-                cen[fr] = P[mem, fr].mean(0)
-        stepd = np.linalg.norm(np.diff(cen, axis=0), axis=1)
-        stepd = np.where(np.isfinite(stepd) & (stepd < 30.0), stepd, 0.0)
-        L = int(length_s)
-        for s in np.arange(0, len(taus) - L, int(step_s)):
-            e = s + L
-            form = big[e - 15:e].mean() - big[s:s + 15].mean()
-            travel = stepd[s + L // 3:e - 1].sum()
-            sc = max(form, 0.0) + travel / 50.0
-            if sc > best[2]:
-                best = (g, float(taus[s]), float(sc))
-    return best
-
-
-def view_of(panels, t0, t1, margin_mm=15.0):
-    """A square view (mm, relative to the dish centre) holding every fish of ``panels`` over [t0, t1] -- the whole dish
-    when that is smaller."""
-    taus = np.arange(t0, t1, 1.0)
-    pts = []
-    for cond, g in panels:
-        cx, cy, R = dish(CONDS[cond]["arena"])
-        for f in load(cond)["groups"][g]:
-            p = pos_at(f, taus)
-            pts.append(np.c_[(p[:, 0] - cx) / PX_MM, (p[:, 1] - cy) / PX_MM])
-    P = np.concatenate(pts)
-    lo, hi = P.min(0) - margin_mm, P.max(0) + margin_mm
-    c, h = (lo + hi) / 2, max(hi - lo) / 2
-    R = dish(CONDS[panels[0][0]]["arena"])[2] / PX_MM * 1.03
-    if h >= R:
-        return (-R, R, -R, R)
-    return (float(c[0] - h), float(c[0] + h), float(c[1] - h), float(c[1] + h))
-
-
-def write_video_npz(path, panels, t0, t1, speed=2.0, labels=("",), view=None, body_mm=None):
-    """``panels`` = [(cond, group)]: one dish per panel, the same window. Writes the frame data for the renderer."""
-    taus = np.arange(t0, t1, speed / VIDEO_FPS)
-    data, dishes = [], []
-    for cond, g in panels:
-        grp = load(cond)["groups"][g]
-        data.append(np.array([frames_xy(f, taus) for f in grp]))     # (fish, frames, 2)
-        dishes.append(dish(CONDS[cond]["arena"]))
-    view = view if view is not None else view_of(panels, t0, t1)
-    np.savez_compressed(path, xy=np.array(data), taus=taus, dishes=np.array(dishes), labels=np.array(labels),
-                        speed=speed, view=np.array(view, float), body_mm=np.nan if body_mm is None else float(body_mm))
-    return path
 
 
 def render_npz(npz, out_mp4, trail_s=4.0, dpi=110):
@@ -1601,47 +1437,8 @@ def render_npz(npz, out_mp4, trail_s=4.0, dpi=110):
     plt.close(fig)
 
 
-def make_video(panels, t0, t1, out_mp4, labels, speed=2.0, view=None, body_mm=None):
-    """Frame data in this process, rendering in a subprocess (with the bundled ffmpeg when none is on PATH)."""
-    import subprocess
-    from twin import bout_video as BV
-    out_mp4 = Path(out_mp4)
-    out_mp4.parent.mkdir(parents=True, exist_ok=True)
-    npz = out_mp4.with_suffix(".npz")
-    write_video_npz(npz, panels, t0, t1, speed, labels, view, body_mm)
-    env, rc_dir = BV._render_env(out_mp4)
-    try:
-        subprocess.run([sys.executable, str(Path(__file__).resolve()), "--render", str(npz), str(out_mp4)],
-                       check=True, env=env)
-    finally:
-        if rc_dir is not None:
-            import shutil
-            shutil.rmtree(rc_dir, ignore_errors=True)
-    npz.unlink(missing_ok=True)
-    return out_mp4
 
 
-def snapshot(cond, g, times, ax_row=None, blind=False, view=None):
-    """Still frames (for the notebook): fish positions at ``times`` with 4 s trails; ``view`` = (x0, x1, y0, y1) mm."""
-    import matplotlib.pyplot as plt
-    blob = load(blind_of(cond) if blind else cond)
-    grp = blob["groups"][g][:CONDS[cond]["N"]]
-    cx, cy, R = dish(CONDS[cond]["arena"])
-    cols = plt.get_cmap("tab10")(np.arange(len(grp)) % 10)
-    axes = ax_row if ax_row is not None else plt.subplots(1, len(times), figsize=(3.2 * len(times), 3.3))[1]
-    for ax, t in zip(np.atleast_1d(axes), times):
-        tt = np.arange(max(t - 4.0, 0.0), t + 1e-9, 1.0 / VIDEO_FPS)
-        ax.add_patch(plt.Circle((0, 0), R / PX_MM, fill=False, lw=1.0, color="0.35"))
-        for i, f in enumerate(grp):
-            p = frames_xy(f, tt)
-            ax.plot((p[:, 0] - cx) / PX_MM, (p[:, 1] - cy) / PX_MM, lw=0.8, color=cols[i], alpha=0.6)
-            ax.scatter([(p[-1, 0] - cx) / PX_MM], [(p[-1, 1] - cy) / PX_MM], s=14, color=cols[i], zorder=3)
-        lim = R / PX_MM * 1.03
-        x0, x1, y0, y1 = view if view is not None else (-lim, lim, -lim, lim)
-        ax.set_xlim(x0, x1); ax.set_ylim(y1, y0); ax.set_aspect("equal"); ax.axis("off")
-        m, s = divmod(t, 60.0)
-        ax.set_title(f"{int(m):02d}:{s:02.0f}", fontsize=9)
-    return axes
 
 
 # --------------------------------------------------------------------------- #
@@ -1653,274 +1450,6 @@ COLORS = {"coupled": "#1f77b4", "shuffled": "#ff7f0e", "blind": "#7f7f7f", "time
           "chance": "#ff7f0e"}
 
 
-def _fmt_ci(m, ci, nd=3):
-    return f"{m:+.{nd}f} [{ci[0]:+.{nd}f}, {ci[1]:+.{nd}f}]"
-
-
-def conditions_table(S=None):
-    import pandas as pd
-    S = S or load_summary()
-    rows = []
-    for c, d in S["conds"].items():
-        rows.append({"condition": c, "what": d["label"],
-                     "model": {"14f": "F, seed 0", "32b": "F, seed 101", "26e": "M6, seed 0", "30d": "M6, seed 101"}[d["tag"]],
-                     "dish radius (mm)": round(dish(d["arena"])[2] / PX_MM),
-                     "fish per dish": d["N"], "dishes": d["G"], "minutes": d["T"] / 60,
-                     "readout from (min)": d["t_read"] / 60, "fish see each other": not d["blind"],
-                     "rule": "-" if d["blind"] else d["rule"] + (" (random directions)" if d["scramble"] else ""),
-                     "bouts": d["n_bouts"], "CPU h": d["cpu_h"]})
-    return pd.DataFrame(rows).set_index("condition")
-
-
-def checks_table():
-    import pandas as pd
-    c = json.loads((OUT / "checks.json").read_text(encoding="utf-8"))
-    rows = [("generator hook: a provider-set block time equal to the generator's own gives the same fish bit for bit",
-             c["hook_bit_identical"][0]),
-            ("coupling: a coupled fish == the generator run alone on a replay of its partner's track (2 rules x 3 pairs)",
-             c["parity_coupled_vs_replay"][0]),
-            ("determinism: a group of 10 run twice is identical", c["deterministic"]),
-            ("pairing: a blind fish is the same fish in a group of 10 and in a pair", c["blind_pairing"]),
-            ("two-group simulator (multi_stim.validate) still bit-identical after the hook", True)]
-    return pd.DataFrame(rows, columns=["check", "passed"]).set_index("check")
-
-
-def rules_table():
-    """The rule check: phantom neighbours on one side; P(turn toward them) and kinematics per rule and number."""
-    import pandas as pd
-    c = json.loads((OUT / "checks.json").read_text(encoding="utf-8"))
-    t = pd.DataFrame(c["rules"])
-    real = {int(k): v for k, v in c["real_toward"].items()}
-    t["real P(toward), same count"] = [f"{real[k][0]:.3f} +- {real[k][1]:.3f}" if k in real else
-                                       ("3 dots never shown" if k == 3 else ("-" if k == 0 else "> 8 never shown"))
-                                       for k in t.k]
-    t = t.rename(columns={"k": "phantom neighbours", "p_toward": "P(turn toward)", "rate": "bouts / s",
-                          "step": "median step (mm)", "turn": "mean |turn| (deg)"})
-    return t.set_index(["rule", "phantom neighbours"]).round(3)
-
-
-def pairs_table(S=None):
-    import pandas as pd
-    S = S or load_summary()
-    rows = []
-    for c, d in S["pairs"].items():
-        for lab in ("coupled", "blind"):
-            v = d[lab]
-            rows.append({"pairs": LABEL[c], "fish": "see each other" if lab == "coupled" else "blind (same fish)",
-                         "attraction index [95% CI]": _fmt_ci(v["ai_mean"], v["ai_ci"]),
-                         "median distance (mm)": round(v["iad_med"], 1),
-                         "median distance, partner time-shifted (mm)": round(v["iad_shift_med"], 1),
-                         "time within 10 mm": round(v["share_within_10mm"], 3),
-                         "time within 25 mm": round(v["share_within_25mm"], 3),
-                         "per-fold AI": " ".join(f"{a:+.2f}" for a in v["ai_folds"])})
-        rows.append({"pairs": LABEL[c], "fish": "difference (paired by pair)",
-                     "attraction index [95% CI]": _fmt_ci(d["paired_diff"]["mean"], d["paired_diff"]["ci"])})
-    return pd.DataFrame(rows).set_index(["pairs", "fish"]).fillna("")
-
-
-def groups_table(S=None):
-    import pandas as pd
-    S = S or load_summary()
-    rows = []
-    for c, d in S["groups"].items():
-        rows.append({"condition": LABEL[c],
-                     "NN distance (mm): see / shuffled / blind": f"{d['nn_mm']:.1f} / {d['nn_shuf_mm']:.1f} / {d['nn_blind_mm']:.1f}",
-                     "D = ln(NN / NN shuffled) [95% CI]": _fmt_ci(d["D_mean"], d["D_ci"]),
-                     "D, SD over dishes": round(d["D_sd"], 3),
-                     "D vs time-shifted group": _fmt_ci(d["D_tshift_mean"], d["D_tshift_ci"]),
-                     "D vs fold-matched null (sensitivity)": _fmt_ci(d["D_fold_mean"], d["D_fold_ci"]),
-                     "D of the blind fish (should be ~0)": _fmt_ci(d["D_blind_mean"], d["D_blind_ci"]),
-                     "occupancy part ln(NN shuffled / NN blind)": round(d["occupancy"], 3),
-                     "mean distance ratio (Buske)": round(d["iid_ratio"], 3),
-                     "largest shoal (fish): see / shuffled / blind": f"{d['big_mean']:.2f} / {d['big_shuf']:.2f} / {d['big_blind']:.2f}",
-                     "time >= half the fish together: see / shuffled / blind":
-                         f"{d['share_half_together']:.2f} / {d['share_half_together_shuf']:.2f} / {d['share_half_together_blind']:.2f}",
-                     "alignment: see / shuffled": f"{d['pol']:.3f} / {d['pol_shuf']:.3f}",
-                     "per-fold D": " ".join(f"{a:+.2f}" for a in d["D_folds"])})
-    return pd.DataFrame(rows).set_index("condition")
-
-
-def literature_table(S=None):
-    import pandas as pd
-    S = S or load_summary()
-    rows = [{"source": "Harpaz et al. 2021 (groups of 5/10, real fish)", "measure": "D = ln(NN / NN shuffled)",
-             "value": ", ".join(f"{k}: {m:+.3f} +- {s:.3f}" for k, (m, s) in LIT_HARPAZ.items())}]
-    for c, d in S["groups"].items():
-        rows.append({"source": f"model: {LABEL[c]}", "measure": "D = ln(NN / NN shuffled)",
-                     "value": f"{d['D_mean']:+.3f} +- {d['D_sd']:.3f} (mean +- SD over {CONDS[c]['G']} dishes)"})
-    rows.append({"source": "Buske & Gerlai 2011 (groups of 10)", "measure": "mean distance / random placement",
-                 "value": "0.88-1.0 at 7-36 dpf, 0.40 at 76 dpf (null = uniform placement in a square)"})
-    for c, d in S["groups"].items():
-        if CONDS[c]["N"] == 10:
-            rows.append({"source": f"model: {LABEL[c]}", "measure": "mean distance / shuffled groups",
-                         "value": f"{d['iid_ratio']:.3f}"})
-    rows.append({"source": "Larsch & Baier 2018 (pairs, 10 cm dish)", "measure": "pair distance vs time-shifted",
-                 "value": "attraction from ~14 dpf; 26 dpf pairs 5-20 mm vs ~40 mm chance"})
-    for c, d in S["pairs"].items():
-        v = d["coupled"]
-        rows.append({"source": f"model: {LABEL[c]}", "measure": "pair distance vs time-shifted",
-                     "value": f"median {v['iad_med']:.1f} mm vs {v['iad_shift_med']:.1f} mm; AI {v['ai_mean']:+.3f}"})
-    rows.append({"source": "Harpaz et al. 2021 Sci Adv (groups of 5)", "measure": "alignment",
-                 "value": "0.417 (7 dpf), 0.458 (21 dpf); random headings ~0.40"})
-    for c, d in S["groups"].items():
-        if CONDS[c]["N"] == 5:
-            rows.append({"source": f"model: {LABEL[c]}", "measure": "alignment",
-                         "value": f"{d['pol']:.3f} (shuffled {d['pol_shuf']:.3f})"})
-    return pd.DataFrame(rows).set_index(["source", "measure"])
-
-
-def real_kin_reference():
-    """Real fish, per fish: moving-dot blocks vs pauses -- bout rate ratio, median step ratio, mean |turn| and
-    near-straight share differences (median [p10, p90] over the 15 fish): the range a 'sees moving dots' fish shows."""
-    MF, _ = _imports()
-    rows = []
-    for r in MF.records().values():
-        dt = np.asarray(r.dt_s, float); d = np.asarray(r.distance_px, float) / PX_MM; a = np.abs(np.asarray(r.dtheta, float))
-        mv = (np.asarray(r.n_dots) > 0) & (np.asarray(r.moving) > 0); pa = np.asarray(r.n_dots) == 0
-        ok = np.isfinite(dt) & (dt > 0)
-        rows.append(((1 / np.mean(dt[mv & ok])) / (1 / np.mean(dt[pa & ok])), np.median(d[mv]) / np.median(d[pa]),
-                     a[mv].mean() - a[pa].mean(), (a[mv] < 3).mean() - (a[pa] < 3).mean()))
-    R = np.array(rows)
-    return {q: (float(np.median(R[:, k])), float(np.percentile(R[:, k], 10)), float(np.percentile(R[:, k], 90)))
-            for k, q in enumerate(("rate", "step", "turn", "straight"))}
-
-
-def kin_table(S=None):
-    import pandas as pd
-    S = S or load_summary()
-    ref = real_kin_reference()
-    f = lambda q, v: f"{v['median']:.3f} [{v['p10']:.3f}, {v['p90']:.3f}]"
-    rows = [{"condition": "REAL fish: moving dots vs pause (per fish)",
-             **{n: f"{ref[q][0]:.3f} [{ref[q][1]:.3f}, {ref[q][2]:.3f}]" for q, n in
-                (("rate", "bout rate ratio"), ("step", "median step ratio"), ("turn", "mean |turn| difference (deg)"),
-                 ("straight", "near-straight share difference"))}}]
-    for c, d in S["kin"].items():
-        rows.append({"condition": LABEL[c], "bout rate ratio": f("rate", d["rate"]),
-                     "median step ratio": f("step", d["step"]), "mean |turn| difference (deg)": f("turn", d["turn"]),
-                     "near-straight share difference": f("straight", d["straight"])})
-    return pd.DataFrame(rows).set_index("condition")
-
-
-def ood_table(S=None):
-    import pandas as pd
-    S = S or load_summary()
-    t = pd.DataFrame(S["ood"]).T
-    t.index = [LABEL[c] for c in t.index]
-    return t.rename(columns={"share_visible": "bouts with a neighbour in view", "n_vis": "neighbours in view",
-                             "G_mean": "dot groups per bout", "share_G_gt2": "bouts with > 2 groups",
-                             "share_pooled": "bouts with a pooled group", "share_pool_gt8": "bouts with a pool > 8",
-                             "r_near_med_mm": "nearest group (mm, median)",
-                             "share_r_near_gt44mm": "nearest group > 44 mm",
-                             "share_group_outside_dish": "a group outside the dish"}).round(3)
-
-
-def plot_nn_time(S=None, conds=None):
-    """Nearest-neighbour distance (mm) vs time, one panel per condition: fish that see each other, pseudo-groups of
-    fish from different dishes (same condition), the same fish blind. Bands: 95% bootstrap CI over dishes."""
-    import matplotlib.pyplot as plt
-    S = S or load_summary()
-    conds = conds or list(S["groups"])
-    fig, axes = plt.subplots(1, len(conds), figsize=(3.6 * len(conds), 3.2), sharey=False, squeeze=False)
-    for ax, c in zip(axes[0], conds):
-        d = S["groups"][c]
-        for key, lab in (("nn_t", "see each other"), ("nn_shuf_t", "shuffled (other dishes)"),
-                         ("nn_blind_t", "same fish, blind")):
-            a = np.array(d[key])
-            col = COLORS["coupled" if key == "nn_t" else "shuffled" if key == "nn_shuf_t" else "blind"]
-            ax.plot(a[:, 0], a[:, 1], color=col, lw=1.5, label=lab)
-            ax.fill_between(a[:, 0], a[:, 2], a[:, 3], color=col, alpha=0.2, lw=0)
-        ax.set_title(LABEL[c], fontsize=9); ax.set_xlabel("time (min)")
-        ax.set_ylim(bottom=0)
-    axes[0, 0].set_ylabel("nearest-neighbour distance (mm)")
-    axes[0, 0].legend(fontsize=7, frameon=False)
-    fig.tight_layout()
-    return fig
-
-
-def plot_D(S=None):
-    """One point per dish: D = ln(NN / NN shuffled), with the mean and 95% CI; Harpaz's real-fish values as lines."""
-    import matplotlib.pyplot as plt
-    S = S or load_summary()
-    conds = list(S["groups"])
-    fig, ax = plt.subplots(figsize=(1.1 * len(conds) + 3, 3.4))
-    rng = np.random.default_rng(0)
-    for k, c in enumerate(conds):
-        d = S["groups"][c]
-        v = np.array(d["D"])
-        ax.scatter(k + rng.uniform(-0.15, 0.15, len(v)), v, s=10, color="0.45", zorder=2)
-        ax.errorbar(k, d["D_mean"], yerr=[[d["D_mean"] - d["D_ci"][0]], [d["D_ci"][1] - d["D_mean"]]], fmt="o",
-                    color=COLORS["coupled"], ms=6, capsize=3, zorder=3)
-    for lab, (m, _) in LIT_HARPAZ.items():
-        if "dark" in lab:
-            continue
-        ax.axhline(m, ls="--", lw=0.8, color="0.3")
-        ax.text(len(conds) - 0.45, m, f"Harpaz {lab}", fontsize=7, va="bottom", ha="right", color="0.3")
-    ax.axhline(0, color="k", lw=0.6)
-    ax.set_xticks(range(len(conds))); ax.set_xticklabels([LABEL[c] for c in conds], rotation=30, ha="right", fontsize=8)
-    ax.set_ylabel("D = ln(NN / NN shuffled)\n< 0: closer than chance")
-    fig.tight_layout()
-    return fig
-
-
-def plot_pair_distance(conds=("A1_pairs", "s101_A1_pairs")):
-    """Distance between the two fish of a pair (1 Hz, readout window): pairs that see each other, the same pairs with
-    the partner's track time-shifted (Larsch's chance), the same fish blind."""
-    import matplotlib.pyplot as plt
-    conds = [c for c in conds if (OUT / f"{c}.pkl").exists()]
-    fig, axes = plt.subplots(1, len(conds), figsize=(4.2 * len(conds), 3.2), squeeze=False)
-    bins = np.linspace(0, 100, 51)
-    for ax, c in zip(axes[0], conds):
-        G = CONDS[c]["G"]
-        T, taus = tracks(load(c), 2)
-        TB, _ = tracks(load(blind_of(c)), 2)
-        d = np.linalg.norm(T[:, 0] - T[:, 1], axis=-1).ravel()
-        ds = np.concatenate([np.linalg.norm(T[:, 0] - np.roll(T[:, 1], -int(s), axis=1), axis=-1).ravel()
-                             for s in SHIFTS_S])
-        db = np.linalg.norm(TB[:G, 0] - TB[:G, 1], axis=-1).ravel()
-        for v, lab, col in ((d, "see each other", COLORS["coupled"]), (ds, "partner time-shifted", COLORS["time-shifted"]),
-                            (db, "same fish, blind", COLORS["blind"])):
-            h, _ = np.histogram(v, bins=bins, density=True)
-            ax.plot((bins[1:] + bins[:-1]) / 2, h, color=col, lw=1.5, label=lab)
-        ax.set_title(LABEL[c], fontsize=9); ax.set_xlabel("distance between the two fish (mm)")
-    axes[0, 0].set_ylabel("density"); axes[0, 0].legend(fontsize=7, frameon=False)
-    fig.tight_layout()
-    return fig
-
-
-def plot_cotravel(conds=("A5_N10_effects", "A5_N10_nearest")):
-    """5x dish: how far two fish travel while staying within 25 mm of each other (one value per episode); share of
-    episodes longer than x, fish that see each other vs pairs from different dishes (chance) vs blind."""
-    import matplotlib.pyplot as plt
-    conds = [c for c in conds if (OUT / f"{c}.pkl").exists()]
-    fig, axes = plt.subplots(1, len(conds), figsize=(4.2 * len(conds), 3.2), squeeze=False)
-    for ax, c in zip(axes[0], conds):
-        ct = cotravel(c)
-        for lab, col in (("coupled", COLORS["coupled"]), ("chance", COLORS["chance"]), ("blind", COLORS["blind"])):
-            e = np.sort(ct[lab]["eps"])
-            if not len(e):
-                continue
-            ax.step(e, 1 - np.arange(len(e)) / len(e), where="post", color=col, lw=1.5,
-                    label={"coupled": "see each other", "chance": "pairs from different dishes",
-                           "blind": "same fish, blind"}[lab])
-        ax.set_xscale("symlog", linthresh=10); ax.set_yscale("log")
-        ax.set_xlabel("distance travelled together (mm)"); ax.set_title(LABEL[c], fontsize=9)
-    axes[0, 0].set_ylabel("share of episodes longer"); axes[0, 0].legend(fontsize=7, frameon=False)
-    fig.tight_layout()
-    return fig
-
-
-def cotravel_table(S=None):
-    import pandas as pd
-    S = S or load_summary()
-    rows = []
-    for c, d in S["cotravel"].items():
-        for lab, name in (("coupled", "see each other"), ("chance", "pairs from different dishes"),
-                          ("blind", "same fish, blind")):
-            v = d[lab]
-            rows.append({"condition": LABEL[c], "fish": name, "mm travelled together per pair-hour": round(v["per_pair_hour"], 1),
-                         "episodes per pair-hour": round(v["eps_per_pair_hour"], 2), "longest episode (mm)": round(v["longest"], 1),
-                         "95th percentile (mm)": round(v["p95"], 1)})
-    return pd.DataFrame(rows).set_index(["condition", "fish"])
 
 
 def shoaling(S, c, d_max=-0.1):
@@ -1929,194 +1458,29 @@ def shoaling(S, c, d_max=-0.1):
     return bool(d and d["D_ci"][1] < 0 and d["D_mean"] < d_max)
 
 
-def pick_formation(cond, before_s=180.0, after_s=120.0, sustain_s=30.0):
-    """The dish where a shoal of >= 9 forms earliest from a scattered start (largest single-linkage cluster at 25 mm
-    <= 3 fish over the first 20 s, then >= 9 for at least ``sustain_s``); window = [t9 - before_s, t9 + after_s]."""
-    blob = load(cond)
-    taus = np.arange(0.0, blob["spec"]["T"], 1.0)
-    best = None
-    for g, grp in enumerate(blob["groups"]):
-        P = np.array([pos_at(f, taus) for f in grp]) / PX_MM
-        big = _largest(P)
-        if big[:20].max() > 3:
-            continue
-        ok = np.convolve(big >= 9, np.ones(int(sustain_s)), "valid") >= sustain_s
-        if not ok.any():
-            continue
-        t9 = float(taus[int(np.argmax(ok))])
-        if best is None or t9 < best[1]:
-            best = (g, t9)
-    if best is None:
-        return None
-    g, t9 = best
-    return g, max(0.0, t9 - before_s), t9 + after_s, t9
-
-
-def pick_cohesion(cond, length_s=90.0):
-    """The dish and window where the group is tightest (lowest mean nearest-neighbour distance) after minute 5."""
-    blob = load(cond)
-    taus = np.arange(blob["spec"]["t_read"], blob["spec"]["T"], 1.0)
-    best = (None, None, np.inf)
-    L = int(length_s)
-    for g, grp in enumerate(blob["groups"]):
-        nn = _nn1(np.array([pos_at(f, taus) for f in grp]) / PX_MM)
-        c = np.convolve(nn, np.ones(L) / L, "valid")
-        k = int(np.argmin(c))
-        if c[k] < best[2]:
-            best = (g, float(taus[k]), float(c[k]))
-    return best
-
-
-def make_videos(S=None, log=print):
-    """(1) 5x dish: a shoal forming from a scattered start and moving off; (2) 5x dish: a shoal travelling (window of
-    ``pick_window``); (3) training dish: the tightest stretch. Each beside the same fish blind. Only for conditions that
-    shoal (``shoaling``). Returns [(mp4, cond, group, t0, t1, title)]."""
-    S = S or load_summary()
-    made = []
-
-    def go(c, g, t0, t1, speed, title, tag):
-        out = VIDEO_DIR / f"{tag}_{c}_dish{g}_{int(t0)}-{int(t1)}s.mp4"
-        make_video([(c, g), (blind_of(c), g)], t0, t1, out,
-                   labels=(f"{LABEL[c]}: the fish see each other", "the same 10 fish, blind"), speed=speed)
-        log(f"wrote {out}")
-        made.append((str(out), c, g, float(t0), float(t1), title))
-
-    c5 = "A5_N10_effects"
-    if shoaling(S, c5):
-        f = pick_formation(c5)
-        if f is not None:
-            g, t0, t1, t9 = f
-            go(c5, g, t0, t1, 6.0, f"5x dish: a shoal forms (all 10 together from {t9 / 60:.1f} min) and moves off",
-               "1_formation")
-        g, t0, sc = pick_window(c5, length_s=180.0)
-        go(c5, g, t0, t0 + 180.0, 4.0, "5x dish: a shoal travelling together", "2_travel")
-    else:
-        log("5x dish: no shoaling -> no video")
-    c1 = "A1_N10_effects"
-    if shoaling(S, c1):
-        g, t0, _ = pick_cohesion(c1)
-        go(c1, g, t0, t0 + 90.0, 2.0, "training dish: the tightest 90 s", "3_training_dish")
-    else:
-        log("training dish: no shoaling -> no video")
-    VIDEO_DIR.mkdir(parents=True, exist_ok=True)
-    (VIDEO_DIR / "videos.json").write_text(json.dumps(made, indent=1), encoding="utf-8")
-    return made
 
 
 VIDEO_BODY_MM = 2.0   # Final_report_shoaling videos: each fish a dot 2 mm across (the collision distance), in dish units
 
 
-def make_grouprep_videos(conds=("g5_grT", "g5_grT2", "g5_grT8", "g5_grTC"), length_s=180.0, speed=4.0, log=print, full=False):
-    """Final_report_shoaling.ipynb: for each condition (default: the calibrated group repulsion and its x2 strength,
-    5 fish, 5x dish, seed 0) the stretch where a shoal forms and its centre travels furthest (``pick_window``), beside
-    the same 5 fish blind. -> VIDEO_DIR/grouprep/*.mp4 and videos_grouprep.json [(mp4, cond, group, t0, t1, title)].
-    ``full``: the whole dish in view instead of zooming onto the fish (*_fulldish.mp4, videos_grouprep_full.json)."""
-    made = []
-    vd = VIDEO_DIR / "grouprep"
-    for c in conds:
-        g, t0, sc = pick_window(c, length_s=length_s)
-        out = vd / f"{c}_dish{g}_{int(t0)}-{int(t0 + length_s)}s{'_fulldish' if full else ''}.mp4"
-        lim = dish(CONDS[c]["arena"])[2] / PX_MM * 1.03
-        make_video([(c, g), (blind_of(c), g)], t0, t0 + length_s, out,
-                   labels=(f"{LABEL[c]}: the fish see each other", f"the same {CONDS[c]['N']} fish, blind"), speed=speed,
-                   view=(-lim, lim, -lim, lim) if full else None, body_mm=VIDEO_BODY_MM)
-        log(f"wrote {out} (window score {sc:.2f})")
-        made.append((str(out), c, int(g), float(t0), float(t0 + length_s), f"{LABEL[c].split(',')[0]}: a shoal travelling"))
-    vd.mkdir(parents=True, exist_ok=True)
-    (vd / ("videos_grouprep_full.json" if full else "videos_grouprep.json")).write_text(json.dumps(made, indent=1),
-                                                                                      encoding="utf-8")
-    return made
-
-
-def make_grouprep_paired_video(conds=("g5_grT", "g5_grT2", "g5_grT8", "g5_grTC"), length_s=180.0, speed=4.0, seed=2026, log=print):
-    """ONE dish and ONE window for every condition (paired: same fish, starts and random streams), picked by a NEUTRAL
-    rule -- a random group and a random start inside the readout, from ``seed`` -- with the same fish blind as the last
-    panel; a zoomed and a full-dish version. Also the window's nearest-neighbour statistics per panel (to show it is
-    typical). -> VIDEO_DIR/grouprep/paired_*.mp4 and videos_grouprep_paired.json."""
-    spec = CONDS[conds[0]]
-    rng = np.random.default_rng(seed)
-    g = int(rng.integers(spec["G"]))
-    t0 = float(np.round(rng.uniform(spec["t_read"], spec["T"] - length_s)))
-    t1 = t0 + length_s
-    panels = [(c, g) for c in conds] + [(blind_of(conds[0]), g)]
-    labels = [LABEL[c].split(",")[0].replace("F + group repulsion", "GR") for c in conds] + [f"the same {spec['N']} fish, blind"]
-    stats = []
-    taus = np.arange(t0, t1, 0.5)
-    for (c, gg), lab in zip(panels, labels):
-        P = np.array([pos_at(f, taus) for f in load(c)["groups"][gg][:spec["N"]]]) / PX_MM
-        D = np.linalg.norm(P[:, None] - P[None, :], axis=-1); D[np.arange(len(P)), np.arange(len(P))] = np.inf
-        nn = D.min(1).ravel()
-        stats.append(dict(panel=lab, cond=c, nn_median=float(np.median(nn)),
-                          **{f"le_{k}mm": float(np.mean(nn <= k)) for k in (2, 4, 6)}))
-    vd = VIDEO_DIR / "grouprep"
-    made = []
-    lim = dish(spec["arena"])[2] / PX_MM * 1.03
-    for full in (False, True):
-        out = vd / f"paired_dish{g}_{int(t0)}-{int(t1)}s{'_fulldish' if full else ''}.mp4"
-        make_video(panels, t0, t1, out, labels=tuple(labels), speed=speed, view=(-lim, lim, -lim, lim) if full else None,
-                   body_mm=VIDEO_BODY_MM)
-        log(f"wrote {out}")
-        made.append(dict(mp4=str(out), full=full))
-    vd.mkdir(parents=True, exist_ok=True)
-    (vd / "videos_grouprep_paired.json").write_text(json.dumps(dict(group=g, t0=t0, t1=t1, seed=seed, videos=made,
-                                                                    stats=stats), indent=1), encoding="utf-8")
-    return made, stats
-
-
-def make_videos_old(S=None, log=print):
-    """Videos for the shoaling conditions: the dish and window that best show a shoal forming and moving, the same fish
-    blind beside it. Returns [(mp4, cond, group, t0, t1)]."""
-    S = S or load_summary()
-    made = []
-    for arena, length, speed in ((1, 90.0, 2.0), (5, 180.0, 4.0)):
-        cands = [c for c in S["groups"] if CONDS[c]["arena"] == arena and CONDS[c]["tag"] == "14f"
-                 and not CONDS[c]["scramble"] and CONDS[c]["N"] == 10 and shoaling(S, c)]
-        if not cands:
-            log(f"arena x{arena}: no shoaling condition -> no video")
-            continue
-        eff = [k for k in cands if CONDS[k]["rule"] == "effects"]          # the reference rule when it shoals
-        c = eff[0] if eff else min(cands, key=lambda k: S["groups"][k]["D_mean"])
-        g, t0, sc = pick_window(c, length_s=length)
-        out = VIDEO_DIR / f"{c}_dish{g}_{int(t0)}s.mp4"
-        make_video([(c, g), (blind_of(c), g)], t0, t0 + length, out,
-                   labels=(f"{LABEL[c]}: the fish see each other", "the same 10 fish, blind"), speed=speed)
-        log(f"wrote {out} (dish {g}, {t0:.0f}-{t0 + length:.0f} s, score {sc:.2f})")
-        made.append((str(out), c, g, t0, t0 + length))
-    (VIDEO_DIR / "videos.json").parent.mkdir(parents=True, exist_ok=True)
-    (VIDEO_DIR / "videos.json").write_text(json.dumps(made, indent=1), encoding="utf-8")
-    return made
 
 
 # --------------------------------------------------------------------------- #
+
+
 if __name__ == "__main__":
     a = sys.argv[1:]
     if a and a[0] == "--render":
         render_npz(a[1], a[2])
     elif a and a[0] == "--checks":
         _worker_init(); run_checks()
-    elif a and a[0] == "--run":
-        _worker_init(); run_conditions(a[1:] or None)
-    elif a and a[0] == "--analyse":
-        analyse()
-    elif a and a[0] == "--run-shoal":
-        _worker_init(); run_conditions([c for c in SH_CONDS if not (OUT / f"{c}.pkl").exists()])
-    elif a and a[0] == "--analyse-shoal":
-        analyse_shoal()
-    elif a and a[0] == "--run-grouprep":
-        _worker_init(); run_conditions([c for c in GR_CONDS if not (OUT / f"{c}.pkl").exists()])
-    elif a and a[0] == "--analyse-grouprep":
-        analyse_grouprep()
-    elif a and a[0] == "--run-pairdm":
-        _worker_init(); run_pairdm(int(a[1]) if len(a) > 1 else 16)
-    elif a and a[0] == "--analyse-pairdm":
-        analyse_pairdm()
     elif a and a[0] == "--run-grid":
         _worker_init(); run_grid(int(a[1]) if len(a) > 1 else 16)
     elif a and a[0] == "--analyse-grid":
         analyse_grid()
-    elif a and a[0] == "--videos-grouprep":
-        make_grouprep_videos()
-        make_grouprep_videos(full=True)
-        make_grouprep_paired_video()
+    elif a and a[0] == "--run-pairdm":
+        _worker_init(); run_pairdm(int(a[1]) if len(a) > 1 else 16)
+    elif a and a[0] == "--analyse-pairdm":
+        analyse_pairdm()
     else:
         print(__doc__)

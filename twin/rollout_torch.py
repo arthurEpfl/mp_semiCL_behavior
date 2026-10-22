@@ -719,25 +719,3 @@ def verify_against_numpy(model, records, n_bouts=4000, reps=3, seed=0, verbose=T
         print("\nTORCH ROLLOUT MATCHES THE NUMPY GENERATOR" if ok else
               "\nMISMATCH -- do NOT train on this; it is a different object")
     return ok
-
-
-def main():
-    import argparse
-    import pandas as pd
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--model", required=True)
-    ap.add_argument("--bouts", default=str(Path(__file__).parent.parent / "data" /
-                                           "bouts_GsizeMotionSingle.csv"))
-    ap.add_argument("--n", type=int, default=4000)
-    ap.add_argument("--fish", type=int, default=6)
-    ap.add_argument("--reps", type=int, default=3)
-    a = ap.parse_args()
-    MX._numpy2_unpickle_compat()
-    recs = MB.build_border_records(pd.read_csv(a.bouts))
-    rl = [recs[f] for f in sorted(recs)[:a.fish]]
-    m = MX.load_mix(a.model)
-    sys.exit(0 if verify_against_numpy(m, rl, n_bouts=a.n, reps=a.reps) else 1)
-
-
-if __name__ == "__main__":
-    main()

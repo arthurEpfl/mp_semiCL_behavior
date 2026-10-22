@@ -320,11 +320,6 @@ def big_jobs(tags=tuple(MODELS), onset="free"):
             for pair, tag, L, c in itertools.product(BIG_PAIRS, tags, BIG_SEPS_MM, BIG_CONDS)]
 
 
-def subtended_deg(f, L_mm):
-    """Angle (deg) between the directions from the fish to A (+L/2 lateral) and to B (-L/2), per bout."""
-    a = np.stack([L_mm / 2 - f.lat_mm, -f.along_mm], 1); b = np.stack([-L_mm / 2 - f.lat_mm, -f.along_mm], 1)
-    c = (a * b).sum(1) / np.maximum(np.hypot(*a.T) * np.hypot(*b.T), 1e-9)
-    return np.degrees(np.arccos(np.clip(c, -1, 1)))
 
 
 UNEQ_PAIRS = ("1v4", "2v8")                                     # A = the smaller group, B = the larger
@@ -371,203 +366,17 @@ def following(b, L_mm):
     return b[(b.along_mm <= 0) & (b.along_mm >= -FOLLOW_BEHIND_MM) & (b.lat_mm.abs() <= L_mm / 2 + FOLLOW_LAT_MM)]
 
 
-def trial_table(b, L_mm, window="steady"):
-    """Per trial (fish x block): mean |x|, mean x, share closer to A, number of following bouts; x = lat / (L/2)."""
-    lo, hi = WINDOWS[window]
-    f = following(b[(b.t_blk >= lo) & (b.t_blk < hi)], L_mm).copy()
-    if L_mm > 0:
-        f["x"] = f.lat_mm / (L_mm / 2)
-    else:
-        f["x"] = np.nan
-    f["closerA"] = (f.dA_mm < f.dB_mm).astype(float)
-    f["middle"] = (f.lat_mm.abs() < L_mm / 4).astype(float) if L_mm > 0 else np.nan     # within L/4 of the midline
-    g = f.groupby(["fish", "blk"])
-    return pd.DataFrame({"absx": g.x.apply(lambda v: np.abs(v).mean()), "x": g.x.mean(),
-                         "abslat": g.lat_mm.apply(lambda v: np.abs(v).mean()), "lat": g.lat_mm.mean(),
-                         "closerA": g.closerA.mean(), "middle": g.middle.mean(), "n": g.size()}).reset_index()
-
-
-def fish_mean(tt, col, n_boot=2000, seed=0):
-    per = tt.groupby("fish")[col].mean().dropna().to_numpy()
-    if len(per) == 0:
-        return np.nan, np.nan, np.nan, 0
-    bs = per[np.random.default_rng(seed).integers(0, len(per), (n_boot, len(per)))].mean(1)
-    lo, hi = np.percentile(bs, [2.5, 97.5])
-    return float(per.mean()), float(lo), float(hi), len(per)
 
 
 COLS = ("absx", "x", "abslat", "lat", "closerA", "middle")
 
 
-def _row(tag, pair, L, cond, tt):
-    r = dict(tag=tag, model=UNIT_LABEL[tag][0], seed=UNIT_LABEL[tag][1], pair=pair, L=L, cond=cond,
-             n_trials=len(tt), follow_bouts=float(tt.n.mean()) if len(tt) else np.nan)
-    for col in COLS:
-        m, lo, hi, nf = fish_mean(tt, col)
-        r[col], r[col + "_lo"], r[col + "_hi"] = m, lo, hi
-    return r
-
-
-def summary(tags=tuple(MODELS), window="steady"):
-    """One row per (unit, pair, L, condition), plus 'ref-mid': a fish following ONE target on the midline (the L = 0
-    run with only A shown) read at separation L -- the averaging reference, as 'ref-A' is the choosing one. Both carry
-    the fish's own scatter about the target it follows, which the comparison cancels."""
-    rows = []
-    for tag, pair, L, cond in jobs(tags):
-        p = _path(tag, scene(pair, L), cond)
-        if not p.exists():
-            continue
-        rows.append(_row(tag, pair, L, cond, trial_table(pd.read_pickle(p), L, window)))
-    for tag, pair in itertools.product(tags, PAIRS):
-        p0 = _path(tag, scene(pair, 0), "ref-A")
-        if not p0.exists():
-            continue
-        b0 = pd.read_pickle(p0)
-        for L in SEPS_MM[1:]:
-            rows.append(_row(tag, pair, L, "ref-mid", trial_table(b0, L, window)))
-    S = pd.DataFrame(rows)
-    # commitment index from |lateral offset| (mm): 0 = the midline follower, 1 = the fish following A alone
-    key = ["tag", "pair", "L"]
-    mid = S[S.cond == "ref-mid"].set_index(key).abslat
-    ref = S[S.cond == "ref-A"].set_index(key).abslat
-    ix = S.set_index(key).index
-    S["commit"] = ((S.abslat.to_numpy() - mid.reindex(ix).to_numpy())
-                   / (ref.reindex(ix).to_numpy() - mid.reindex(ix).to_numpy()))
-    return S
-
-
-def x_values(tag, pair, L, cond, window="steady"):
-    """Every following bout's x in the window (for the distribution panels)."""
-    b = load(tag, pair, L, cond)
-    lo, hi = WINDOWS[window]
-    f = following(b[(b.t_blk >= lo) & (b.t_blk < hi)], L)
-    return (f.lat_mm / (L / 2)).to_numpy() if L > 0 else f.lat_mm.to_numpy()
-
-
-# ----------------------------------------------------------------------------------------------- the split -----
-def branch_fit(lat, n_iter=300):
-    """Maximum-likelihood symmetric two-band fit of lateral positions: 0.5 N(+mu, s^2) + 0.5 N(-mu, s^2) (EM). Such a
-    mixture has two peaks exactly when mu > s, so mu / s > 1 = the fish occupies two branches (choosing), mu / s < 1 = one
-    band (averaging, however broad). Returns (mu, s)."""
-    x = np.asarray(lat, float)
-    x = x[np.isfinite(x)]
-    if len(x) < 20:
-        return np.nan, np.nan
-    mu, s = float(np.mean(np.abs(x))), float(np.std(x))
-    for _ in range(n_iter):
-        a = np.exp(-0.5 * ((x - mu) / s) ** 2); b = np.exp(-0.5 * ((x + mu) / s) ** 2)
-        r = a / np.maximum(a + b, 1e-300)
-        mu_n = max(float(np.mean((2 * r - 1) * x)), 0.0)
-        s_n = float(np.sqrt(np.mean(r * (x - mu_n) ** 2 + (1 - r) * (x + mu_n) ** 2)))
-        if abs(mu_n - mu) < 1e-6 and abs(s_n - s) < 1e-6:
-            mu, s = mu_n, s_n
-            break
-        mu, s = mu_n, s_n
-    return mu, s
 
 
 DIP_BW_MM = 3.0                                                  # kernel width of the lateral density (mm)
 DIP_SPLIT = 0.9                                                  # a clear trough: the midline >= 10 % below the branches
 
 
-def lateral_dip(lat, L_mm, bw=DIP_BW_MM):
-    """The lateral density of the following bouts, symmetrised about the midline (lat and -lat) and smoothed with a
-    Gaussian kernel of ``bw`` mm, on 0 .. L/2 + FOLLOW_LAT_MM. Returns (dip, peak_mm): dip = density AT the midline /
-    its maximum (1 = the midline is the peak: one band, however broad or flat-topped; < 1 = the midline is a trough
-    between two branches), peak_mm = where the maximum is."""
-    x = np.asarray(lat, float)
-    x = x[np.isfinite(x)]
-    if len(x) < 20:
-        return np.nan, np.nan
-    top = L_mm / 2 + FOLLOW_LAT_MM
-    edges = np.arange(-top - 4 * bw, top + 4 * bw + 0.25, 0.5)
-    h, _ = np.histogram(np.r_[x, -x], bins=edges)
-    k = np.exp(-0.5 * (np.arange(-4 * bw, 4 * bw + 0.25, 0.5) / bw) ** 2)
-    d = np.convolve(h, k, mode="same")
-    c = 0.5 * (edges[1:] + edges[:-1])
-    keep = (c >= 0) & (c <= top)
-    d, c = d[keep], c[keep]
-    return float(d[0] / d.max()), float(c[np.argmax(d)])
-
-
-def _split_one(tag, cond, pair, seps, n_boot, seed, flat_mm, arena=1, onset="free"):
-    """One (unit, condition): the two-band fit at every L, with a bootstrap over fish that draws the SAME fish at every L
-    (paired), so the rise of mu above its flat level is tested within each resample."""
-    data = {}
-    for L in seps:
-        p = _path(tag, scene(pair, L), cond, arena, onset)
-        if p.exists():
-            f = following(pd.read_pickle(p).query("t_blk >= 20"), L)
-            data[float(L)] = (f, {k: g.lat_mm.to_numpy() for k, g in f.groupby("fish")})
-    if not data:
-        return []
-    Ls = sorted(data)
-    fish = np.unique(np.concatenate([list(d[1]) for d in data.values()]))
-    rng = np.random.default_rng([seed, zlib.crc32(f"{tag}|{cond}".encode())])
-    picks = [rng.choice(fish, len(fish)) for _ in range(n_boot)]
-    flat = [L for L in Ls if L <= flat_mm]
-    est = {L: branch_fit(data[L][0].lat_mm) for L in Ls}
-    dip_est = {L: lateral_dip(data[L][0].lat_mm, L) for L in Ls}
-    dip_boot = {L: np.array([lateral_dip(np.concatenate([data[L][1].get(k, np.empty(0)) for k in pk]), L)[0]
-                             for pk in picks]) for L in Ls}
-    boot = {L: np.array([branch_fit(np.concatenate([data[L][1].get(k, np.empty(0)) for k in pk])) for pk in picks])
-            for L in Ls}
-    mu0 = np.mean([est[L][0] for L in flat])
-    mu0_b = np.mean([boot[L][:, 0] for L in flat], axis=0)
-    rows = []
-    for L in Ls:
-        mu, s = est[L]
-        d_b = boot[L][:, 0] - mu0_b
-        r_b = boot[L][:, 0] / boot[L][:, 1]
-        rows.append(dict(tag=tag, cond=cond, L=L, mu=mu, s=s, mu_lo=np.nanpercentile(boot[L][:, 0], 2.5),
-                         mu_hi=np.nanpercentile(boot[L][:, 0], 97.5), rise=mu - mu0,
-                         rise_lo=np.nanpercentile(d_b, 2.5), rise_hi=np.nanpercentile(d_b, 97.5),
-                         ratio=mu / s, ratio_lo=np.nanpercentile(r_b, 2.5), ratio_hi=np.nanpercentile(r_b, 97.5),
-                         angle=float(np.median(subtended_deg(data[L][0], L))) if len(data[L][0]) else np.nan,
-                         dip=dip_est[L][0], peak_mm=dip_est[L][1], dip_lo=np.nanpercentile(dip_boot[L], 2.5),
-                         dip_hi=np.nanpercentile(dip_boot[L], 97.5),
-                         n=len(data[L][0])))
-    return rows
-
-
-def split_table(tags=tuple(MODELS), pair="4v4", conds=FINE_CONDS, seps=FINE_SEPS_MM, n_boot=200, seed=0,
-                flat_mm=10.0, n_jobs=12, cache=True, arena=1, onset="free"):
-    """Per (unit, condition, L): the symmetric two-band fit of the following bouts (20-60 s): the branch position mu, its
-    RISE above the flat level (mean mu over L <= flat_mm, where any rule averages: the tracks are within the fish's own
-    scatter), and mu / s; 95 % bootstrap over fish (paired across L). Per (unit, condition): the split = the first L from
-    which the rise's lower bound stays above 0 at every larger L, and mu at the largest L as a share of the one-target
-    reference's (1 = the branches reach the chooser).
-    THE SPLIT (split_L) = the first L from which the midline is a clear trough at every larger L: the upper bootstrap
-    bound of the dip (``lateral_dip``) below DIP_SPLIT. A rising mu alone does not show a split (a band that only
-    broadens raises mu too: the blind fish's mu rises with the readout box); rise_L keeps that weaker criterion.
-    mu / s > 1 is NOT used as the criterion: a fish following ONE target already scores ~1.1-1.2 (it weaves to either
-    side of it, a flat-topped distribution), so the threshold would call every chooser split at L = 0."""
-    out = OUT / ((f"split_{pair}.pkl" if arena == 1 else f"split_{pair}_arena{arena:g}.pkl")
-                 .replace(".pkl", "_anch.pkl" if onset == "anchored" else ".pkl"))
-    if cache and out.exists():
-        T = pd.read_pickle(out)
-    else:
-        from joblib import Parallel, delayed
-        res = Parallel(n_jobs=n_jobs)(delayed(_split_one)(t, c, pair, seps, n_boot, seed, flat_mm, arena, onset)
-                                      for t, c in itertools.product(tags, conds))
-        T = pd.DataFrame([r for rr in res for r in rr])
-        if cache:
-            T.to_pickle(out)
-    splits = []
-    for (tag, cond), g in T.groupby(["tag", "cond"]):
-        g = g.sort_values("L")
-        up = (g.rise_lo > 0).to_numpy()
-        idx_r = next((i for i in range(len(up)) if up[i:].all()), None)
-        tr = (g.dip_hi < DIP_SPLIT).to_numpy() if "dip_hi" in g else np.zeros(len(g), bool)
-        idx = next((i for i in range(len(tr)) if tr[i:].all()), None)
-        ref = T[(T.tag == tag) & (T.cond == "ref-A") & (T.L == g.L.max())].mu
-        splits.append(dict(tag=tag, cond=cond, split_L=None if idx is None else float(g.L.iloc[idx]),
-                           rise_L=None if idx_r is None else float(g.L.iloc[idx_r]),
-                           dip_max_L=float(g.dip.iloc[-1]),
-                           angle_at_split=np.nan if idx is None or "angle" not in g else float(g.angle.iloc[idx]),
-                           mu_flat=float(g[g.L <= flat_mm].mu.mean()), mu_max=float(g.mu.iloc[-1]),
-                           reach=float(g.mu.iloc[-1] / ref.iloc[0]) if len(ref) else np.nan))
-    return T, pd.DataFrame(splits)
 
 
 # ----------------------------------------------------------------------------------------------- validate ------
@@ -597,23 +406,8 @@ def validate(tag="26e"):
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "validate"
     if cmd == "validate":
-        ok = validate()
-        sys.exit(0 if ok else 1)
-    elif cmd == "run":
-        nj = int(sys.argv[sys.argv.index("--jobs") + 1]) if "--jobs" in sys.argv else 14
-        run_all(nj)
-    elif cmd == "run-fine":
-        nj = int(sys.argv[sys.argv.index("--jobs") + 1]) if "--jobs" in sys.argv else 14
-        run_all(nj, fine=True)
-    elif cmd == "run-big":
-        nj = int(sys.argv[sys.argv.index("--jobs") + 1]) if "--jobs" in sys.argv else 14
-        run_all(nj, big=True)
+        sys.exit(0 if validate() else 1)
     elif cmd == "run-report":
-        nj = int(sys.argv[sys.argv.index("--jobs") + 1]) if "--jobs" in sys.argv else 14
-        run_all(nj, report=True)
-    elif cmd == "run-uneq":
-        nj = int(sys.argv[sys.argv.index("--jobs") + 1]) if "--jobs" in sys.argv else 14
-        run_all(nj, uneq=True)
-    elif cmd == "run-big-anch":
-        nj = int(sys.argv[sys.argv.index("--jobs") + 1]) if "--jobs" in sys.argv else 14
-        run_all(nj, big=True, onset="anchored")
+        run_all(int(sys.argv[sys.argv.index("--jobs") + 1]) if "--jobs" in sys.argv else 14, report=True)
+    else:
+        raise SystemExit(__doc__)

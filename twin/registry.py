@@ -94,6 +94,8 @@ RECIPES = {
     "M6, floor 2 px": recipe(**dict(M6, rep="S4xlo")),
     "D4, floor 2 px": recipe(**dict(D4, rep="S4lo")),
     # trained on the screen data set (twin/screen_train.py): the floor-2-px recipes, + the dot's direction of motion
+    "M6, screen": recipe(**dict(M6, rep="S4xlo")),
+    "M6 + direction, screen": recipe(**dict(M6, rep="S4xlo"), dmove=True),
     "D4, screen": recipe(**dict(D4, rep="S4lo")),
     "D4 + direction, screen": recipe(**dict(D4, rep="S4lo"), dmove=True),
 }

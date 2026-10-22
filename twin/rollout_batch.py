@@ -103,27 +103,6 @@ def _clock_track(rec, cfg):
     return out
 
 
-def _clock_track_loop(rec, cfg):
-    """The per-bout reference implementation of ``_clock_track`` (tests only)."""
-    mode = str(cfg.get("clock_mode", "") or "").lower()
-    if mode not in ("linear", "exp"):
-        return np.zeros((rec.n, 0), np.float32)
-    taus = MB.clock_taus(cfg)
-    fo = np.asarray(rec.frame_onset, float) / MB._FPS
-    mv = np.asarray(rec.moving, float); nd = np.asarray(getattr(rec, "n_dots", np.zeros(rec.n)), float)
-    w = 1 if mode == "linear" else len(taus)
-    out = np.zeros((rec.n, w), np.float32)
-    cond0, t0 = None, 0.0
-    for t in range(rec.n):
-        nd_ = float(np.nan_to_num(nd[t])); cond = nd_ * 10.0 + float(np.nan_to_num(mv[t]))
-        if cond0 is None or cond != cond0:
-            t0 = float(fo[t])
-        cond0 = cond
-        if not nd_ > 0.0:
-            continue
-        tb = max(float(fo[t]) - t0, 0.0)
-        out[t] = ([min(tb / MB.CLOCK_BLOCK_S, 1.0)] if mode == "linear" else [np.exp(-tb / tau) for tau in taus])
-    return out
 
 
 class _Batch:

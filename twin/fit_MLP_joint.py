@@ -723,20 +723,6 @@ def stim_turn_v5(cfg_feat, arm, n_features=None):
     return StimTurnTermV5(idx, **kw)
 
 
-def stim_turn_from_spec(spec):
-    """Rebuild a saved profile term (v1 / v2 / v3 / v4 / v5) -- parameters are then filled by ``load_state_dict``."""
-    v = int(spec.get("version", 1))
-    if v == 5:
-        return StimTurnTermV5(spec["idx"], side=spec.get("side", False), static=spec.get("static", False),
-                              fcount=spec.get("fcount", "nz"), late=spec.get("late", False),
-                              clock_tau_s=spec.get("clock_tau_s", 4.0), late_tau_s=spec.get("late_tau_s", V5_LATE_TAU_S),
-                              cut_s=spec.get("cut_s"))
-    if v == 4:
-        return StimTurnTermV4(spec["idx"], clock_tau_s=spec.get("clock_tau_s", 4.0),
-                              late_tau_s=spec.get("late_tau_s", V4_LATE_TAU_S))
-    if v == 3:
-        return StimTurnTermV3(spec["layout"], spec["idx"])
-    return StimTurnTerm(spec["mv_idx"], spec["nz_idx"], rho_idx=spec.get("rho_idx"))
 
 
 def stim_turn_indices(cfg_feat):
@@ -2917,3 +2903,19 @@ def load_joint(path, map_location="cpu"):
                                   "reject" if m._cfg_feat.get("wall_reject") else "bias"))
     m.regime_w = blob.get("regime_w")
     return m
+
+
+def stim_turn_from_spec(spec):
+    """Rebuild a saved profile term (v1 / v2 / v3 / v4 / v5) -- parameters are then filled by ``load_state_dict``."""
+    v = int(spec.get("version", 1))
+    if v == 5:
+        return StimTurnTermV5(spec["idx"], side=spec.get("side", False), static=spec.get("static", False),
+                              fcount=spec.get("fcount", "nz"), late=spec.get("late", False),
+                              clock_tau_s=spec.get("clock_tau_s", 4.0), late_tau_s=spec.get("late_tau_s", V5_LATE_TAU_S),
+                              cut_s=spec.get("cut_s"))
+    if v == 4:
+        return StimTurnTermV4(spec["idx"], clock_tau_s=spec.get("clock_tau_s", 4.0),
+                              late_tau_s=spec.get("late_tau_s", V4_LATE_TAU_S))
+    if v == 3:
+        return StimTurnTermV3(spec["layout"], spec["idx"])
+    return StimTurnTerm(spec["mv_idx"], spec["nz_idx"], rho_idx=spec.get("rho_idx"))
