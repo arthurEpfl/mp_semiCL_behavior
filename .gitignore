@@ -26,6 +26,10 @@ Presentation/
 MasterThesis.pdf
 *.ipynb.bak
 
+# The thesis report is its own git repository, synced with Overleaf. It lives here for
+# convenience but is versioned separately -- do not track it from this repo.
+Final_Report/
+
 # Superseded legacy notebooks: the old per-frame `src/` pipeline, replaced by the bout-level
 # pipeline in scripts/. Untracked (not deleted) -- they still exist in git history and, for
 # whoever has them, on disk.
@@ -41,3 +45,26 @@ notebooks/evaluate.ipynb
 # Virtual environments
 .venv/
 venv/
+
+# Larsch lab data and repos shared for the collaboration (unpublished; DATA_USE.md: keep out of git)
+schizscreen_twin_v1*
+behavior-phenotypes-main*
+# derived from the Larsch screen data (twin_test.py caches); same terms as the data
+Model/twin_test/
+Model/twin_test_*.log
+# results derived from the Larsch screen data: keep out of git until J. Larsch agrees on where they may go
+Model/Final_report_extra_data.ipynb
+Model/repfit_*.log
+Model/rep43_*/
+Model/report_ckpts/M43*/
+Model/eval_43*.log
+Model/repfit_ext_*.log
+Model/repfit_run_*.log
+Model/rep50_*/
+Model/report_ckpts/M50*/
+Model/replik_*.log
+Model/eval_50*.log
+Model/twin_test_sim*.log
+
+# screen-trained models (unpublished Larsch screen data)
+Model/screen_trained*/

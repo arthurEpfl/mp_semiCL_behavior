@@ -321,8 +321,12 @@ def sample_angle(ang, dth_scale, tau, generator=None, reparam=True):
     return torch.clamp((oh * v).sum(1), -180.0, 180.0)
 
 
-def sample_lognorm_mix(par, hi, tau, generator=None, reparam=True, innov=1.0):
+def sample_lognorm_mix(par, hi, tau, generator=None, reparam=True, innov=1.0, trunc=None):
     """One reparameterised draw from a log-normal mixture (the distance / interval heads).
+
+    ``trunc`` (seconds / px, None = off): the mixture TRUNCATED at that bound (MX._dt_logpdf) --
+    component weights conditioned on the bound, then an inverse-CDF draw of the truncated normal
+    in log space, so no draw ever exceeds it and nothing is clipped.
 
     ``innov`` is ``kin_innov``'s compensation factor: the draw is widened about THIS bout's
     conditional mean IN LOG SPACE, ``ld -> m + c (ld - m)`` with ``m = sum_j w_j mu_j``, exactly as
@@ -338,10 +342,18 @@ def sample_lognorm_mix(par, hi, tau, generator=None, reparam=True, innov=1.0):
     and c the spread, and the two are only correct together.
     """
     logw, mu, sig = par
+    if trunc is not None:
+        # truncated: weights x Phi_k(bound), then eps = Phi^-1(u * Phi_k) per component
+        log_F = torch.special.log_ndtr((float(np.log(trunc)) - mu) / sig)
+        logw = logw + log_F
+        u = torch.rand(mu.shape, device=mu.device, generator=generator).clamp_(1e-9, 1 - 1e-9)
+        eps = torch.special.ndtri((u * torch.exp(log_F)).clamp(1e-12, 1 - 1e-12))
+        hi = float(trunc)              # the bound is the cap; no clip below it
+    else:
+        eps = torch.randn(mu.shape, device=mu.device, generator=generator)
     oh = (_gumbel_hard(logw, tau, generator) if reparam else
           torch.nn.functional.one_hot(torch.distributions.Categorical(logits=logw).sample(),
                                       num_classes=logw.shape[1]).to(logw.dtype))
-    eps = torch.randn(mu.shape, device=mu.device, generator=generator)
     ld = (oh * (mu + sig * eps)).sum(1)
     if innov != 1.0:
         m = (torch.softmax(logw, dim=1) * mu).sum(1)
@@ -409,8 +421,10 @@ def _rollout_impl(net, static, st, cfg_feat, T, *, tau=1.0, reparam=True, genera
     mode = cfg_feat.get("border_mode", "raw")
     use_border = bool(cfg_feat.get("use_border"))
     stim_mode = cfg_feat["stim_mode"]
+    if stim_mode.endswith(M.RZLO_SUFFIX):           # shoal_channels_t clips rz at -1; use the numpy / batch engines
+        raise NotImplementedError(f"stim_mode {stim_mode!r}: the lower-clip variants are not in the torch engine")
     use_n = stim_mode != "shoalr"
-    b_lc = torch.tensor(MB._BORDER_LC, dtype=torch.float32, device=dev)
+    b_lc =torch.tensor(MB._BORDER_LC, dtype=torch.float32, device=dev)
     s_lc = torch.tensor(M._SHOALF_LC if stim_mode == "shoalf" else M._SHOAL_LC,
                         dtype=torch.float32, device=dev)
     kfb = cfg_feat.get("kin_feedback", 1.0)

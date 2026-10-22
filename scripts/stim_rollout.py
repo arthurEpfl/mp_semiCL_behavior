@@ -33,9 +33,12 @@ _ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_ROI = _ROOT / "data" / "data" / "Original_data" / "ROIdef2025-02-20T12_09_16.csv"
 _DEFAULT_TRANSFORMED = _ROOT / "data" / "data" / "df_transformed"
 
-# Generous per-bout budget: real median dt is ~1.3 s, so 0.5 s/bout over-allocates ~2.6x. Only
-# the array allocation scales with it (~0.4 ms/bout is paid per bout ACTUALLY generated).
-_SEC_PER_BOUT_BUDGET = 0.5
+# Generous per-bout budget: real median dt is ~1.3 s, so 0.2 s/bout over-allocates ~6x. Only
+# the array allocation scales with it (~0.4 ms/bout is paid per bout ACTUALLY generated). It was
+# 0.5 until a latent + slow-state model drew one simulated fish fast enough to exhaust 21,100 bouts
+# 300 s before the programme end (Model 11's profile run): such a fish is a tail of the model and
+# must be scored, not crash the run.
+_SEC_PER_BOUT_BUDGET = 0.2
 
 
 # --------------------------------------------------------------------------- #
@@ -88,6 +91,28 @@ class ProgramStimProvider:
         cx, cy = p.centroid(f, self.anchor)
         return cx, cy, float(p.moving_of[b]), float(p.n_dots_of[b])
 
+    def dots(self, t, time_s, x, y, h):
+        """PER-DOT form (stim_mode='shoal_pop'): ``(xs, ys, on, moving_k, n_dots)`` of the ACTIVE
+        dots at this bout, anchored exactly as ``__call__`` (same latch, same block)."""
+        p = self.p
+        f = p.frame_of(time_s)
+        self.last_time_s = f / p.fps          # when these dots were read (the dot-drift channels need it)
+        if f < 0 or f >= p.n_frames:
+            return _no_dots()
+        b = int(p.block_id[f])
+        if b != self.cur_block:
+            self.cur_block = b
+            self.anchor = (float(x), float(y), float(h))
+            self.anchors[b] = self.anchor
+        if not p.is_stim_of[b]:
+            return _no_dots()
+        X, Y = p.dots_absolute(f, self.anchor)
+        return X, Y, np.ones(len(X), bool), np.full(len(X), float(p.moving_of[b])), float(p.n_dots_of[b])
+
+
+def _no_dots():
+    return np.empty(0), np.empty(0), np.empty(0, bool), np.empty(0), 0.0
+
 
 class PhysicalStimProvider:
     """Drive a rollout from a FIXED physical programme (``stim_program.PhysicalProgram``).
@@ -118,6 +143,18 @@ class PhysicalStimProvider:
             return np.nan, np.nan, 0.0, 0.0
         return p.cx[f], p.cy[f], float(p.moving_of[b]), float(p.n_dots_of[b])
 
+    def dots(self, t, time_s, x, y, h):
+        p = self.p
+        f = p.frame_of(time_s)
+        self.last_time_s = f / p.fps          # when these dots were read (the dot-drift channels need it)
+        if f < 0 or f >= p.n_frames:
+            return _no_dots()
+        b = int(p.block_id[f])
+        if not p.is_stim_of[b] or not np.isfinite(p.cx[f]):
+            return _no_dots()
+        X, Y = p.dots_absolute(f)
+        return X, Y, np.ones(len(X), bool), np.full(len(X), float(p.moving_of[b])), float(p.n_dots_of[b])
+
 
 class RecordAnchoredProvider:
     """Re-anchor a REAL record's own stimulus programme to the simulated fish, indexed by BOUT.
@@ -137,8 +174,12 @@ class RecordAnchoredProvider:
 
     Heading: the rig anchors to the BODY axis; a rollout has none, so the travel heading the
     generator carries is used (as ProgramStimProvider does). Onset DISTANCE is exact under any
-    heading (a rotation preserves it); the dots' side relative to the travel direction is the
-    approximation, since body axis and travel heading sit a median ~40 deg apart.
+    heading (a rotation preserves it); the dots' SIDE is the approximation, and it is small.
+    The generator's heading at a block onset is the direction of the bout JUST MADE, and the
+    tracked body axis at rest sits a median 6.9 deg from that (p75 13.5, 3.0% > 90 deg, which are
+    tracker head/tail flips), measured on 69,572 real bouts. The often-quoted "40 deg" is a
+    different pair -- body axis at a bout's onset vs the direction of THAT bout, which contains
+    the bout's own turn (median 40.4 deg) -- and does not apply to anchoring.
     """
 
     def __init__(self, program, rec):
@@ -147,6 +188,12 @@ class RecordAnchoredProvider:
         self.cur_block = -1
         self.anchor = (np.nan, np.nan, np.nan)
         self.anchors = {}          # block id -> (ax, ay, aori) actually used
+
+    def clock_s(self, t, time_s):
+        """The wall-clock this provider reads bout ``t``'s stimulus at -- the record's own frame
+        -- so the generator's block clock stays on the same grid as the stimulus it is shown.
+        Past the record, fall back to the generated clock."""
+        return float(self.fo[t]) / self.p.fps if t < len(self.fo) else float(time_s)
 
     def __call__(self, t, time_s, x, y, h):
         p = self.p
@@ -164,6 +211,25 @@ class RecordAnchoredProvider:
             return np.nan, np.nan, 0.0, 0.0
         cx, cy = p.centroid(f, self.anchor)
         return cx, cy, float(p.moving_of[b]), float(p.n_dots_of[b])
+
+    def dots(self, t, time_s, x, y, h):
+        """PER-DOT form (stim_mode='shoal_pop'), record-indexed and anchored exactly as ``__call__``."""
+        p = self.p
+        if t >= len(self.fo):
+            return _no_dots()
+        f = int(self.fo[t])
+        self.last_time_s = f / p.fps          # when these dots were read (the dot-drift channels need it)
+        if f < 0 or f >= p.n_frames:
+            return _no_dots()
+        b = int(p.block_id[f])
+        if b != self.cur_block:
+            self.cur_block = b
+            self.anchor = (float(x), float(y), float(h))
+            self.anchors[b] = self.anchor
+        if not p.is_stim_of[b]:
+            return _no_dots()
+        X, Y = p.dots_absolute(f, self.anchor)
+        return X, Y, np.ones(len(X), bool), np.full(len(X), float(p.moving_of[b])), float(p.n_dots_of[b])
 
 
 # --------------------------------------------------------------------------- #
@@ -207,6 +273,8 @@ class SyntheticRecord:
     dot_cy: np.ndarray = field(default=None)
     dot_prox: np.ndarray = field(default=None)
     n_dots: np.ndarray = field(default=None)
+    dot_xs: np.ndarray = field(default=None)      # per-dot positions (n, 8); NaN = inactive (shoal_pop)
+    dot_ys: np.ndarray = field(default=None)
     dish_cx: float = 180.0
     dish_cy: float = 174.0
     dish_R: float = 183.5
@@ -233,6 +301,7 @@ def make_synthetic_record(n, start_pose, dish, fish_id=0):
         frame_onset=np.arange(n, dtype=int),
         dot_dist_px=np.full(n, 100.0), dot_cx=np.full(n, np.nan), dot_cy=np.full(n, np.nan),
         dot_prox=np.full(n, 0.15), n_dots=z.copy(),
+        dot_xs=np.full((n, 8), np.nan), dot_ys=np.full((n, 8), np.nan),
         dish_cx=cx, dish_cy=cy, dish_R=R)
     return rec
 
@@ -269,7 +338,8 @@ def sample_start_pose(records, rng, dish):
 # --------------------------------------------------------------------------- #
 # The rollout
 # --------------------------------------------------------------------------- #
-def rollout_program(model, program, rng, start_pose, dish, fish_id=0, n_max=None, provider=None):
+def rollout_program(model, program, rng, start_pose, dish, fish_id=0, n_max=None, provider=None,
+                    on_budget="raise", block_seed=None):
     """Free-run ``model`` over ``program``. Returns the sample dict plus:
 
       ``t_onset_s``   per-bout onset time (s)
@@ -290,13 +360,19 @@ def rollout_program(model, program, rng, start_pose, dish, fish_id=0, n_max=None
     rec = make_synthetic_record(n_max, start_pose, dish, fish_id=fish_id)
     prov = provider if provider is not None else ProgramStimProvider(program)
 
-    g = model.sample(rec, rng, stim_provider=prov, stop_time_s=T)
+    # block_seed (report Model 11): per-block random streams in the generator (default None = one stream, unchanged)
+    g = model.sample(rec, rng, stim_provider=prov, stop_time_s=T,
+                     **({} if block_seed is None else {"block_seed": tuple(block_seed)}))
 
     n_gen = len(g["dtheta"])
-    if n_gen >= n_max:
+    g["runaway"] = bool(n_gen >= n_max)
+    if g["runaway"] and on_budget != "truncate":
         raise RuntimeError(
             f"bout budget exhausted ({n_gen} bouts) before the programme end "
             f"({g['end_time_s']:.1f}s of {T:.1f}s) -- pass a larger n_max.")
+    # on_budget='truncate': a RUNAWAY fish (intervals collapsing -- Model 16's w3fta fold 2 emitted
+    # 52,600 bouts in 6,180 s) is returned as far as it got, flagged, so a caller scoring many
+    # rollouts can drop and COUNT it instead of losing the whole run.
     # end_time_s is the clock AFTER the last bout, i.e. where bout n+1 would have started -- past
     # the programme by construction. The realised extent of the trajectory is its LAST ONSET, which
     # sits below T by up to one inter-bout interval.
@@ -311,7 +387,7 @@ def rollout_program(model, program, rng, start_pose, dish, fish_id=0, n_max=None
 
 
 def rollout_many(model, program, n_rollouts, seed=0, records=None, dish=None,
-                 start_poses=None, pose_sampler=None, verbose=True):
+                 start_poses=None, pose_sampler=None, verbose=True, on_budget="raise", block_seed=False):
     """``n_rollouts`` independent synthetic fish on the same programme.
 
     Rollout k is seeded ``default_rng([seed, k])`` and is therefore synthetic individual k,
@@ -335,7 +411,8 @@ def rollout_many(model, program, n_rollouts, seed=0, records=None, dish=None,
         else:
             pose = (dish[0], dish[1], float(rng.uniform(-np.pi, np.pi)))
         t0 = time.time()
-        g = rollout_program(model, program, rng, pose, dish, fish_id=k)
+        g = rollout_program(model, program, rng, pose, dish, fish_id=k, on_budget=on_budget,
+                            block_seed=((int(seed), k) if block_seed else None))
         g["seed"] = [int(seed), k]
         g["wall_s"] = time.time() - t0
         out.append(g)

@@ -60,7 +60,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 # One source of truth for every knob, shared by the CLI and the notebook entry point, so the
 # two can never drift into different defaults.
 DEFAULTS = dict(
-    ckpt_dir=str(OUT), R=20, jobs=max(1, (os.cpu_count() or 4) - 1),
+    ckpt_dir=str(OUT), R=20, jobs=min(15, max(1, (os.cpu_count() or 4) - 1)),
     out="panelB_model1.csv", c2st_out="c2st_model1.csv",
     c2st_reps=8, c2st_seed=0,
     importances=False, imp_repeats=3, imp_arms="",
@@ -70,12 +70,141 @@ DEFAULTS = dict(
     # `tag` then suffixes every arm name and both output CSVs, so an overridden run can never
     # be mistaken for -- or overwrite -- the plain one.
     cfg_override=None, tag="",
+    # DISTANCE-TO-STIM PROFILE: the Ablation_study plot in numbers, per arm -- programme rollouts
+    # (own clock, dots re-anchored at every block onset), `profile_r` simulated fish per fold model.
+    # Off with profile=False; skipped anyway when the panel is (skip_panel).
+    profile=True, profile_r=3,
 )
 
 # Window features the INDIVIDUALITY metrics are reported on: one per behavioural channel, the
 # window MEAN, so bf_sd reads directly as "how different are the fish" in that channel's units.
 BF_CHANNELS = (("absdth_mean", "turn"), ("dist_mean", "dist"), ("dt_mean", "dt"),
                ("rad_mean", "rad"))
+
+
+def merge_ckpt_dirs(dst, *srcs, arms=None):
+    """Merge ladder checkpoint folders trained in SEPARATE Colab sessions (``--arms`` splits) into
+    one folder ``dst`` that ``run()`` / ``model_figures`` read as a single ladder: copies every .pt
+    and curve PNG, concatenates ``manifest_model1.json`` and ``likA_model1.csv``. ``arms`` keeps
+    only those arm names (e.g. to pull one control arm out of another ladder).
+
+        merge_ckpt_dirs("slow2_ladder_checkpoints",
+                        "slow2_ladder_checkpoints_S3_adt_z2_drift_g3",
+                        "slow2_ladder_checkpoints_S3_adt_z2_drift2_g3_S4_adt_z2_drift2_g3")
+    """
+    import shutil
+    dst = Path(dst)
+    dst.mkdir(parents=True, exist_ok=True)
+    keep = set(arms) if arms else None
+    mani, lik = [], []
+    for s in srcs:
+        s = Path(s)
+        ents = [e for e in json.loads((s / "manifest_model1.json").read_text())
+                if keep is None or e["arm"] in keep]
+        mani += ents
+        lk = pd.read_csv(s / "likA_model1.csv")
+        lik.append(lk if keep is None else lk[lk.arm.isin(keep)])
+        for e in ents:
+            shutil.copy2(s / e["file"], dst / e["file"])
+            cv = s / f"curve_{e['arm']}.png"
+            if cv.exists():
+                shutil.copy2(cv, dst / cv.name)
+    old = (json.loads((dst / "manifest_model1.json").read_text())
+           if (dst / "manifest_model1.json").exists() else [])
+    seen = {}
+    for e in old + mani:                 # last one wins if an arm was trained twice
+        seen[e["file"]] = e
+    (dst / "manifest_model1.json").write_text(json.dumps(list(seen.values()), indent=1))
+    if (dst / "likA_model1.csv").exists():
+        lik.insert(0, pd.read_csv(dst / "likA_model1.csv"))
+    pd.concat(lik, ignore_index=True).drop_duplicates().to_csv(dst / "likA_model1.csv", index=False)
+    print(f"{dst}: {len(seen)} checkpoints, arms {sorted({e['arm'] for e in seen.values()})}")
+    return dst
+
+
+def _recal_one(args_):
+    """Re-run the rollout drift-gain search on ONE saved checkpoint (same trained weights) and
+    save it under ``dst`` with the Colab-side blob keys preserved."""
+    src, dst, reps = args_
+    import torch
+    torch.set_num_threads(1)
+    import evaluate as E
+    import fit_MLP_border as MB
+    import fit_MLP_mix as MX
+    import fit_MLP_fishre as FR
+    recs = _RECS if (_RECS := globals().get("_RECS")) else None
+    if recs is None:
+        recs = MB.build_border_records(E.load_bouts())
+        globals()["_RECS"] = recs
+    blob = torch.load(src, map_location="cpu", weights_only=False)
+    m = MX.load_mix(str(src))
+    if not getattr(m, "drift", None):
+        raise ValueError(f"{Path(src).name}: no drift in this checkpoint")
+    train = [recs[int(f)] for f in blob["train_fish"]]
+    old = (m._cfg_feat["drift"].get("g_dist"), m._cfg_feat["drift"].get("g_dt"),
+           (m._cfg_feat.get("dt_latent") or {}).get("g_lam"))
+    import io as _io
+    from contextlib import redirect_stdout
+    buf = _io.StringIO()
+    with redirect_stdout(buf):
+        gd, gt, rep = MX._search_drift_gain(
+            m._model, train, m._cfg_feat, seed=int(blob.get("train_seed", 0)), reps=int(reps),
+            closed_loop=m.closed_loop, guardrail=m.guardrail, eps=m.eps, stim_loop=m.stim_loop)
+        FR.apply_drift_gains(m, gd, gt, rep)
+    MX.save_mix(m, str(dst))
+    nb = torch.load(dst, map_location="cpu", weights_only=False)
+    for k in ("heldout_fish", "train_fish", "train_seed", "rollout_seed", "phi_ref", "psi_ref",
+              "cfg_feat_extra", "insample_only"):
+        if k in blob:
+            nb[k] = blob[k]
+    torch.save(nb, dst)
+    return dict(file=Path(src).name, old=old, new=(gd, gt), pick=rep.get("pick"),
+                got=rep["got"], target=rep["target"], log=buf.getvalue())
+
+
+def recalibrate_drift(dst, *srcs, arms=None, reps=4, jobs=None, progress=True):
+    """Redo the ROLLOUT calibration of drift checkpoints -- same trained weights, the drift /
+    interval-chain gains re-searched with the monotone-smoothed, interpolating search
+    (MX._pick_gain) at ``reps`` replicates -- into a new folder ``dst`` that ``run()`` reads as a
+    ladder. Nothing else in the checkpoint changes (Metric A is untouched: the scorer ignores the
+    rollout gains). Use it to put arms from different runs on ONE calibration before comparing.
+
+        recalibrate_drift("slow2rc_ladder_checkpoints",
+                          ("slow_ladder_checkpoints", ["S3_adt_z2_drift"]),
+                          "slow2_ladder_checkpoints", reps=4)
+
+    A source is a folder, or ``(folder, [arms])`` to take only those arms from it.
+    """
+    dst = Path(dst)
+    for s in srcs:
+        if isinstance(s, (tuple, list)):
+            merge_ckpt_dirs(dst, s[0], arms=list(s[1]))
+        else:
+            merge_ckpt_dirs(dst, s, arms=arms)
+    mani = json.loads((dst / "manifest_model1.json").read_text())
+    files = [dst / e["file"] for e in mani if not e.get("insample_only")]
+    jobs_ = int(jobs or DEFAULTS["jobs"])
+    args = argparse.Namespace(jobs=min(jobs_, len(files)), progress=progress)
+    tmp = [f.with_suffix(".rc.pt") for f in files]
+    print(f"recalibrating {len(files)} checkpoints at reps={reps}, jobs={args.jobs}")
+    out = _pool(_recal_one, [(f, t, reps) for f, t in zip(files, tmp)], args,
+                lambda j: f"recalibrate · {j[0].stem}")
+    for f, t in zip(files, tmp):
+        t.replace(f)
+    rows = []
+    for r in out:
+        pk = r["pick"] or {}
+        rows.append(dict(file=r["file"], g_dist_old=r["old"][0], g_dist=round(r["new"][0], 3),
+                         pick_dist=pk.get("dist"), gdt_old=(r["old"][2] if r["old"][2] is not None else r["old"][1]),
+                         g_dt=round(r["new"][1], 3), pick_dt=pk.get("dt"),
+                         dist=f"{r['got']['dist']:+.3f}/{r['target']['dist']:+.3f}",
+                         dt=f"{r['got']['dt']:+.3f}/{r['target']['dt']:+.3f}"))
+    tab = pd.DataFrame(rows).set_index("file")
+    print("\nrecalibrated drift gains (old -> new; dt column = the interval chain's gain on two-state "
+          "arms); window-acf1 got/real:")
+    print(tab.to_string())
+    tab.to_csv(dst / "recalibration.csv")
+    return tab
 
 
 def _bar(done, total, t0, label=""):
@@ -126,6 +255,46 @@ def _one(args_):
     wins = (GM.c2st_windows_for_fish(m, recs[fid], fid, seed=seed, reps=creps)
             if creps else None)
     return row, wins
+
+
+def _profile_one(args_):
+    """(ckpt, fold index k, rollouts per model, cfg_override) -> raw bout table of k's programme
+    rollouts (model_figures.programme_bouts); the parent assembles the arm and scores it."""
+    ckpt, k, r, cfg_override = args_
+    import torch
+    torch.set_num_threads(1)
+    import fit_MLP_mix as MX
+    import model_figures as MF
+    m = MX.load_mix(str(ckpt))
+    if cfg_override:
+        m._cfg_feat = {**m._cfg_feat, **cfg_override}
+    b = MF.programme_bouts(m, k, r)
+    return b, int(b.attrs.get("runaway", 0))      # (bouts, dropped runaway rollouts)
+
+
+def _pool(fn, jobs, args, label_of):
+    """Run fn over jobs (process pool when jobs > 1), results in job order, one progress bar."""
+    t0 = time.time()
+    out = [None] * len(jobs)
+    if args.jobs > 1:
+        # submit + as_completed rather than ex.map, ONLY so the bar can tick as each job lands
+        # (map yields in submission order, so a slow first job hides all the finished ones).
+        # The index carried in `futs` puts the results back in job order, which the C2ST
+        # assembly relies on to pair each row with its windows.
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+        with ProcessPoolExecutor(max_workers=args.jobs) as ex:
+            futs = {ex.submit(fn, j): i for i, j in enumerate(jobs)}
+            for k, fut in enumerate(as_completed(futs), 1):
+                i = futs[fut]
+                out[i] = fut.result()
+                if args.progress:
+                    _bar(k, len(jobs), t0, label_of(jobs[i]))
+    else:
+        for i, j in enumerate(jobs):
+            out[i] = fn(j)
+            if args.progress:
+                _bar(i + 1, len(jobs), t0, label_of(j))
+    return out
 
 
 def run(**kw):
@@ -188,6 +357,10 @@ def main():
                     help="suffix for arm names and output CSVs, e.g. rej -> S3_dta_rej")
     ap.add_argument("--no-progress", dest="progress", action="store_false",
                     help="suppress the progress bar (it rewrites one line with \\r)")
+    ap.add_argument("--no-profile", dest="profile", action="store_false",
+                    help="skip the distance-to-stim profile section (programme rollouts per arm)")
+    ap.add_argument("--profile-r", type=int, default=DEFAULTS["profile_r"],
+                    help="programme rollouts per fold model for the profile (default 3 -> 15 fish)")
     ap.add_argument("--smoke", action="store_true")
     _run(ap.parse_args())
 
@@ -263,25 +436,7 @@ def _run(args):
                           "REPLAYED from the real fish -- block-onset placement artefact PRESENT"))
 
     t0 = time.time()
-    out = [None] * len(jobs)
-    if args.jobs > 1:
-        # submit + as_completed rather than ex.map, ONLY so the bar can tick as each job lands
-        # (map yields in submission order, so a slow first job hides all the finished ones).
-        # The index carried in `futs` puts the results back in job order, which the C2ST
-        # assembly relies on to pair each row with its windows.
-        from concurrent.futures import ProcessPoolExecutor, as_completed
-        with ProcessPoolExecutor(max_workers=args.jobs) as ex:
-            futs = {ex.submit(_one, j): i for i, j in enumerate(jobs)}
-            for k, fut in enumerate(as_completed(futs), 1):
-                i = futs[fut]
-                out[i] = fut.result()
-                if args.progress:
-                    _bar(k, len(jobs), t0, f"rollouts · {jobs[i][0].stem} fish {jobs[i][1]}")
-    else:
-        for i, j in enumerate(jobs):
-            out[i] = _one(j)
-            if args.progress:
-                _bar(i + 1, len(jobs), t0, f"rollouts · {j[0].stem} fish {j[1]}")
+    out = _pool(_one, jobs, args, lambda j: f"rollouts · {j[0].stem} fish {j[1]}")
     rows = [r for r, _ in out]
     p = pd.DataFrame(rows)
     # `arm` is the whole checkpoint stem minus the fold, e.g. "S1_adt". Split it so the ordering
@@ -312,9 +467,70 @@ def _run(args):
                 # generates no better -- likelihood and rollout panel are different objectives.
                 print("\nordering, averaged over representations:")
                 print(p.groupby("order")[lb].mean().round(4).sort_values(lb[0]).to_string())
+        if args.profile:
+            p.attrs["profile"] = profile(sorted({j[0] for j in jobs}), ov, tag, d, args)
 
     c = c2st(p, [w for _, w in out], d, args) if args.c2st_reps else None
     return p, c
+
+
+def profile(ckpts, ov, tag, d, args):
+    """DISTANCE-TO-STIM PROFILE, one row per arm: the Ablation_study distance-to-dots plot in
+    numbers (model_figures.profile_metrics) on programme rollouts of the arm's fold models --
+    the rig's rule, own clock -- against the 15 real fish. Written next to the panel as
+    profile_model1[_tag].csv (per-condition rows); returns the per-arm summary table.
+
+    Why it is not derived from the panel's rollouts: those follow each real fish's record and
+    are averaged per fish over the whole block and every dot condition, which is exactly what
+    hides the transient (dip amplitude / latency), the static drift-away rate and the dot-count
+    grading this section reports."""
+    import model_figures as MF
+    by_arm = {}
+    for ck in ckpts:
+        by_arm.setdefault(re.sub(r"_fold\d+$", "", ck.stem), []).append(ck)
+    jobs = [(ck, k, args.profile_r, ov) for cks in by_arm.values() for k, ck in enumerate(cks)]
+    n_fish = args.profile_r * max(len(v) for v in by_arm.values())
+    print(f"\ndistance-to-stim profile: {len(jobs)} fold models x {args.profile_r} programme rollouts "
+          f"({n_fish} simulated fish per arm)")
+    t0 = time.time()
+    parts = _pool(_profile_one, jobs, args, lambda j: f"profile · {j[0].stem}")
+    real = MF.real_dot_profile()
+    rows, full = [], []
+    for arm, cks in by_arm.items():
+        name = arm + (f"_{tag}" if tag else "")
+        sel = [b for (b, _), j in zip(parts, jobs) if j[0] in cks]
+        n_run = sum(nr for (_, nr), j in zip(parts, jobs) if j[0] in cks)
+        gen = MF.finish_profile(pd.concat(sel, ignore_index=True), len(cks), args.profile_r,
+                                progress=False)
+        m = MF.profile_metrics(real, gen)
+        full.append(m.drop(columns=["_pr", "_pg"]).reset_index().assign(arm=name))
+        rows.append({"arm": name, **MF.profile_summary(m), "runaway": int(n_run)})
+    s = pd.DataFrame(rows).set_index("arm")[MF.PROFILE_SUMMARY + ["runaway"]]
+    if s.runaway.any():
+        print("  RUNAWAY programme rollouts (intervals collapsing; dropped from the profile, a model "
+              "defect of that fold): " + ", ".join(f"{a} {int(v)}" for a, v in s.runaway.items() if v))
+    out = Path(args.out).with_name(Path(args.out).name.replace("panelB", "profile"))
+    pd.concat(full, ignore_index=True).to_csv(d / out, index=False)
+    print(f"wrote {out}  ({len(s)} arms) in {time.time()-t0:.0f}s")
+
+    r = s.iloc[0]
+    print("\nDISTANCE-TO-STIM PROFILE, per arm (mm; the Ablation_study plot in numbers, programme rollouts):"
+          "\n  moving 2-8 dots: err = mean |gen - real| over 0-60 s, also in real-SEM units "
+          "(noise floor: 8 real fish vs 15 = 1.3 mm / 0.8 SEM);"
+          f"\n  dip = approach amplitude within 20 s (real {r.dip_real:.1f} mm at {r.lat_real:.0f} s); "
+          f"plateau = 20-60 s level (real {r.plateau_real:.1f}); 1-dot plateau (real {r.d1_plateau_real:.1f});"
+          f"\n  grading = plateau(1 dot) - plateau(8 dots) (real {r.grading_real:+.1f}); "
+          f"static: err and drift-away 0-20 s in mm/s (real {r.drift_real:.2f})")
+    show = ["mv_err_mm", "mv_err_sem", "dip_gen", "lat_gen", "plateau_gen", "d1_plateau_gen",
+            "grading_gen", "st_err_mm", "st_err_sem", "drift_gen"]
+    print(s[show].rename(columns=lambda c: c.replace("_gen", "")).round(2)
+           .sort_values("mv_err_sem").to_string())
+    order = s.index.to_series().str.extract(r"^.+?_(?P<order>[adt]{3})(?:_.+)?$")["order"]
+    if order.notna().sum() > 1 and order.nunique() > 1:
+        print("\nordering, averaged over representations:")
+        print(s[show].groupby(order.values).mean().rename(columns=lambda c: c.replace("_gen", ""))
+               .round(2).sort_values("mv_err_sem").to_string())
+    return s
 
 
 def c2st(p, wins, d, args):
@@ -335,8 +551,7 @@ def c2st(p, wins, d, args):
     for (_, row), w in zip(p.iterrows(), wins):
         if w is None:
             continue
-        a = by_arm.setdefault(row["arm"], {k: [{} for _ in range(args.c2st_reps)]
-                                           for k in ("turn", "traj", "traj_eq")})
+        a = by_arm.setdefault(row["arm"], {k: [{} for _ in range(args.c2st_reps)] for k in w})
         for kind, pairs in w.items():
             for rep, pair in enumerate(pairs):
                 a[kind][rep][int(row["fish"])] = pair
@@ -346,43 +561,62 @@ def c2st(p, wins, d, args):
         if args.progress:
             _bar(ai - 1, len(by_arm), t0, f"c2st · {arm}")
         r = dict(arm=arm)
-        for kind, name in (("turn", "c2st"), ("traj", "c2st_traj"), ("traj_eq", "c2st_traj_eq")):
+        # `traj_int` = the STEADY-STATE twin of `traj` (GM.INTERIOR: real windows well inside a
+        # run against generated windows after the warm-up), from the same rollouts; its columns
+        # carry the `_int` suffix throughout.
+        for kind, name in (("turn", "c2st"), ("traj", "c2st_traj"), ("traj_eq", "c2st_traj_eq"),
+                           ("traj_int", "c2st_traj_int")):
+            if kind not in kinds:
+                continue
             mean, sd, per = GM.c2st_auc_replicates(kinds[kind], seed=args.c2st_seed)
             r[name], r[name + "_sd"] = mean, sd
             # SE of the MEAN over replicates -- what an arm-to-arm difference must clear.
             r[name + "_se"] = sd / np.sqrt(len(per)) if len(per) > 1 else np.nan
-        # The protocol floor, on this arm's real windows. Identical across arms by construction
-        # (the real side does not depend on the model), so it is a check, not a comparison.
-        r["c2st_neg"] = GM.c2st_negative_control(kinds["traj"], seed=args.c2st_seed)
-        # DISPERSION, next to the AUC and never without it. A model can lower its AUC by
-        # generating LESS variety -- the kin ladder's winning rung once bought -0.0407 by
-        # halving the distance dispersion, and nothing reported at the time could see it.
-        # 1.0 = matched, <1 = too typical, >1 = too wild. Free: same windows, no rollouts.
-        disp = GM.dispersion_report(kinds["traj"])
-        for g, v in (disp.get("var_ratio") or {}).items():
-            r[f"var_{g.replace('-', '_')}"] = float(v)
-        # INDIVIDUALITY, in the feature's own units (GM.between_fish_metrics). The Metric B panel
-        # is computed per fish and then averaged, so it is BLIND to whether the 15 generated fish
-        # differ from each other at all: a model that makes every fish the same fish can score
-        # well on every panel row. These cannot be fooled that way:
-        #   bf_sd  SD across fish of the per-fish window mean  ("how different are the fish")
-        #   wf_sd  mean within-fish SD across windows           ("how variable is one fish")
-        #   bf_w1  W1 between real and gen sets of per-fish means (shape -- e.g. an outlier fish)
-        # Gen side averaged over replicates: a per-fish latent redraws z every replicate, so a
-        # single replicate is noisy. The real side is replicate-invariant.
-        _dim = next(iter(kinds["traj"][0].values()))[0].shape[1]
-        _nm = GM.traj_names_for_dim(_dim)
-        bfs = [b for b in (GM.between_fish_metrics(wr, _nm) for wr in kinds["traj"]) if b]
-        if bfs:
-            for col, ch in BF_CHANNELS:
-                if col not in _nm:
-                    continue
-                j = _nm.index(col)
-                r[f"bf_sd_real_{ch}"] = float(bfs[0]["bf_sd"]["real"][j])
-                r[f"bf_sd_gen_{ch}"] = float(np.mean([b["bf_sd"]["gen"][j] for b in bfs]))
-                r[f"wf_sd_real_{ch}"] = float(bfs[0]["wf_sd"]["real"][j])
-                r[f"wf_sd_gen_{ch}"] = float(np.mean([b["wf_sd"]["gen"][j] for b in bfs]))
-                r[f"bf_w1_{ch}"] = float(np.mean([b["bf_w1"][j] for b in bfs]))
+        for kind, sfx in (("traj", ""), ("traj_int", "_int")):
+            if kind not in kinds:
+                continue
+            # The protocol floor, on this arm's real windows. Identical across arms by
+            # construction (the real side does not depend on the model), so it is a check, not a
+            # comparison.
+            r["c2st_neg" + sfx] = GM.c2st_negative_control(kinds[kind], seed=args.c2st_seed)
+            # DISPERSION, next to the AUC and never without it. A model can lower its AUC by
+            # generating LESS variety -- the kin ladder's winning rung once bought -0.0407 by
+            # halving the distance dispersion, and nothing reported at the time could see it.
+            # 1.0 = matched, <1 = too typical, >1 = too wild. Free: same windows, no rollouts.
+            disp = GM.dispersion_report(kinds[kind])
+            for g, v in (disp.get("var_ratio") or {}).items():
+                r[f"var_{g.replace('-', '_')}{sfx}"] = float(v)
+            # INDIVIDUALITY, in the feature's own units (GM.between_fish_metrics). The Metric B
+            # panel is computed per fish and then averaged, so it is BLIND to whether the 15
+            # generated fish differ from each other at all: a model that makes every fish the
+            # same fish can score well on every panel row. These cannot be fooled that way:
+            #   bf_sd  SD across fish of the per-fish window mean  ("how different are the fish")
+            #   wf_sd  mean within-fish SD across windows           ("how variable is one fish")
+            #   bf_w1  W1 between real and gen sets of per-fish means (shape -- e.g. an outlier)
+            # Gen side averaged over replicates: a per-fish latent redraws z every replicate, so
+            # a single replicate is noisy. The real side is replicate-invariant.
+            _dim = next(iter(kinds[kind][0].values()))[0].shape[1]
+            _nm = GM.traj_names_for_dim(_dim)
+            bfs = [b for b in (GM.between_fish_metrics(wr, _nm) for wr in kinds[kind]) if b]
+            if bfs:
+                for col, ch in BF_CHANNELS:
+                    if col not in _nm:
+                        continue
+                    j = _nm.index(col)
+                    r[f"bf_sd_real_{ch}{sfx}"] = float(bfs[0]["bf_sd"]["real"][j])
+                    r[f"bf_sd_gen_{ch}{sfx}"] = float(np.mean([b["bf_sd"]["gen"][j] for b in bfs]))
+                    r[f"wf_sd_real_{ch}{sfx}"] = float(bfs[0]["wf_sd"]["real"][j])
+                    r[f"wf_sd_gen_{ch}{sfx}"] = float(np.mean([b["wf_sd"]["gen"][j] for b in bfs]))
+                    r[f"bf_w1_{ch}{sfx}"] = float(np.mean([b["bf_w1"][j] for b in bfs]))
+            if sfx == "_int":
+                # how much of the real side survives the selection (replicate 0): windows in
+                # total and fish with at least one -- a pause-heavy fish can have none, and the
+                # classifier then simply has no windows of that fish on either side.
+                r["n_win_real_int"] = float(sum(len(a) for a, _ in kinds[kind][0].values()))
+                r["n_win_real"] = float(sum(len(a) for a, _ in kinds["traj"][0].values()))
+                r["n_win_gen_int"] = float(sum(len(g) for _, g in kinds[kind][0].values()))
+                r["n_win_gen"] = float(sum(len(g) for _, g in kinds["traj"][0].values()))
+                r["n_fish_int"] = float(sum(len(a) > 0 for a, _ in kinds[kind][0].values()))
         rows.append(r)
         if args.importances and (not imp_arms or arm in imp_arms):
             # WHICH channel gives the model away. Permutation importance = the drop in held-out
@@ -449,6 +683,31 @@ def c2st(p, wins, d, args):
         print("bf_w1 (real vs gen per-fish means, channel units, lower = better):")
         print(c.set_index("arm")[[f"bf_w1_{x}" for x in chs]].round(3)
               .sort_values(f"bf_w1_{chs[0]}").to_string())
+    if "c2st_traj_int" in c.columns:
+        # STEADY STATE: the same rollouts, real windows >= 120 bouts into a run and >= 60 before
+        # it ends against generated windows from t >= 120 (GM.INTERIOR). The difference between
+        # the two AUC columns is what the post-pause transient -- which a rollout never produces
+        # but a third of the real windows sit in -- costs the model on the standard reading.
+        ic = [x for x in ("c2st_traj", "c2st_traj_int", "c2st_traj_int_se", "c2st_neg_int",
+                          "var_dt_int", "var_distance_int", "var_turn_int") if x in c.columns]
+        print(f"\nSTEADY STATE (interior windows: real >= {GM.INTERIOR[0]} bouts into a run and "
+              f">= {GM.INTERIOR[1]} before it ends, generated from t >= {GM.INTERIOR[0]} and "
+              f"subsampled to the same gen:real ratio; real windows {c.n_win_real_int.iloc[0]:.0f} of "
+              f"{c.n_win_real.iloc[0]:.0f}, generated {c.n_win_gen_int.iloc[0]:.0f} of "
+              f"{c.n_win_gen.iloc[0]:.0f}, {c.n_fish_int.iloc[0]:.0f} of 15 fish have one):")
+        print(c.set_index("arm")[ic].round(4).sort_values("c2st_traj_int").to_string())
+        chs_i = [x for _, x in BF_CHANNELS if f"bf_sd_gen_{x}_int" in c.columns]
+        if chs_i:
+            t = pd.DataFrame({"arm": c.arm})
+            for x in chs_i:
+                t[f"bf_{x}"] = c[f"bf_sd_gen_{x}_int"] / c[f"bf_sd_real_{x}_int"]
+            for x in chs_i:
+                t[f"wf_{x}"] = c[f"wf_sd_gen_{x}_int"] / c[f"wf_sd_real_{x}_int"]
+            print("  individuality on the interior windows, gen/real (bf / wf as above):")
+            print(t.set_index("arm").round(3).sort_values(f"bf_{chs_i[0]}", ascending=False).to_string())
+            print("  real, in units:  " + "   ".join(
+                f"{x} bf_sd {c[f'bf_sd_real_{x}_int'].iloc[0]:.3g} wf_sd {c[f'wf_sd_real_{x}_int'].iloc[0]:.3g}"
+                for x in chs_i))
     if c.order.notna().any():
         print("\nordering, averaged over representations:")
         print(c.groupby("order")[["c2st", "c2st_traj", "c2st_traj_eq"]]

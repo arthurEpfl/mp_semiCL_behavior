@@ -700,19 +700,39 @@ def timing_report(panel_df, model=None):
 # =========================================================================== #
 #  Windowed features (for the C2ST / MMD omnibus)
 # =========================================================================== #
-def _window_starts(n, W, step, runs=None):
+def _window_starts(n, W, step, runs=None, lead=0, tail=0):
     """Window start indices. With ``runs``, only windows lying ENTIRELY inside one run.
 
     A window that straddles a >10 s quiescence gap mixes two stretches of behaviour minutes
     apart and reports them as one 60-bout sample. A rollout has no gaps, so leaving them in
     biases only the real side. Measured cost of the restriction at W = 60: 267 runs still
     yield 42,195 windows covering 83.3 % of active bouts, and all 15 fish are represented.
+
+    ``lead`` / ``tail``: keep only windows that start >= ``lead`` bouts into their run and end
+    >= ``tail`` bouts before it ends (the STEADY-STATE selection, see ``INTERIOR``); without
+    ``runs`` the whole series is one run.
     """
     starts = range(0, max(1, n - W + 1), step)
     if runs is None:
-        return [a for a in starts if a + W <= n]
+        return [a for a in starts if a + W <= n and a >= lead and n - (a + W) >= tail]
     r = np.asarray(runs)
-    return [a for a in starts if a + W <= n and r[a] == r[a + W - 1]]
+    pos = np.zeros(n, dtype=int)                     # bouts since the run began
+    for t in range(1, n):
+        pos[t] = pos[t - 1] + 1 if r[t] == r[t - 1] else 0
+    rem = np.zeros(n, dtype=int)                     # bouts left before the run ends
+    for t in range(n - 2, -1, -1):
+        rem[t] = rem[t + 1] + 1 if r[t] == r[t + 1] else 0
+    return [a for a in starts if a + W <= n and r[a] == r[a + W - 1]
+            and pos[a] >= lead and rem[a + W - 1] >= tail]
+
+
+# STEADY-STATE window selection (lead, tail) in bouts. MEASURED (Data_cleanup_final.ipynb step 5):
+# the first ~60 bouts after a > 10 s pause are slower, shorter-stepping and more central, and
+# the last ~30 before one are more central again; a third of the run-aware windows are the FIRST
+# window of a run (per-window dt_std 1.09 s vs 0.74 interior). A rollout has no pauses, so the
+# ``traj_int`` C2ST pairs real windows starting >= 120 bouts into a run and ending >= 60 before
+# it ends with generated windows starting at t >= 120 (the run clock, if any, has decayed).
+INTERIOR = (120, 60)
 
 
 def window_features(dtheta, sym, W=60, step=None, acf_lags=(1, 2, 3), runs=None):
@@ -755,7 +775,7 @@ def _acf1(w):
 
 
 def window_features_traj(dtheta, sym, distance, dt, dot_dist=None, W=60, step=None,
-                         acf_lags=(1, 2, 3), radial=None, runs=None):
+                         acf_lags=(1, 2, 3), radial=None, runs=None, lead=0, tail=0):
     """TRAJECTORY C2ST features: everything ``window_features`` has (turns) PLUS per-window
     KINEMATIC summaries -- |distance| (mean/std/median/q90 + lag-1 acf), dt (same 5), and, when
     ``dot_dist`` is given (loop models with dot geometry), fish-to-dot distance (same 5). So this
@@ -773,7 +793,7 @@ def window_features_traj(dtheta, sym, distance, dt, dot_dist=None, W=60, step=No
     dd = None if dot_dist is None else np.asarray(dot_dist, float)
     rad = None if radial is None else np.asarray(radial, float)
     feats = []
-    for a in _window_starts(len(sym), W, step, runs):
+    for a in _window_starts(len(sym), W, step, runs, lead=lead, tail=tail):
         w_sym = sym[a:a + W]; w_dth = np.abs(dtheta[a:a + W])
         if len(w_sym) < W:
             break
@@ -1337,15 +1357,19 @@ def cross_validate_generative(records, model_factories, folds, cfg=None, R=20,
     return panel_df, windows_by_model, windows_by_model_traj
 
 
-def c2st_windows_for_fish(model, rec, fish_id, seed=0, reps=8, W=60, reanchor=None):
+def c2st_windows_for_fish(model, rec, fish_id, seed=0, reps=8, W=60, reanchor=None,
+                          interior=INTERIOR):
     """The C2ST window pairs for ONE fish -- the same construction ``cross_validate_generative``
     does inline, factored out so a run that owns its own rollout loop (the local Metric-B script)
     cannot drift away from the ladder's feature set.
 
-    Returns ``dict(turn=[...], traj=[...], traj_eq=[...])``, each a list of ``reps`` entries
-    ``(real_feats, gen_feats)`` -- exactly the value a ``windows_by_fish`` dict holds, so
-    replicate ``r`` of every fish assembles into the r-th dict that ``c2st_auc_replicates``
-    consumes.
+    Returns ``dict(turn=[...], traj=[...], traj_eq=[...], traj_int=[...])``, each a list of
+    ``reps`` entries ``(real_feats, gen_feats)`` -- exactly the value a ``windows_by_fish`` dict
+    holds, so replicate ``r`` of every fish assembles into the r-th dict that
+    ``c2st_auc_replicates`` consumes. ``traj_int`` is the STEADY-STATE twin of ``traj`` from the
+    SAME rollouts: real windows >= ``interior[0]`` bouts into a run and >= ``interior[1]`` before
+    it ends, generated windows starting at t >= ``interior[0]`` and subsampled to the fish's
+    standard gen:real window ratio (see ``INTERIOR`` and the note in the loop); None skips it.
 
     THE RNG IS ``default_rng([seed, fish_id, rep])``, the ladder's convention and deliberately
     NOT the stream the Metric-B panel draws on: changing ``reps`` must not be able to move the
@@ -1357,8 +1381,11 @@ def c2st_windows_for_fish(model, rec, fish_id, seed=0, reps=8, W=60, reanchor=No
     real_w = window_features(rec.dtheta, rec.symbol, W=W, runs=_runs)
     real_rad = _radial_of(rec, rec.x_px, rec.y_px)
     real_dd_all = getattr(rec, "dot_dist_px", None)
-    real_t = None
+    real_t = real_i = None
     out = dict(turn=[], traj=[], traj_eq=[])
+    if interior:
+        out["traj_int"] = []
+        lead, tail = int(interior[0]), int(interior[1])
     for rep in range(int(reps)):
         gen = model.sample(rec, np.random.default_rng([int(seed), int(fish_id), int(rep)]),
                            **_stim_kw(model, rec, reanchor))
@@ -1377,6 +1404,26 @@ def c2st_windows_for_fish(model, rec, fish_id, seed=0, reps=8, W=60, reanchor=No
         out["traj"].append((real_t,
                             window_features_traj(gen["dtheta"], gen["symbol"], gen["distance_px"],
                                                  gen["dt_s"], gen_dd, W=W, radial=gen_rad)))
+        if interior:
+            if real_i is None:
+                real_i = window_features_traj(rec.dtheta, rec.symbol, rec.distance_px, rec.dt_s,
+                                              real_dd, W=W, runs=_runs, lead=lead, tail=tail,
+                                              radial=(real_rad if gen_rad is not None else None))
+            gi = window_features_traj(gen["dtheta"], gen["symbol"], gen["distance_px"], gen["dt_s"],
+                                      gen_dd, W=W, radial=gen_rad, lead=lead)
+            # The selection keeps ~40 % of the real windows and ~97 % of the generated ones, so
+            # left alone the interior classifier would see a 4:1 class imbalance against the
+            # standard reading's ~1.6:1 -- and imbalance alone moves the AUC (measured +0.03 for
+            # a 4:1 pool). Subsample the generated side to THIS fish's standard gen:real ratio,
+            # so the two AUCs differ by the window selection and nothing else. Seeded per
+            # (seed, fish, rep): deterministic, replicate-matched across arms.
+            gen_t = out["traj"][-1][1]
+            n_keep = min(len(gi), int(round(len(real_i) * len(gen_t) / max(len(real_t), 1))))
+            if n_keep < len(gi):
+                keep = np.sort(np.random.default_rng([int(seed), int(fish_id), int(rep), 1])
+                               .choice(len(gi), n_keep, replace=False))
+                gi = gi[keep]
+            out["traj_int"].append((real_i, gi))
         # MARGINAL-EQUALISED twin: same rollout, each behavioural channel rank-mapped onto this
         # fish's real marginal. Separates "wrong levels" from "wrong temporal structure". The
         # positions are NOT remapped -- dot-distance and radial are geometric consequences of the

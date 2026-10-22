@@ -233,8 +233,8 @@ def _dot_stim_row(stim_mode, dot_cx_t, dot_cy_t, x, y, h, moving_t, n_dots_t=0.0
     For 'shoal'/'shoalr' both the bearing AND the range are recomputed from the generated pose,
     via the SAME ``fit_MLP.shoal_channels`` used at train time (so the layout cannot drift);
     N / moving / active stay teacher-forced block constants."""
-    if stim_mode in ("shoal", "shoalr", "shoalf"):
-        kw = dict(use_n=(stim_mode != "shoalr"), far=(stim_mode == "shoalf"))
+    if stim_mode in M.SHOAL_MODES:
+        kw = M.shoal_kw(stim_mode)
         if not np.isfinite(dot_cx_t):
             return M.shoal_channels([np.nan], [np.nan], [n_dots_t], [moving_t], **kw)[0]
         phi = MB._wrap_pi(np.arctan2(dot_cy_t - y, dot_cx_t - x) - h)
@@ -282,7 +282,7 @@ def _dot_stim_row(stim_mode, dot_cx_t, dot_cy_t, x, y, h, moving_t, n_dots_t=0.0
 # rollouts then silently teacher-forced the stimulus for every s1/s2 model while shoal*/dot*
 # models ran the honest closed loop -- so the two families' stimulus metrics were not measuring
 # the same thing at all. One name, one place to extend.
-ONLINE_STIM_MODES = ("dot", "dotb", "shoal", "shoalr", "shoalf", "s1", "s2")
+ONLINE_STIM_MODES = ("dot", "dotb", "s1", "s2") + M.POP_MODES + M.SHOAL_MODES
 
 
 def generate_mix_loop(model, rec, cfg_feat, dt_pool, dist_pool, rng,
@@ -669,6 +669,26 @@ def _lnk_logpdf(x, logw, mu, sigma):                     # K-component log-norma
     lx = torch.log(x).reshape(-1, 1)
     comp = logw + (-lx - torch.log(sigma) - 0.5 * _LOG2PI - (lx - mu) ** 2 / (2.0 * sigma ** 2))
     return torch.logsumexp(comp, dim=1)
+
+
+def _dt_logpdf(x, logw, mu, sigma, hi=None):
+    """The INTERVAL head's log-density: ``_lnk_logpdf`` when ``hi`` is None, else the same mixture
+    TRUNCATED at ``hi`` seconds -- renormalised on (0, hi] by ``- log sum_k w_k Phi((log hi - mu_k)
+    / sigma_k)``.
+
+    WHY. The active-only data are cut at 10 s by construction (no bout on either side of a > 10 s
+    gap), but the head was fitted as an untruncated log-normal mixture and its draws CLIPPED at the
+    train q99.9. Measured on Model 8's control: q99 7.2 s vs 6.7 real, > 8 s 0.71% vs 0.44%, and
+    0.43% of generated intervals piled at the clip; quantile-mapping the marginal onto the real one
+    removes about half of the per-window interval-spread excess. With the cut in the likelihood the
+    6-10 s density is fitted to the data's own frequency and the sampler draws inside the bound
+    (`generate_mix_joint_loop`, `rollout_torch.sample_lognorm_mix`), so there is nothing to clip.
+    Exact: the density integrates to 1 on (0, hi]. ``hi=None`` is bit-identical to before."""
+    base = _lnk_logpdf(x, logw, mu, sigma)
+    if hi is None:
+        return base
+    zc = (float(np.log(hi)) - mu) / sigma                                       # (n, K)
+    return base - torch.logsumexp(logw + torch.special.log_ndtr(zc), dim=1)
 
 
 def _ln2_logpdf(x, logw, mu, sigma):                     # 2-component log-normal; logw/mu/sigma (n,2)
@@ -1609,7 +1629,10 @@ WIN_W = 60                       # must match GM.window_features_traj's W
 # Measured on rej with loadings turn 0.076 / dist 0.464 / dt 0.077: dt overshot to +0.437 and
 # distance to +0.529 against targets +0.332 / +0.337, i.e. the answer is BELOW 1, and an old grid
 # starting at 0.5 could not have expressed it. Hence the low end.
-DRIFT_GAIN_GRID = (0.15, 0.3, 0.6, 1.0, 1.8, 3.0)
+# 5.0 added 2026-09-15 for the TWO-STATE design: the interval chain's likelihood-fitted amplitude
+# can sit well under what the window acf needs (a 4-epoch smoke wanted x3 at the old top), and a
+# value pinned at the edge is not a fitted value. One extra point per sweep.
+DRIFT_GAIN_GRID = (0.15, 0.3, 0.6, 1.0, 1.8, 3.0, 5.0)
 
 
 def window_acf1(series, W=WIN_W):
@@ -1638,6 +1661,53 @@ def _radial_series(rec, x, y):
                     np.asarray(y, float) - rec.dish_cy) / rec.dish_R
 
 
+def _pav(y):
+    """Pool-adjacent-violators: the non-decreasing sequence closest (least squares) to ``y``."""
+    blocks = []                                          # [sum, count]
+    for v in y:
+        blocks.append([float(v), 1])
+        while len(blocks) > 1 and blocks[-2][0] / blocks[-2][1] > blocks[-1][0] / blocks[-1][1]:
+            s, c = blocks.pop()
+            blocks[-1][0] += s
+            blocks[-1][1] += c
+    out = []
+    for s, c in blocks:
+        out += [s / c] * c
+    return np.array(out)
+
+
+def _pick_gain(grid, acf, target, plateau_tol=0.03):
+    """The gain for ONE channel from its (gain, acf) curve.
+
+    WHY NOT THE RAW ARGMIN. Measured on the slow2 checkpoints: below gain ~0.8 the step window-acf
+    is steep and noisy between seeds (0.02-0.28 at the same gain), so the nearest grid point to
+    the target on one noisy sample was 0.6 on two folds where the same weights, re-measured, gave
+    0.05 -- while 1.0 gave a stable 0.37. And the interval chain of the two-state design SATURATES
+    (a tau-35 state decorrelates within two 60-bout windows), so the argmin ran to the top of the
+    grid on every fold and inflated the amplitude x5 for an acf it could not buy.
+
+    So: (1) the curve is made monotone (PAV) -- the acf can only rise with the gain, a dip is
+    noise; (2) the gain is INTERPOLATED in log-gain to hit the target exactly, so it is no longer
+    tied to the grid; (3) if the smoothed curve never reaches the target, the search stops at the
+    plateau (the smallest gain within ``plateau_tol`` of the smoothed maximum) and says so, rather
+    than buying nothing at the grid edge. Returns (gain, status, smoothed curve)."""
+    g = np.asarray(grid, float)
+    s = _pav(acf)
+    if target <= s[0]:
+        return float(g[0]), "below", s
+    p = int(np.argmax(s >= s[-1] - plateau_tol))         # where the plateau starts
+    j = int(np.argmax(s >= target)) if target <= s[-1] else len(s)   # first point at/above target
+    if j > p:
+        # The target is unreachable, or reached only on the flat tail (a 0.01 acf gain for a x2
+        # amplitude): stop where the curve stops rising.
+        return float(g[p]), "saturated", s
+    i = j - 1                                            # s[i] < target <= s[j], j >= 1
+    if s[j] <= s[i]:
+        return float(g[j]), "ok", s
+    f = (target - s[i]) / (s[j] - s[i])
+    return float(np.exp(np.log(g[i]) + f * (np.log(g[j]) - np.log(g[i])))), "ok", s
+
+
 def _drift_acfs(model, recs, cf, seed, reps, gen_kw):
     """Mean generated across-window acf1 for (dt, distance, radial) over ``reps`` replicates."""
     o = {"dt": [], "dist": [], "rad": []}
@@ -1653,7 +1723,7 @@ def _drift_acfs(model, recs, cf, seed, reps, gen_kw):
 
 
 def _search_drift_gain(model, records, cfg_feat, seed=0, max_fish=8, reps=2,
-                       gain_grid=DRIFT_GAIN_GRID, **gen_kw):
+                       gain_grid=None, **gen_kw):
     """Fit the two KINEMATIC gains against the measured across-window acf of dt and distance.
 
     WHY A SEARCH AND NOT A GRADIENT. The likelihood-fitted loadings optimise one-step predictive
@@ -1675,6 +1745,8 @@ def _search_drift_gain(model, records, cfg_feat, seed=0, max_fish=8, reps=2,
     -0.035 to +0.117 across seeds, which is larger than the effect being fitted. Replicating is
     what makes this a measurement rather than noise-fitting.
     """
+    # resolved at CALL time (not bound as a default) so a caller can swap the grid
+    gain_grid = tuple(DRIFT_GAIN_GRID if gain_grid is None else gain_grid)
     tg = {"dt": [], "dist": [], "rad": []}
     for r in records:
         tg["dt"].append(window_acf1(np.log(np.clip(r.dt_s, 1e-6, None))))
@@ -1686,45 +1758,66 @@ def _search_drift_gain(model, records, cfg_feat, seed=0, max_fish=8, reps=2,
     if not base:
         raise ValueError("_search_drift_gain needs cfg_feat['drift'] (publish it after the fit)")
     d_dist, d_dt = float(base.get("dist", 0.0)), float(base.get("dt", 0.0))
+    # TWO-STATE design (drift with dt_off + dt_latent): the interval chain is dt_latent, so the dt
+    # sweep scales ITS amplitude (lam, with the same log-normal re-centring) and the slow chain's
+    # dt loading -- exactly 0 -- gets no gain.
+    dtl = dict(cfg_feat.get("dt_latent") or {})
+    dt_via_latent = bool(dtl) and abs(d_dt) < 1e-12
+    s_lam = float(dtl.get("lam", 0.0)) if dt_via_latent else 0.0
 
     def _cfg(gd, gt):
         # Re-centring so a scaled loading cannot inflate the kinematic marginals -- see the
         # generator's drift block. exp((g^2-1) d^2 / 2) is the exact inflation for a unit-variance
         # zero-mean state, so subtracting its log from the location cancels it.
         cf = dict(cfg_feat)
-        cf["drift"] = dict(base, g_dist=float(gd), g_dt=float(gt),
-                           dist_c=0.5 * (gd * gd - 1.0) * d_dist * d_dist,
-                           dt_c=0.5 * (gt * gt - 1.0) * d_dt * d_dt)
+        if dt_via_latent:
+            cf["drift"] = dict(base, g_dist=float(gd), g_dt=1.0,
+                               dist_c=0.5 * (gd * gd - 1.0) * d_dist * d_dist, dt_c=0.0)
+            cf["dt_latent"] = dict(dtl, g_lam=float(gt),
+                                   lam_c=0.5 * (gt * gt - 1.0) * s_lam * s_lam)
+        else:
+            cf["drift"] = dict(base, g_dist=float(gd), g_dt=float(gt),
+                               dist_c=0.5 * (gd * gd - 1.0) * d_dist * d_dist,
+                               dt_c=0.5 * (gt * gt - 1.0) * d_dt * d_dt)
         return cf
 
     # TWO INDEPENDENT 1-D searches, not a product grid: each kinematic channel's across-window acf
     # responds to its OWN loading, and a single shared gain provably cannot serve both (measured --
-    # the gain that put dt on target left distance at +0.118 against +0.253).
+    # the gain that put dt on target left distance at +0.118 against +0.253). The pick on each
+    # curve is `_pick_gain` (monotone-smoothed, interpolated, plateau-stopped), not the raw argmin.
     curve_d = [(float(g), _drift_acfs(model, recs, _cfg(g, 1.0), seed, reps, gen_kw))
                for g in gain_grid]
-    gd = min(curve_d, key=lambda c: abs(c[1]["dist"] - tgt["dist"]))[0]
+    gd, st_d, sm_d = _pick_gain(gain_grid, [c["dist"] for _, c in curve_d], tgt["dist"])
     curve_t = [(float(g), _drift_acfs(model, recs, _cfg(gd, g), seed + 50, reps, gen_kw))
                for g in gain_grid]
-    gt = min(curve_t, key=lambda c: abs(c[1]["dt"] - tgt["dt"]))[0]
-    got = dict(curve_t)[gt]
+    gt, st_t, sm_t = _pick_gain(gain_grid, [c["dt"] for _, c in curve_t], tgt["dt"])
+    # ONE re-measurement at the chosen pair, on its own stream -- what the model will actually do
+    got = _drift_acfs(model, recs, _cfg(gd, gt), seed + 100, reps, gen_kw)
     rep = dict(target=tgt, got=got, g_dist=gd, g_dt=gt,
-               curve_dist=curve_d, curve_dt=curve_t)
-    edge = [n for n, g in (("g_dist", gd), ("g_dt", gt))
-            if g in (gain_grid[0], gain_grid[-1])]
-    if edge:
-        # The fishre core gain sat at its grid edge (0.4) for two arms before anyone noticed, and
-        # an edge value means the grid could not express the answer -- not that the answer is 0.4.
-        print(f"    WARNING: drift gain pinned at a GRID EDGE for {edge} "
-              f"(g_dist {gd}, g_dt {gt}, grid {list(gain_grid)}). Widen DRIFT_GAIN_GRID -- the "
-              f"search could not bracket the target, so this is not a fitted value.")
-    miss = [k for k in ("dt", "dist") if abs(got[k] - tgt[k]) > 0.5 * abs(tgt[k])]
+               curve_dist=curve_d, curve_dt=curve_t, dt_via_latent=dt_via_latent,
+               pick=dict(dist=st_d, dt=st_t),
+               smoothed_dist=[float(v) for v in sm_d], smoothed_dt=[float(v) for v in sm_t],
+               reps=int(reps), grid=list(map(float, gain_grid)))
+    for k, st_, sm in (("dist", st_d, sm_d), ("dt", st_t, sm_t)):
+        if st_ == "saturated":
+            # The timescale, not the grid, is the limit: amplitude cannot buy more lag-1 window acf
+            # once the state decorrelates within ~2 windows. Stopping at the plateau keeps the
+            # marginal intact; the honest reading is "this tau reaches X, the real value is Y".
+            print(f"    NOTE: {k} window-acf SATURATES at {sm[-1]:+.3f} (real {tgt[k]:+.3f}) -- gain "
+                  f"stopped at the plateau ({gd if k == 'dist' else gt:.2f}); a longer tau is "
+                  f"needed for the rest, not a larger amplitude")
+        elif st_ == "below":
+            print(f"    NOTE: {k} window-acf is above target even at the smallest gain "
+                  f"({sm[0]:+.3f} vs {tgt[k]:+.3f}); gain floored at {gain_grid[0]}")
+    miss = [k for k in ("dt", "dist") if abs(got[k] - tgt[k]) > 0.5 * abs(tgt[k])
+            and rep["pick"][k] == "ok"]
     if miss:
-        # Loud, because "the grid could not reach the target" and "the mechanism does not work" look
-        # identical in the results table, and they need opposite responses.
-        print(f"    WARNING: drift could not reach the acf target on {miss} "
+        # Loud, because "the search mis-picked" and "the mechanism does not work" look identical
+        # in the results table, and they need opposite responses.
+        print(f"    WARNING: drift re-measured off target on {miss} "
               f"(got { {k: round(got[k], 3) for k in miss} } vs real "
-              f"{ {k: round(tgt[k], 3) for k in miss} }). Widen DRIFT_GAIN_GRID before reading "
-              f"this arm as a refutation of the mechanism.")
+              f"{ {k: round(tgt[k], 3) for k in miss} }) although the smoothed curve crossed it; "
+              f"the curve is noisy at this budget -- raise reps before reading this arm.")
     # radial is REPORTED, never optimised -- see DRIFT_DEFAULT for the measurements that refuted
     # the spatial channel. Printing it keeps the open gap visible next to the two that closed.
     return gd, gt, rep

@@ -121,13 +121,29 @@ def build_border_records(df, roi_path=_DEFAULT_ROI, min_len=10, active_only=True
         if "run_pos" in g.columns:
             # Position within the run. The history blocks pad slot k-1 wherever run_pos < k,
             # so a bout early in a run never carries a lag from before its quiescence gap.
-            rec.run_pos = g["run_pos"].to_numpy()[good]
+            rp = g["run_pos"].to_numpy()[good]
+            if active_only and "run_id" in g.columns:
+                # RE-COUNTED among the bouts that are IN the record. The table's run_pos = 0 is the
+                # gap_before bout, which `active` drops (1,284 of 1,298 runs), so the record's
+                # first bout of a run carried run_pos = 1: its lag-1 slot was then NOT padded and
+                # read the array's previous element -- the bout before the pause, across the gap
+                # (one slot at one bout per run, 1.4 % of bouts) -- and lag_valid / the run clock
+                # sat one bout off the generator's t = 0. Counting from the record's own run start
+                # makes all three exactly what the generator produces.
+                rid = g["run_id"].to_numpy()[good]
+                rp = np.zeros(len(rid), dtype=int)
+                for t in range(1, len(rid)):
+                    rp[t] = rp[t - 1] + 1 if rid[t] == rid[t - 1] else 0
+            rec.run_pos = rp
         rec.frame_onset = g["frame_onset"].to_numpy(int)[good]     # per-bout frame index (for the video bridge)
         if "dot_dist_px" in g.columns:                            # per-bout dot geometry (add_dot_geometry.py)
             rec.dot_dist_px = g["dot_dist_px"].to_numpy(float)[good]
             rec.dot_cx = g["dot_cx"].to_numpy(float)[good]
             rec.dot_cy = g["dot_cy"].to_numpy(float)[good]
             rec.dot_prox = g["dot_prox"].to_numpy(float)[good]
+        if "d0_x" in g.columns:                                   # per-dot positions (add_dot_positions.py)
+            rec.dot_xs = np.stack([g[f"d{k}_x"].to_numpy(float)[good] for k in range(8)], axis=1)
+            rec.dot_ys = np.stack([g[f"d{k}_y"].to_numpy(float)[good] for k in range(8)], axis=1)
         if "n_dots_left" in g.columns:                            # group size N (stim_mode='shoal')
             rec.n_dots = (np.nan_to_num(g["n_dots_left"].to_numpy(float))
                           + np.nan_to_num(g["n_dots_right"].to_numpy(float)))[good]
@@ -209,6 +225,21 @@ def _travel_ref(rec):
     return _wrap_pi(hd - np.radians(np.asarray(rec.dtheta, float)))
 
 
+def reanchor_track(dcx, dcy, real_pose, sim_pose):
+    """Move a replayed dot track rigidly from the REAL fish's onset pose to the SIMULATED fish's: the rig places the
+    dots relative to the fish at block onset, so a rollout that reaches the onset somewhere else must see them relative
+    to itself. ``dcx``/``dcy`` (..., T) positions in px (NaN stays NaN); each pose is (x, y, heading rad), scalars or
+    arrays broadcasting against the leading axes. Distances and bearings to the fish at onset are preserved exactly;
+    with sim_pose == real_pose it is the identity (up to rounding). Used by both rollout engines (the profile
+    fine-tune's free-warm-up starts, ``_reanchor_at``)."""
+    xr, yr, hr = (np.asarray(v, float)[..., None] for v in real_pose)
+    xs, ys, hs = (np.asarray(v, float)[..., None] for v in sim_pose)
+    a = hs - hr
+    ca, sa = np.cos(a), np.sin(a)
+    ux = np.asarray(dcx, float) - xr; uy = np.asarray(dcy, float) - yr
+    return xs + ca * ux - sa * uy, ys + sa * ux + ca * uy
+
+
 def _border_block(rec, cfg_feat):
     """(n, 3) raw ``[dist_to_border_norm, sin(psi), cos(psi)]`` or, with
     ``cfg_feat['border_mode']='basis'``, (n, 9) distance-tuned wall channels.
@@ -281,6 +312,176 @@ def block_onsets(rec, fps=_FPS):
             cur = fr[t]; k += 1
         start[t] = cur; bid[t] = k
     return start, bid, fr
+
+
+# SHORT-TERM STIMULUS LAGS (Model 38, `stim_lags` = K): where the dot group's centroid was at the previous K bouts,
+# seen from where the fish is NOW (current position and reference heading) -- [sin, cos] of that bearing and the
+# centroid-range code (`rz`'s formula) per lag, 3K columns. The difference between "now" and "the past, seen from now"
+# is the dots' own motion relative to the fish (sweeping, approaching, receding), separate from the fish's own turns
+# (already in the turn lags). A lag is 0 when its bout had no dots, sat in a different stimulus block, or lay before
+# a > 10 s pause (a different RUN): the memory never reaches across a block boundary or a quiescent gap -- a
+# free-running rollout is one run, so there it resets at block boundaries only. The existing `K_stim` block is a
+# different thing (the PROGRAMME's previous blocks; null on the likelihood, and incompatible with the evaluation's
+# re-anchored stimulus). APPENDED LAST, after every other block, so every archived layout is unchanged.
+def stim_segments(nd, mv, run_start=None):
+    """(n,) segment id: +1 at every change of the stimulus condition (count, moving) and at every run start."""
+    cond = np.nan_to_num(np.asarray(nd, float)) * 10.0 + np.nan_to_num(np.asarray(mv, float))
+    new = np.r_[True, cond[1:] != cond[:-1]] if len(cond) else np.zeros(0, bool)
+    if run_start is not None:
+        new = new | np.asarray(run_start, bool)
+    return np.cumsum(new) - 1
+
+
+def stim_lag_rows(dxh, dyh, segh, x, y, h, seg_now):
+    """(n, 3K) the stimulus-lag block from the dot centroid at the previous K bouts (``dxh``/``dyh`` (n, K), NaN =
+    none), their segment ids (``segh`` (n, K), -1 = none), the CURRENT pose ``x``/``y``/``h`` (n,) and the current
+    segment ``seg_now`` (n,). Vectorised and scalar-safe: the record builder, the numpy generator (n = 1) and the
+    batched engine all call this one function."""
+    dxh = np.atleast_2d(np.asarray(dxh, float)); dyh = np.atleast_2d(np.asarray(dyh, float))
+    segh = np.atleast_2d(np.asarray(segh)); n, K = dxh.shape
+    x = np.atleast_1d(np.asarray(x, float)); y = np.atleast_1d(np.asarray(y, float))
+    h = np.atleast_1d(np.asarray(h, float)); seg_now = np.atleast_1d(np.asarray(seg_now))
+    ok = np.isfinite(dxh) & np.isfinite(dyh) & (segh == seg_now[:, None]) & (segh >= 0)
+    ux = np.where(ok, dxh, 0.0) - x[:, None]; uy = np.where(ok, dyh, 0.0) - y[:, None]
+    phi = _wrap_pi(np.arctan2(uy, ux) - h[:, None])
+    r = np.hypot(ux, uy)
+    rz = np.clip((np.log(np.clip(r, M.SHOAL_R_MIN, None)) - np.log(M.SHOAL_R_REF)) / M.SHOAL_R_OCT, -1.0, 1.0)
+    out = np.stack([np.where(ok, np.sin(phi), 0.0), np.where(ok, np.cos(phi), 0.0), np.where(ok, rz, 0.0)], axis=2)
+    return out.reshape(n, 3 * K).astype(np.float32)
+
+
+def _stimlag_block(rec, cfg_feat):
+    """(n, 3K) ``stim_lag_rows`` on a record: the reference heading is the one the stimulus block uses (``phi_ref``),
+    segments break at condition changes AND at run starts (``run_pos == 0``)."""
+    K = int(cfg_feat.get("stim_lags") or 0)
+    n = rec.n
+    if K <= 0 or n == 0:
+        return np.zeros((n, 0), dtype=np.float32)
+    rp = getattr(rec, "run_pos", None)
+    seg = stim_segments(getattr(rec, "n_dots", np.zeros(n)), rec.moving,
+                        None if rp is None else (np.asarray(rp) == 0))
+    dcx = np.asarray(getattr(rec, "dot_cx", np.full(n, np.nan)), float)
+    dcy = np.asarray(getattr(rec, "dot_cy", np.full(n, np.nan)), float)
+    h = (_travel_ref(rec) if cfg_feat.get("phi_ref", "ori") == "travel" else np.asarray(rec.f_ori_rad, float))
+    dxh = np.full((n, K), np.nan); dyh = np.full((n, K), np.nan); segh = np.full((n, K), -1, dtype=np.int64)
+    for k in range(1, K + 1):
+        dxh[k:, k - 1] = dcx[:-k]; dyh[k:, k - 1] = dcy[:-k]; segh[k:, k - 1] = seg[:-k]
+    return stim_lag_rows(dxh, dyh, segh, np.asarray(rec.x_px, float), np.asarray(rec.y_px, float), h, seg)
+
+
+# DOT-JUMP PHASE (Model 41, `stim_jump`): moving dots do not glide; each jumps about 2.1 mm every 18 frames (0.6 s) and
+# is still in between, and real fish lock their bout starts to these jumps (onsets suppressed 0.07-0.13 s after a jump,
+# enriched 0.33-0.47 s after it; thesis Ch. 3). The jump timeline is identical for every fish (the semi-closed loop only
+# moves a block's track rigidly), so the phase is a pure function of the PROGRAMME FRAME, like the block clock: frames
+# since the last jump of any shown dot (a block's first frame counts as a jump), as [sin, cos] of 2 pi age / 18, gated
+# to moving-dot bouts (0 on pauses and static dots). With one dot it is the exact 18-frame clock; with several dots the
+# jumps interleave and the phase is short and irregular. Computed once from the first fish's per-frame dot positions
+# and cached under clean_data/. APPENDED after the stimulus lags, so every archived layout is unchanged.
+JUMP_PERIOD_FR = 18
+JUMP_STEP_PX = 1.0                         # a dot 'jumps' on a frame where it moves more than this (jumps are ~7.7 px)
+JUMP_AGE_CAP = 255
+_JUMP_TABLE = {}
+
+
+def jump_age_table(rebuild=False):
+    """(n_frames,) uint8: frames since the last dot jump (or block onset) at each programme frame, capped at 255."""
+    if "t" in _JUMP_TABLE and not rebuild:
+        return _JUMP_TABLE["t"]
+    root = Path(__file__).resolve().parents[1]
+    cache = root / "clean_data" / "dot_jump_age.npy"
+    if cache.exists() and not rebuild:
+        _JUMP_TABLE["t"] = np.load(cache)
+        return _JUMP_TABLE["t"]
+    import pandas as pd
+    src = sorted((root / "data" / "data" / "df_transformed").glob("*_f0_transformed_abs.csv"))
+    if not src:
+        raise FileNotFoundError("jump_age_table needs data/data/df_transformed/*_f0_transformed_abs.csv")
+    d = pd.read_csv(src[0], usecols=["frame", "stimulus"] + [f"d{k}_{s}" for k in range(8) for s in ("x", "y")])
+    X = d[[f"d{k}_x" for k in range(8)]].to_numpy(float)
+    Y = d[[f"d{k}_y" for k in range(8)]].to_numpy(float)
+    step = np.hypot(np.diff(X, axis=0), np.diff(Y, axis=0))
+    jump = np.r_[False, (np.nan_to_num(step, nan=0.0) > JUMP_STEP_PX).any(axis=1)]
+    lab = d["stimulus"].astype(str).to_numpy()
+    onset = np.r_[True, lab[1:] != lab[:-1]]                 # a block's first frame counts as a jump
+    event = jump | onset
+    fr = d["frame"].to_numpy(int)
+    age = np.full(int(fr.max()) + 1, JUMP_AGE_CAP, dtype=np.int64)
+    last = None
+    for i, f in enumerate(fr):
+        if event[i]:
+            last = f
+        if last is not None:
+            age[f] = min(f - last, JUMP_AGE_CAP)
+    tab = age.astype(np.uint8)
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    np.save(cache, tab)
+    _JUMP_TABLE["t"] = tab
+    return tab
+
+
+def jump_age_at(frames):
+    """Frames since the last jump at programme frame(s) ``frames`` (rounded; beyond the table -> the cap)."""
+    tab = jump_age_table()
+    f = np.rint(np.atleast_1d(np.asarray(frames, float))).astype(np.int64)
+    ok = (f >= 0) & (f < len(tab))
+    return np.where(ok, tab[np.clip(f, 0, len(tab) - 1)], JUMP_AGE_CAP).astype(float)
+
+
+def jump_channels(age_fr, moving, n_dots):
+    """(n, 2) [sin, cos] of 2 pi age / JUMP_PERIOD_FR, 0 unless the bout is shown moving dots. Scalar-safe: the
+    record builder, the numpy generator (n = 1) and the batched engine all call this one function."""
+    age = np.atleast_1d(np.asarray(age_fr, float))
+    g = ((np.nan_to_num(np.atleast_1d(np.asarray(moving, float))) > 0)
+         & (np.nan_to_num(np.atleast_1d(np.asarray(n_dots, float))) > 0))
+    ph = 2.0 * np.pi * np.minimum(age, JUMP_PERIOD_FR - 1) / JUMP_PERIOD_FR
+    return np.stack([np.where(g, np.sin(ph), 0.0), np.where(g, np.cos(ph), 0.0)], axis=1).astype(np.float32)
+
+
+def _jump_block(rec, cfg_feat):
+    """(n, 2) ``jump_channels`` on a record, read at each bout's onset frame."""
+    n = rec.n
+    if not cfg_feat.get("stim_jump") or n == 0:
+        return np.zeros((n, 0), dtype=np.float32)
+    return jump_channels(jump_age_at(np.asarray(rec.frame_onset, float)), np.asarray(rec.moving, float),
+                         np.asarray(getattr(rec, "n_dots", np.zeros(n)), float))
+
+
+# DOT MOTION DIRECTION (Model 51, `stim_dmove`, 2026-10-20): where the dot group's centroid MOVED between the previous
+# bout's onset and this one, as [sin, cos] of that displacement's direction in the bout's reference frame (the
+# ``phi_ref`` heading the bearing uses). Known at the bout's onset (no look-ahead); 0 on the first bout of a stimulus
+# segment or run (no previous bout under the same condition), on no-dot and static bouts, and when the centroid moved
+# less than DMOVE_MIN_PX (no direction to speak of). The input the screen asks for: real fish move along the dot's
+# motion, a model that sees only its position cannot. APPENDED LAST, after every other block.
+DMOVE_MIN_PX = 1.8                          # 0.5 mm at 3.60 px/mm
+
+
+def dmove_rows(dx_prev, dy_prev, dx_now, dy_now, h, ok):
+    """(n, 2) the dot-motion block from the centroid at the previous and the current bout, the reference heading ``h``
+    and a validity mask ``ok`` (same segment, moving dots now). Scalar-safe: the record builder and the numpy
+    generator (n = 1) call this one function."""
+    dxp, dyp = np.atleast_1d(np.asarray(dx_prev, float)), np.atleast_1d(np.asarray(dy_prev, float))
+    dxn, dyn = np.atleast_1d(np.asarray(dx_now, float)), np.atleast_1d(np.asarray(dy_now, float))
+    h = np.atleast_1d(np.asarray(h, float)); ok = np.atleast_1d(np.asarray(ok, bool))
+    vx, vy = dxn - dxp, dyn - dyp
+    good = ok & np.isfinite(vx) & np.isfinite(vy) & (np.hypot(np.nan_to_num(vx), np.nan_to_num(vy)) > DMOVE_MIN_PX)
+    psi = _wrap_pi(np.arctan2(np.nan_to_num(vy), np.nan_to_num(vx)) - np.nan_to_num(h))
+    return np.stack([np.where(good, np.sin(psi), 0.0), np.where(good, np.cos(psi), 0.0)], axis=1).astype(np.float32)
+
+
+def _dmove_block(rec, cfg_feat):
+    """(n, 2) ``dmove_rows`` on a record: previous bout under the same stimulus condition and in the same run."""
+    n = rec.n
+    if not cfg_feat.get("stim_dmove") or n == 0:
+        return np.zeros((n, 0), dtype=np.float32)
+    rp = getattr(rec, "run_pos", None)
+    nd = np.asarray(getattr(rec, "n_dots", np.zeros(n)), float)
+    mv = np.asarray(rec.moving, float)
+    seg = stim_segments(nd, mv, None if rp is None else (np.asarray(rp) == 0))
+    dcx = np.asarray(getattr(rec, "dot_cx", np.full(n, np.nan)), float)
+    dcy = np.asarray(getattr(rec, "dot_cy", np.full(n, np.nan)), float)
+    h = (_travel_ref(rec) if cfg_feat.get("phi_ref", "ori") == "travel" else np.asarray(rec.f_ori_rad, float))
+    ok = np.r_[False, seg[1:] == seg[:-1]] & (np.nan_to_num(mv) > 0) & (np.nan_to_num(nd) > 0)
+    return dmove_rows(np.r_[np.nan, dcx[:-1]], np.r_[np.nan, dcy[:-1]], dcx, dcy, h, ok)
 
 
 def stimhist_cols(K_stim):
@@ -415,10 +616,120 @@ def _clock_block(rec, cfg_feat):
     nd = np.nan_to_num(np.asarray(getattr(rec, "n_dots", np.zeros(n)), float))
     on = (nd > 0).astype(float)                      # gate: 0 on every pause bout
     if mode == "linear":
-        v = np.clip(t / CLOCK_BLOCK_S, 0.0, 1.0)
+        v = np.clip(t / CLOCK_BLOCK_S, 0.0, 1.0).reshape(n, 1)
     else:
-        v = np.exp(-t / float(cfg_feat.get("clock_tau_s", CLOCK_TAU_S)))
-    return (v * on).reshape(n, 1).astype(np.float32)
+        # One column per timescale. `clock2_tau_s` adds a SLOWER second clock: measured on the
+        # active-only data, real fish keep turning hard toward moving dots for 6-8 s after onset
+        # (31/25/22 deg on bouts 2-4 against 18 later) and P(turn toward) stays elevated for
+        # ~18-20 s, while a 4 s clock is at 0.14 by 8 s -- the tail is not expressible without it.
+        v = np.stack([np.exp(-t / tau) for tau in clock_taus(cfg_feat)], axis=1)
+    return (v * on[:, None]).astype(np.float32)
+
+
+def clock_taus(cfg_feat):
+    """The exp-clock timescales in column order: ``clock_tau_s`` then, if set, ``clock2_tau_s``."""
+    taus = [float(cfg_feat.get("clock_tau_s", CLOCK_TAU_S))]
+    if cfg_feat.get("clock2_tau_s"):
+        taus.append(float(cfg_feat["clock2_tau_s"]))
+    return taus
+
+
+# --------------------------------------------------------------------------- #
+#  Regime weights: the two rare regimes where the fitted turn law is short
+# --------------------------------------------------------------------------- #
+REGIME_DEFAULT = dict(w_onset=8.0, w_pursuit=8.0, onset_bouts=4, pursuit_deg=30.0, pursuit_px=80.0)
+
+
+def regime_weights(rec, w_onset=8.0, w_pursuit=8.0, onset_bouts=4, pursuit_deg=30.0,
+                   pursuit_px=80.0, heads=None, include_static=False, w_static=1.0,
+                   static_near_px=None, static_window=None,
+                   w_pursuit2=None, pursuit2_deg=30.0, pursuit2_px=80.0, heads2=("turn", "dist"), drop_cond=None):
+    """Per-bout training weights, 1 everywhere except in the two regimes Diagnostics.ipynb found
+    UNDER-FIT in every model, both of them rare under a per-bout likelihood:
+
+      onset    the first ``onset_bouts`` bouts of a MOVING block (measured 4.9 % of active bouts).
+               Real fish turn 42 deg toward the dots on the first bout and 31/25/22 on the next
+               three, against 18 later; the fitted law reaches 19-30 on the first, nothing after.
+      pursuit  moving bouts with the dots ahead (|bearing| < ``pursuit_deg``) and >= ``pursuit_px``
+               away (measured 1.5 %). Real fish go straight at them (mean |dtheta| 26 deg, against
+               45 when close); the fitted law keeps turning 30-39 deg, which is two thirds of the
+               closing shortfall in D4.
+
+    At the default x8 the two regimes carry 27 % and 8 % of the loss (from 4.9 % and 1.5 %).
+    Weighting rather than oversampling: the gradient is identical and the epoch does not grow.
+    Returns ``(weights (n,) float32, info dict with the regime fractions and loss shares)``.
+
+    ``heads`` (Model 16): which heads the weight applies to, e.g. ``("turn",)`` -- passed through
+    in ``info`` for the trainer (``fit_mix_joint_re(weight_heads=...)``); the row loss of the
+    non-latent trainer applies weights to all heads regardless. ``include_static``: the pursuit
+    band also covers bouts with STATIC dots (Model 15's far-band weight on moving bouts only made
+    the approach law bleed into static blocks: drift-away 0.35 vs 0.58 real)."""
+    n = rec.n
+    w = np.ones(n, dtype=np.float32)
+    mv = np.asarray(rec.moving, bool)
+    nd = np.nan_to_num(np.asarray(getattr(rec, "n_dots", np.zeros(n)), float))
+    _s, bid, _f = block_onsets(rec)
+    pos = np.zeros(n, dtype=int)                                # bout index within its block
+    for t in range(1, n):
+        pos[t] = pos[t - 1] + 1 if bid[t] == bid[t - 1] else 0
+    onset = mv & (nd > 0) & (pos < int(onset_bouts))
+    phi = getattr(rec, "stim_angle_travel", None)
+    phi = np.asarray(phi if phi is not None else rec.stim_angle, float)
+    rng = np.asarray(getattr(rec, "dot_dist_px", np.full(n, np.nan)), float)
+    band = (nd > 0) if include_static else mv
+    pursuit = (band & np.isfinite(phi) & np.isfinite(rng)
+               & (np.degrees(np.abs(phi)) < float(pursuit_deg)) & (rng >= float(pursuit_px)))
+    # STATIC NEAR band (Model 18): bouts with static dots within `static_near_px` -- where real fish
+    # make the evasive turn (40-60 px ahead: toward -8.8 deg, |dtheta| 53) that the fit reaches only
+    # a third of even with the static block (Model 17: -0.9 deg, 46).
+    snear = np.zeros(n, dtype=bool)
+    if static_near_px is not None:
+        snear = ((~mv) & (nd > 0) & np.isfinite(phi) & np.isfinite(rng) & (rng < float(static_near_px))
+                 & ~onset & ~pursuit)
+        if static_window is not None:
+            # Model 20: only the part of the block in which the turn-away happens (seconds since
+            # the block onset), so the weight goes on the 3-deg signal and not on the onset
+            # approach that Model 19's slow clock over-learned
+            tb = (_f - _s) / _FPS
+            snear &= (tb >= float(static_window[0])) & (tb < float(static_window[1]))
+    w[onset] = float(w_onset)
+    w[pursuit & ~onset] = float(w_pursuit)
+    w[snear] = float(w_static)
+    info = dict(frac_onset=float(onset.mean()), frac_pursuit=float((pursuit & ~onset).mean()),
+                share_onset=float(w[onset].sum() / w.sum()),
+                share_pursuit=float(w[pursuit & ~onset].sum() / w.sum()),
+                frac_static=float(snear.mean()), share_static=float(w[snear].sum() / w.sum()),
+                heads=(tuple(heads) if heads else None))
+    if w_pursuit2 is not None:
+        # SECOND, SHARP pursuit regime (Model 25) with its OWN head set: moving dots ahead within
+        # `pursuit2_deg` and beyond `pursuit2_px` -- the exact cell in which the fit is measured short
+        # (real |dtheta| 21-29 deg and 15.3-16.6 px steps, the fit 29-32 deg and 14.5-15.4 px). It
+        # MULTIPLIES the first weight where both apply, so a bout in both regimes is weighted twice.
+        # Per-head vectors go back in `info['per_head']`; the trainer reads them when present.
+        p2 = (mv & np.isfinite(phi) & np.isfinite(rng)
+              & (np.degrees(np.abs(phi)) < float(pursuit2_deg)) & (rng >= float(pursuit2_px)))
+        w2 = np.ones(n, dtype=np.float32); w2[p2] = float(w_pursuit2)
+        h1 = set(heads) if heads else {"turn", "dist", "dt"}
+        h2 = set(heads2) if heads2 else {"turn", "dist", "dt"}
+        per_head = {h: ((w if h in h1 else np.ones(n, np.float32)) * (w2 if h in h2 else np.ones(n, np.float32))).astype(np.float32)
+                    for h in ("turn", "dist", "dt")}
+        info.update(frac_pursuit2=float(p2.mean()),
+                    share_pursuit2=float(per_head["turn"][p2].sum() / per_head["turn"].sum()),
+                    heads2=tuple(h2), per_head=per_head)
+    if drop_cond:
+        # LEAVE-ONE-CONDITION-OUT (Final_report_missingPieces): bouts shown a held-out condition, given as
+        # [(n_dots, moving), ...], get weight 0 on EVERY head, so the fit never learns from that condition; the bouts stay
+        # in the records (the history of the bouts after them is real). Default None: nothing changes.
+        drop = np.zeros(n, dtype=bool)
+        for nd_c, mv_c in drop_cond:
+            drop |= (nd == float(nd_c)) & (mv == bool(mv_c))
+        h1 = set(heads) if heads else {"turn", "dist", "dt"}
+        ph = info.get("per_head") or {h: (w if h in h1 else np.ones(n, np.float32)).astype(np.float32)
+                                      for h in ("turn", "dist", "dt")}
+        info["per_head"] = {h: np.where(drop, 0.0, v).astype(np.float32) for h, v in ph.items()}
+        w = np.where(drop, 0.0, w).astype(np.float32)
+        info["frac_dropped"] = float(drop.mean())
+    return w, info
 
 
 def build_feature_matrix(rec, cfg_feat):
@@ -449,7 +760,157 @@ def build_feature_matrix(rec, cfg_feat):
         blocks.append(_lagvalid_block(rec, cfg_feat))
     if cfg_feat.get("clock_mode"):
         blocks.append(_clock_block(rec, cfg_feat))
+    if cfg_feat.get("run_clock_tau"):
+        blocks.append(_runclock_block(rec, cfg_feat))
+    if cfg_feat.get("stim_align"):
+        blocks.append(_align_block(rec, cfg_feat))
+    if cfg_feat.get("stim_static"):
+        blocks.append(_static_block(rec, cfg_feat))
+    if cfg_feat.get("stim_static_clock"):
+        blocks.append(_static_clock_block(rec, cfg_feat))
+    if cfg_feat.get("stim_static_bump"):
+        blocks.append(_static_bump_block(rec, cfg_feat))
+    if cfg_feat.get("stim_onset"):
+        blocks.append(_onset_block(rec, cfg_feat))          # the generator appends in this order
+    if int(cfg_feat.get("stim_lags") or 0) > 0:
+        blocks.append(_stimlag_block(rec, cfg_feat))        # after everything else (Model 38)
+    if cfg_feat.get("stim_jump"):
+        blocks.append(_jump_block(rec, cfg_feat))           # (Model 41)
+    if cfg_feat.get("stim_dmove"):
+        blocks.append(_dmove_block(rec, cfg_feat))          # LAST (Model 51)
     return np.concatenate(blocks, axis=1).astype(np.float32)
+
+
+def _onset_block(rec, cfg_feat):
+    """(n, 2) ONSET x BEARING (Model 25): the first block clock (exp(-t / tau), 1.0 on the first bout
+    of a block, 0 on no-dot bouts) times [sin(bearing), cos(bearing)] to the active dots, in the
+    ``phi_ref`` frame. MEASURED (teacher-forced, held-out fish): real fish turn 27 / 31 / 33 / 31 deg
+    toward moving dots on the onset bout for 1 / 2 / 4 / 8 dots -- a first turn that does NOT scale
+    with group size -- while the fit gives 21 / 23 / 28 / 31, because the only onset input is a lone
+    clock column and every bearing term is scaled by N. This lets the heads act on "turn toward
+    (sin) / lengthen the step toward (cos) whatever just appeared"."""
+    ck = _clock_block(rec, cfg_feat)
+    if ck.shape[1] == 0:
+        raise ValueError("stim_onset needs a block clock (clock_mode)")
+    phi = getattr(rec, "stim_angle_travel", None) if cfg_feat.get("phi_ref", "ori") == "travel" else None
+    phi = np.asarray(phi if phi is not None else rec.stim_angle, float)
+    n = rec.n
+    nd = np.nan_to_num(np.asarray(getattr(rec, "n_dots", np.zeros(n)), float))
+    return onset_channels(ck[:, 0], phi, nd).astype(np.float32)
+
+
+def onset_channels(clock, phi, n_dots):
+    """(n, 2) ``clock x [sin(phi), cos(phi)]`` on active-dot bouts, 0 elsewhere. Scalar-safe; the
+    generator's closed-loop row and the record block share this one function."""
+    ck = np.atleast_1d(np.asarray(clock, float)); phi = np.atleast_1d(np.asarray(phi, float))
+    nd = np.atleast_1d(np.nan_to_num(np.asarray(n_dots, float)))
+    act = np.isfinite(phi) & (nd > 0)
+    s = np.where(act, np.sin(np.nan_to_num(phi)), 0.0); c = np.where(act, np.cos(np.nan_to_num(phi)), 0.0)
+    return np.stack([ck * s, ck * c], axis=1)
+
+
+def static_bump(t_s, params):
+    """Mid-block bump clock in (0, 1]: a Gaussian window in the time since the block onset,
+    ``exp(-((t - c) / w)^2 / 2)`` with ``params = (c, w)`` -- 1 at t = c, 0.08 at the onset and ~0
+    past c + 3w (for (18, 8): 12-30 s is the > 0.3 core, 0.003 at 45 s). The window in which real
+    fish turn AWAY from static dots they are near (12-30 s, -3.0 deg) while they approach them at
+    onset and are neutral after 30 s: a monotone clock cannot express that (Model 19). A difference
+    of exponentials was tried first and has too slow a tail (still 0.5 at 45 s for (8, 30) s)."""
+    c, w = float(params[0]), float(params[1])
+    t = np.maximum(np.asarray(t_s, float), 0.0)
+    return np.exp(-0.5 * ((t - c) / w) ** 2)
+
+
+def _static_bump_block(rec, cfg_feat):
+    """(n, 8) the static bearing block x ``static_bump`` of the time since the block onset
+    (``block_onsets``, the clock's own anchoring; 0 on no-dot bouts through the static block)."""
+    if not cfg_feat.get("stim_static"):
+        raise ValueError("stim_static_bump needs stim_static")
+    params = cfg_feat["stim_static_bump"]
+    start_fr, _bid, fr = block_onsets(rec)
+    t = np.maximum((fr - start_fr) / _FPS, 0.0)
+    return (_static_block(rec, cfg_feat) * static_bump(t, params)[:, None]).astype(np.float32)
+
+
+def _static_clock_block(rec, cfg_feat):
+    """(n, 8) the static bearing block times the SLOWEST block clock (the last `_clock_block`
+    column: `clock2_tau_s` when set). MEASURED (Model 18, teacher-forced within 80 px of static
+    dots): real fish turn toward them in the first 4 s of a block (+2.8 deg), are neutral at 4-12 s
+    and turn AWAY at 12-30 s (-3.0 deg), then neutral; the fit is flat (+0.4 .. +1.6) because its
+    only clock (tau 4 s) is at 0.05 by 12 s. This product puts "static bearing x where in the
+    block" on the input side."""
+    if not cfg_feat.get("stim_static"):
+        raise ValueError("stim_static_clock needs stim_static")
+    ck = _clock_block(rec, cfg_feat)
+    if ck.shape[1] == 0:
+        raise ValueError("stim_static_clock needs a block clock (clock_mode)")
+    return (_static_block(rec, cfg_feat) * ck[:, -1:]).astype(np.float32)
+
+
+def _static_block(rec, cfg_feat):
+    """(n, 8) ``fit_MLP.static_channels`` on the record (bearing in the ``phi_ref`` frame)."""
+    phi = getattr(rec, "stim_angle_travel", None) if cfg_feat.get("phi_ref", "ori") == "travel" else None
+    phi = np.asarray(phi if phi is not None else rec.stim_angle, float)
+    n = rec.n
+    return M.static_channels(phi, np.asarray(getattr(rec, "dot_dist_px", np.full(n, np.nan)), float),
+                             np.asarray(getattr(rec, "n_dots", np.zeros(n)), float),
+                             np.asarray(rec.moving, float)).astype(np.float32)
+
+
+def tail_width(cfg_feat):
+    """Width of the blocks appended AFTER the run clock (align, static) -- what the turn head's
+    skip path reads together with the stimulus block."""
+    return ((1 if cfg_feat.get("stim_align") else 0) + (8 if cfg_feat.get("stim_static") else 0)
+            + (8 if cfg_feat.get("stim_static_clock") else 0)
+            + (8 if cfg_feat.get("stim_static_bump") else 0)
+            + (2 if cfg_feat.get("stim_onset") else 0)
+            + 3 * int(cfg_feat.get("stim_lags") or 0)
+            + (2 if cfg_feat.get("stim_jump") else 0)
+            + (2 if cfg_feat.get("stim_dmove") else 0))
+
+
+def align_feature(phi, r_px, moving, n_dots):
+    """(n,) ``range x cos(bearing)`` for MOVING dots, in units of 100 px; 0 off-dot, in pauses
+    and for static dots. The aligned-and-far interaction the shoal block cannot express: its
+    range x bearing products are built on sin(bearing), which is ~0 exactly when the dots are
+    ahead, so there the range only enters as a main effect. MEASURED (Model 11, teacher-forced):
+    with the dots ahead the real |dtheta| falls 36.7 -> 31.8 -> 23.8 deg from 40-60 to 80-120 px
+    while the fit stays at 39 -> 36 -> 34 -- the missing 3 mm of the approach dip."""
+    phi = np.atleast_1d(np.asarray(phi, float)); r = np.atleast_1d(np.asarray(r_px, float))
+    mv = np.atleast_1d(np.nan_to_num(np.asarray(moving, float)))
+    nd = np.atleast_1d(np.nan_to_num(np.asarray(n_dots, float)))
+    act = np.isfinite(phi) & np.isfinite(r) & (r > 0.0) & (mv > 0.0) & (nd > 0.0)
+    return np.where(act, np.nan_to_num(r) / 100.0 * np.cos(np.nan_to_num(phi)), 0.0)
+
+
+def _align_block(rec, cfg_feat):
+    """(n, 1) ``align_feature`` on the record, with the bearing in the frame the stimulus block
+    uses (``phi_ref``)."""
+    phi = getattr(rec, "stim_angle_travel", None) if cfg_feat.get("phi_ref", "ori") == "travel" else None
+    phi = np.asarray(phi if phi is not None else rec.stim_angle, float)
+    n = rec.n
+    return align_feature(phi, np.asarray(getattr(rec, "dot_dist_px", np.full(n, np.nan)), float),
+                         np.asarray(rec.moving, float),
+                         np.asarray(getattr(rec, "n_dots", np.zeros(n)), float)).reshape(n, 1).astype(np.float32)
+
+
+def _runclock_block(rec, cfg_feat):
+    """(n, 1) RUN CLOCK: ``exp(-run_pos / tau)`` -- 1 on the first bout after a > 10 s pause, gone
+    within ~3 tau bouts, the same construction as the block clocks above.
+
+    MEASURED (Data_cleanup_final.ipynb, step 5): masking the dead states removes the pauses but
+    not their aftermath -- for the first ~60 bouts of a run the fish is slower (median dt +0.21 s,
+    13/15 fish), takes shorter steps (-2.8 px, 13/15) and sits more centrally (r/R 0.41 vs 0.54,
+    14/15) before it settles. Those are all ACTIVE bouts, 40 % of them within 60 bouts of a run
+    start, and nothing told the model where they are: the lag-validity channel marks the first
+    K = 8 bouts and is flat afterwards. A rollout is one run, so the generator uses exp(-t / tau)
+    (``generate_mix_joint``) -- the transient is generated once, at t = 0, and the steady-state
+    comparison is then made like for like (``generative_metrics.INTERIOR``)."""
+    n = rec.n
+    tau = float(cfg_feat["run_clock_tau"])
+    rp = getattr(rec, "run_pos", None)
+    pos = np.arange(n) if rp is None else np.asarray(rp, float)
+    return np.exp(-pos / tau).reshape(n, 1).astype(np.float32)
 
 
 def _kin_history_block(rec, cfg_feat):
@@ -462,19 +923,68 @@ def _kin_history_block(rec, cfg_feat):
     dm, ds, tm, ts = cfg_feat["kin_scales"]          # (dist log-mean, dist log-std, dt log-mean, dt log-std)
     dist = np.asarray(rec.distance_px, float); dtv = np.asarray(rec.dt_s, float)
     ldist = np.nan_to_num((np.log(np.clip(dist, 1e-6, None)) - dm) / ds)   # last-bout NaN -> 0 (= mean)
-    ldt = np.nan_to_num((np.log(np.clip(dtv, 1e-6, None)) - tm) / ts)
     n = len(dist)
     H = np.zeros((n, 2 * Kk), dtype=np.float32)
-    for k in range(1, Kk + 1):
-        H[k:, k - 1] = ldist[:-k]                     # cols 0..Kk-1   = prev log-distance (lags 1..Kk)
-        H[k:, Kk + k - 1] = ldt[:-k]                  # cols Kk..2Kk-1 = prev log-dt
+    if cfg_feat.get("kin_dt_lags", True) == "centred":
+        # CENTRED INTERVAL LAGS: each previous interval as its DEVIATION from the fish's own running
+        # level -- an EMA of its past log intervals (tau `kin_dt_ema` bouts, init at the population
+        # mean), computed identically on the emitted series in the generator. "Long relative to
+        # what this fish does now" is what predicts the next interval; the level itself goes only
+        # through z and the slow state, so a long interval can no longer reinforce the level in the
+        # loop (the clustering Models 2-8 measured) while the real 0.07 bout-to-bout dependence,
+        # which Model 9 lost by dropping the lags outright, is kept.
+        lev = kin_dt_level(dtv, tm, float(cfg_feat.get("kin_dt_ema", KIN_DT_EMA)))
+        lraw = np.log(np.clip(dtv, 1e-6, None))
+        lraw = np.where(np.isfinite(lraw), lraw, lev)              # NaN -> deviation 0
+        for k in range(1, Kk + 1):
+            H[k:, k - 1] = ldist[:-k]
+            H[k:, Kk + k - 1] = (lraw[:-k] - lev[k:]) / ts          # deviation from the CURRENT level
+    else:
+        ldt = np.nan_to_num((np.log(np.clip(dtv, 1e-6, None)) - tm) / ts)
+        for k in range(1, Kk + 1):
+            H[k:, k - 1] = ldist[:-k]                 # cols 0..Kk-1   = prev log-distance (lags 1..Kk)
+            H[k:, Kk + k - 1] = ldt[:-k]              # cols Kk..2Kk-1 = prev log-dt
     rp = getattr(rec, "run_pos", None)
     if rp is not None:                                # never reach across a quiescence gap
         rp = np.asarray(rp)
         for k in range(1, Kk + 1):
             H[rp < k, k - 1] = 0.0
             H[rp < k, Kk + k - 1] = 0.0
+    if not cfg_feat.get("kin_dt_lags", True):
+        # INTERVAL LAGS OFF. Measured (Models 2-8): the interval lags carry the fish's tempo LEVEL
+        # under teacher forcing (the latent recovered ~20% of the real between-fish interval spread
+        # vs ~50% for step), and in the free run the inflated coefficients turn one long interval
+        # into a run of them -- within-window lag-1 acf 0.12 vs real 0.07, per-window interval
+        # spread 20% wide, unchanged by any gain or state. Real bout-to-bout interval dependence is
+        # only 0.07, so dropping the lags loses almost nothing; the level then goes through z and
+        # the slow state alone. Step lags stay (they came out honest: acf 0.196 vs 0.198).
+        return H[:, :Kk]
     return H
+
+
+def kin_width(cfg_feat):
+    """Width of the kinematic history block (step lags + optional interval lags; 'centred' keeps
+    the width)."""
+    Kk = int(cfg_feat.get("K_kin", cfg_feat["K"]))
+    return Kk * (2 if cfg_feat.get("kin_dt_lags", True) else 1)
+
+
+KIN_DT_EMA = 250.0        # bouts; the level is a SLOW average (~4 windows), well above the drift's tau
+
+
+def kin_dt_level(dt_s, tm, tau=KIN_DT_EMA):
+    """(n,) the fish's running log-interval level BEFORE each bout: an EMA of its past log
+    intervals with time constant ``tau`` bouts, initialised at the population mean ``tm``. Past
+    only, so bout t's own interval never enters its own input; NaN intervals leave it unchanged."""
+    lraw = np.log(np.clip(np.asarray(dt_s, float), 1e-6, None))
+    a = 1.0 / max(float(tau), 1.0)
+    lev = np.empty(len(lraw))
+    e = float(tm)
+    for t in range(len(lraw)):
+        lev[t] = e
+        if np.isfinite(lraw[t]):
+            e += a * (lraw[t] - e)
+    return lev
 
 
 def build_feature_sequences(records, cfg_feat):
@@ -489,7 +999,7 @@ def build_feature_sequences(records, cfg_feat):
 # =========================================================================== #
 #  NOISE AUGMENTATION -- perturb the POSE, correct the target back to the truth
 # =========================================================================== #
-_NOISE_STIM_OK = ("none", "dot", "dotb", "shoal", "shoalr", "shoalf")
+_NOISE_STIM_OK = ("none", "dot", "dotb") + M.POP_MODES + M.SHOAL_MODES   # pop: positions pass through, the block re-derives
 
 # Sized by measurement, not by analogy. The knob trades COVERAGE of drifted states against
 # DISTORTION of the conditional the model is meant to learn, and the two pull in opposite
