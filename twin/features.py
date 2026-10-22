@@ -1,19 +1,16 @@
-"""Border-aware MLP density model (per-bout) -- a drop-in variant of ``fit_MLP``.
+"""The model's input row and the dish.
 
-Mirrors ``scripts/fit_MLP.py`` (same ``basic``/``full`` MDN, same ``stim_mode='simple'``
-stimulus scalar) but adds a physical-dish **border covariate** to every input row:
+``build_border_records`` turns the bout table into per-fish records with the physical dish geometry;
+``build_feature_matrix`` builds a record's input matrix, block by block (each when its ``cfg_feat`` key is on):
 
-    [dist_to_border_norm, sin(psi), cos(psi)]
+    turn history | stimulus code (stimulus.py) | wall: distance to the wall and bearing to the dish centre |
+    step and interval history | lag-valid flag | block clock | run clock | aligned-and-far input |
+    static-dot block | dot-jump phase | dot direction of motion
 
-where ``psi`` is the egocentric bearing from the fish to the physical dish centre
-(``psi = wrap(atan2(cy - y, cx - x) - f_ori)``) -- exactly analogous to the stimulus
-bearing ``b = sin(phi)``. Distance alone can't say *which way* to turn; the sin/cos of
-the inward bearing supply the direction.
-
-Everything numerical (MDN, training loop, scoring/gamma maths, numpy predictor) is
-reused from ``fit_MLP``; only the feature-assembly path and the record builder are new,
-so ``fit_MLP.py`` and ``evaluate.py`` are untouched. Use ``MLPBorderDensity`` next to
-``fit_MLP.MLPDensity`` in the same evaluate harness to A/B the wall covariate.
+The generator (``joint.generate_mix_joint_loop``) rebuilds the same row from a generated pose with the per-row
+helpers here (``border_channels``, ``align_feature``, ``jump_channels``, ``dmove_rows``, ...). Also: the per-bout
+regime weights of the x3 turn weight (``regime_weights``), the stimulus blocks' onsets (``block_onsets``), and the
+dish geometry of a rollout (``advance``: the step clipped at the wall; ``accept_prob``: the shallow-rim rejection).
 """
 from __future__ import annotations
 
@@ -22,7 +19,7 @@ import numpy as np
 
 from twin import evaluate as E
 from twin import paths
-from twin import fit_MLP as M
+from twin import stimulus as M
 from twin.segment_bouts import load_physical_dish
 
 # raw physical ROIdef (true 100 mm dish geometry) -> per-fish (cx, cy, radius)
@@ -140,7 +137,7 @@ def build_border_records(df, roi_path=_DEFAULT_ROI, min_len=10, active_only=True
 
 
 # =========================================================================== #
-#  Feature builder -- fit_MLP's blocks + the new border block (same chokepoint)
+#  Feature builder -- stimulus's blocks + the new border block (same chokepoint)
 # =========================================================================== #
 # ---- border basis: distance-tuned wall avoidance (border_mode='basis') ---- #
 # Measured: real fish turn toward the dish centre on 71-73% of bouts inside the wall shell
@@ -589,7 +586,7 @@ def regime_weights(rec, w_onset=8.0, w_pursuit=8.0, onset_bouts=4, pursuit_deg=3
 def build_feature_matrix(rec, cfg_feat):
     """(n, D) input matrix of a record: turn history, stimulus code, wall block, kinematic history, lag flag,
     block clock, run clock, aligned-and-far input, static block, jump phase, dot direction -- each when its
-    ``cfg_feat`` key is on. Column order MUST match the generator's row (``fit_MLP_joint.generate_mix_joint_loop``)."""
+    ``cfg_feat`` key is on. Column order MUST match the generator's row (``joint.generate_mix_joint_loop``)."""
     off = [k for k in ("include_symbols", "use_adapt", "stim_static_clock", "stim_static_bump", "stim_onset",
                        "stim_lags") if cfg_feat.get(k)]
     if off or int(cfg_feat.get("K_stim", 1)) > 1:
@@ -620,7 +617,7 @@ def build_feature_matrix(rec, cfg_feat):
 
 
 def _static_block(rec, cfg_feat):
-    """(n, 8) ``fit_MLP.static_channels`` on the record (bearing in the ``phi_ref`` frame)."""
+    """(n, 8) ``stimulus.static_channels`` on the record (bearing in the ``phi_ref`` frame)."""
     phi = getattr(rec, "stim_angle_travel", None) if cfg_feat.get("phi_ref", "ori") == "travel" else None
     phi = np.asarray(phi if phi is not None else rec.stim_angle, float)
     n = rec.n

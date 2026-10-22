@@ -12,7 +12,7 @@ the statistic in the "acf" column of tab:drift.
     A fish's simulated value is already the mean over the panel's R = 20 rollouts of that fish
     (``panel_for_fish``, rollout_model1_local.run(R=20)). Seeds are never pooled.
   * Each panel carries a small tag: a, b = calibration target of the drift gains (the rollout
-    search in fit_MLP_mix._search_drift_gain matches exactly these two statistics, flat windows on
+    search in emission._search_drift_gain matches exactly these two statistics, flat windows on
     training fish), c = not a target. Legend seed handles are errorbar containers so they show the
     solid / dashed bar.
 
@@ -46,7 +46,7 @@ CHANS = [("dt", "Log interval"), ("dist", "Log displacement"), ("rad", "Radial p
          ("turn", "Turn magnitude")]
 TURN_CSV = paths.FIG_CACHE / "cache" / "fig_slow_turn.csv"
 # The drift's interval and displacement gains were picked by a rollout search that matches exactly
-# this statistic (flat windows, training fish; fit_MLP_mix._search_drift_gain, Methods sec:m-drift);
+# this statistic (flat windows, training fish; emission._search_drift_gain, Methods sec:m-drift);
 # the radial channel is reported there, never optimised. Panels a, b are therefore calibration
 # targets carried over to held-out fish, panel c is not -- the figure says so in each panel.
 TARGET = {"dt": "calibration target\nof the drift gains", "dist": "calibration target\nof the drift gains",

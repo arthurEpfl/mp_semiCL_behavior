@@ -12,7 +12,7 @@ get their own range x bearing block (``static_channels``). The codes of the thes
     <code>_rzlo   the same code with the log range clipped at the 2 px floor instead of 17.5 px
 
 Every channel is 0 on bouts without dots and O(1) by construction. ``_stim_block`` builds a record's block (training,
-scoring) and ``fit_MLP_mix._dot_stim_row`` one row from a generated pose (closed-loop rollouts), through the same
+scoring) and ``emission._dot_stim_row`` one row from a generated pose (closed-loop rollouts), through the same
 ``shoal_channels``.
 """
 
@@ -91,7 +91,7 @@ def shoal_cols(stim_mode):
 
 def shoal_kw(stim_mode):
     """The ``shoal_channels`` keyword set of a code -- ONE place, read by the record builder (``_stim_block``) and the
-    closed-loop row (``fit_MLP_mix._dot_stim_row``) alike."""
+    closed-loop row (``emission._dot_stim_row``) alike."""
     if stim_mode.endswith(RZLO_SUFFIX):                  # base mode's keywords + rz clipped at the 2 px floor
         return dict(shoal_kw(stim_mode[:-len(RZLO_SUFFIX)]), rz_lo=RZ_LO_FLOOR)
     if stim_mode in ("shoal_simple", "shoal_int", "shoal_rx"):
@@ -115,7 +115,7 @@ def shoal_kw(stim_mode):
 def shoal_channels(phi, r_px, n_dots, moving, use_n=True, single_knot=False, products=True, range_products=False,
                    moving_cols=True, null=False, use_range=True, cond_only=False, rz_lo=-1.0):
     """The stimulus channels of a code (``shoal_kw``), column order ``shoal_cols``. Vectorised AND scalar-safe, so
-    ``_stim_block`` (record arrays, train / score time) and ``fit_MLP_mix._dot_stim_row`` (ONE row rebuilt from the
+    ``_stim_block`` (record arrays, train / score time) and ``emission._dot_stim_row`` (ONE row rebuilt from the
     GENERATED pose during a closed-loop rollout) share this single code path.
 
     phi     egocentric bearing to the ACTIVE-DOT CENTROID (rad, + = fish's left); NaN when no dot is active.
@@ -191,7 +191,7 @@ def static_channels(phi, r_px, n_dots, moving):
     bearing products are shared between conditions and only ``mv_sin`` / ``mv_cos`` are
     condition-specific, so a static law could only be the moving law minus those two terms, never
     a sign flip. Same basis, same conventions and the same scalar-safe path as ``shoal_channels``,
-    so the generator's closed-loop row (``fit_MLP_joint``) and the record block agree by
+    so the generator's closed-loop row (``joint``) and the record block agree by
     construction."""
     phi = np.atleast_1d(np.asarray(phi, float))
     r = np.atleast_1d(np.asarray(r_px, float))
@@ -268,13 +268,13 @@ def _stim_block(rec, stim_mode, rich_scales=None, phi_ref="ori"):
     if phi_ref == "travel":
         if getattr(rec, "stim_angle_travel", None) is None:
             raise RuntimeError("phi_ref='travel' needs rec.stim_angle_travel "
-                               "(bouts CSV via fit_MLP_border.build_border_records).")
+                               "(bouts CSV via features.build_border_records).")
         _phi = np.asarray(rec.stim_angle_travel, float)
     else:
         _phi = np.asarray(rec.stim_angle, float)
     if getattr(rec, "dot_dist_px", None) is None or getattr(rec, "n_dots", None) is None:
         raise RuntimeError(f"stim_mode={stim_mode!r} needs rec.dot_dist_px and rec.n_dots "
-                           "(fit_MLP_border.build_border_records).")
+                           "(features.build_border_records).")
     return shoal_channels(_phi, rec.dot_dist_px, rec.n_dots, np.asarray(rec.moving, float), **shoal_kw(stim_mode))
 
 

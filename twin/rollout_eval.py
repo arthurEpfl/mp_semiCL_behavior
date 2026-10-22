@@ -142,8 +142,8 @@ def _one(args_):
     import torch
     torch.set_num_threads(1)                     # see SPEED above
     from twin import evaluate as E
-    from twin import fit_MLP_border as MB
-    from twin import fit_MLP_mix as MX
+    from twin import features as MB
+    from twin import emission as MX
     from twin import generative_metrics as GM
     recs = _RECS if (_RECS := globals().get("_RECS")) else None
     if recs is None:
@@ -175,7 +175,7 @@ def _profile_one(args_):
     ckpt, k, r, cfg_override = args_
     import torch
     torch.set_num_threads(1)
-    from twin import fit_MLP_mix as MX
+    from twin import emission as MX
     from twin import model_figures as MF
     m = MX.load_mix(str(ckpt))
     if cfg_override:
@@ -244,7 +244,7 @@ def _run(args):
         raise ValueError("skip_panel with c2st_reps=0 would compute nothing at all")
 
     import torch
-    from twin import fit_MLP_mix as MX
+    from twin import emission as MX
     # Colab pickles under numpy 2 ("numpy._core"); a local numpy 1 cannot find that module and
     # torch.load dies. The WORKERS get the shim for free via load_mix, but this parent-side read
     # of `rollout_seed` does not -- so the run failed before a single rollout started, purely on

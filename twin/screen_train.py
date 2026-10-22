@@ -76,7 +76,7 @@ def _install_models():
         if key not in TT._SIM_CACHE:
             import contextlib
             import io
-            from twin import fit_MLP_border as MB
+            from twin import features as MB
             from twin import model_figures as MF
             MB.DISH_MM = 2.0 * TT.R_MM
             TT._sim_setup()
@@ -168,7 +168,7 @@ def fold(seed, k, arm, outdir, smoke=False):
     outdir = Path(outdir); outdir.mkdir(parents=True, exist_ok=True)
     from twin import registry
     from twin import training as T
-    from twin import fit_MLP_border as MB
+    from twin import features as MB
     z = np.load(TABLE, allow_pickle=False)
     df = pd.DataFrame({c: z[c] for c in z.files})
     fish = sorted(df.fish_id.unique())

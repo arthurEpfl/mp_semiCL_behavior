@@ -12,7 +12,7 @@ Everything in the thesis is reproduced by the notebooks in `notebooks/`, from th
 
 | Path | What it holds |
 |---|---|
-| `twin/` | the library: preprocessing (`segment_bouts`, `cleaning`), the models (`fit_MLP*`), training (`training`, `profile_finetune`, `correction`), simulation (`stim_rollout`, `rollout_*`), evaluation (`unit_eval`, `rollout_eval`, `generative_metrics`, `model_figures`, `tables`), the analyses beyond the data (`missing_pieces`, `two_targets`, `multi_fish`, the `screen_*` modules) |
+| `twin/` | the library: preprocessing (`segment_bouts`, `cleaning`), the models (`stimulus`, `features`, `emission`, `joint`, `latent`), training (`training`, `profile_finetune`, `correction`), simulation (`stim_rollout`, `rollout_*`), evaluation (`unit_eval`, `rollout_eval`, `generative_metrics`, `model_figures`, `tables`), the analyses beyond the data (`missing_pieces`, `two_targets`, `multi_fish`, the `screen_*` modules) |
 | `twin/registry.py` | every thesis model: its name, recipe, seeds and checkpoint folder |
 | `twin/paths.py` | where the data, the trained models and every result live |
 | `figures/` | one script per thesis figure, writing `figures/out/<name>.pdf` |

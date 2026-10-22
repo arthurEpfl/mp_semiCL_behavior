@@ -51,8 +51,8 @@ def _windows_job(job):
     import torch
     torch.set_num_threads(1)
     from twin import evaluate as E
-    from twin import fit_MLP_border as MB
-    from twin import fit_MLP_mix as MX
+    from twin import features as MB
+    from twin import emission as MX
     from twin import generative_metrics as GM
     recs = MB.build_border_records(E.load_bouts())
     m = MX.load_mix(str(ckpt))

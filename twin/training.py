@@ -16,13 +16,13 @@ import pandas as pd
 import torch
 
 from twin import evaluate as E
-from twin import fit_MLP_border as MB
-from twin import fit_MLP_fishre as FR
-from twin import fit_MLP_joint as JT
-from twin import fit_MLP_mix as MX
+from twin import features as MB
+from twin import latent as FR
+from twin import joint as JT
+from twin import emission as MX
 from twin import registry
 
-# stimulus codes (registry recipe ``rep``) -> the feature builder's stimulus mode (fit_MLP_border)
+# stimulus codes (registry recipe ``rep``) -> the feature builder's stimulus mode (features)
 REPS = {"S0": "shoal_simple",   # 6  presence, motion, log count, log range, bearing sin / cos
         "S4i": "shoal_int",     # 9  + count x sin, moving x sin, moving x cos
         "S4x": "shoal_rx",      # 14 + range x bearing per condition, linear in log range
@@ -48,8 +48,8 @@ FIT = dict(epochs=80, patience=8, batch_size=1024, lr=2e-3, gain_grid="wide_up")
 
 def make_model(r, seed, epochs=FIT["epochs"], patience=FIT["patience"], batch_size=FIT["batch_size"],
                lr=FIT["lr"], gain_grid=FIT["gain_grid"]):
-    """The unfitted model of recipe ``r`` (``registry.recipe``): the joint model (``fit_MLP_joint``), or with a
-    per-fish latent (``latent`` > 0) the random-effect model (``fit_MLP_fishre``), whose wall rejection is baked in so
+    """The unfitted model of recipe ``r`` (``registry.recipe``): the joint model (``joint``), or with a
+    per-fish latent (``latent`` > 0) the random-effect model (``latent``), whose wall rejection is baked in so
     that the latent's loading-gain search rolls out under the wall rule used in evaluation."""
     kw = dict(BASE, stim_mode=REPS[r["rep"]], head_order="adt", epochs=epochs, patience=patience,
               batch_size=batch_size, lr=lr, seed=seed, dt_trunc=r["dt_trunc"],

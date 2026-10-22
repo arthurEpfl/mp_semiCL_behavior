@@ -41,7 +41,7 @@ def _ckpt_dir(d):
 
 def _records():
     from twin import evaluate as E
-    from twin import fit_MLP_border as MB
+    from twin import features as MB
     return MB.build_border_records(E.load_bouts())
 
 
@@ -94,7 +94,7 @@ def _job(job):
     ckpt, fid, rej, reps, seed = job
     import torch
     torch.set_num_threads(1)
-    from twin import fit_MLP_mix as MX
+    from twin import emission as MX
     from twin import generative_metrics as GM
     recs = _records()
     rec = recs[fid]
@@ -173,7 +173,7 @@ def profile_pause_split(recs=None, within_s=(20.0, 60.0)):
     at its start or end), per condition: bouts and the mean distance to the dots early (0-20 s) and
     late (20-60 s). The dot-profile plot pools both; a never-pausing model is like-for-like with the
     fully active blocks only."""
-    from twin import fit_MLP_border as MB
+    from twin import features as MB
     recs = recs or _records()
     rows = []
     for f, rec in recs.items():

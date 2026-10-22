@@ -1,9 +1,9 @@
 """Rollout-time INPUT ABLATION for the fitted models: switch stimulus input groups off in the
 generator's own feature row, same weights, no retraining.
 
-The closed-loop generator (``fit_MLP_joint.generate_mix_joint_loop``) rebuilds the stimulus columns
-per bout through three module-level functions -- ``fit_MLP.shoal_channels`` (the 18 shoal columns),
-``fit_MLP.static_channels`` (the 8 static-dot columns) and ``fit_MLP_border.align_feature`` (the
+The closed-loop generator (``joint.generate_mix_joint_loop``) rebuilds the stimulus columns
+per bout through three module-level functions -- ``stimulus.shoal_channels`` (the 18 shoal columns),
+``stimulus.static_channels`` (the 8 static-dot columns) and ``features.align_feature`` (the
 aligned-and-far column) -- looked up by module attribute at call time. ``zero_inputs`` rebinds them
 for the duration of a ``with`` block, zeroing the named columns, so every rollout inside the block
 sees the model as if those inputs did not exist. The record-side builders call the same functions,
@@ -25,13 +25,13 @@ import contextlib
 import numpy as np
 import pandas as pd
 
-from twin import fit_MLP as M  # noqa: E402
-from twin import fit_MLP_border as MB  # noqa: E402
+from twin import stimulus as M  # noqa: E402
+from twin import features as MB  # noqa: E402
 
 
 @contextlib.contextmanager
 def zero_inputs(shoal_cols=(), align=False, static=False, stim_mode="shoal"):
-    """Zero the named shoal columns (names from ``fit_MLP.shoal_cols(stim_mode)``), the align column
+    """Zero the named shoal columns (names from ``stimulus.shoal_cols(stim_mode)``), the align column
     and/or the whole static block for every feature row built inside the block."""
     names = M.shoal_cols(stim_mode)
     unknown = [c for c in shoal_cols if c not in names]

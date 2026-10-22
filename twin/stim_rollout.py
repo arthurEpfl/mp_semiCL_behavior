@@ -6,7 +6,7 @@ run on a stimulus that was never recorded: ``rec.dot_cx[t]`` is indexed by BOUT 
 before the rollout starts, while a programme is indexed by wall-clock FRAME and the bout times are
 themselves generated. :class:`ProgramStimProvider` closes that loop -- it is handed the live clock
 and pose each bout and resolves the programme on the spot (the ``stim_provider`` hook in
-``fit_MLP_joint.generate_mix_joint_loop``).
+``joint.generate_mix_joint_loop``).
 
 Because ``CLsemi`` anchors the dot track to the fish's pose at block onset, and here that fish is
 the simulated one, this is a genuine semi-closed-loop simulation: the same programme gives a
@@ -24,7 +24,7 @@ from pathlib import Path
 
 import numpy as np
 
-from twin import fit_MLP_joint as JT
+from twin import joint as JT
 from twin import paths
 from twin.segment_bouts import load_physical_dish
 
@@ -308,7 +308,7 @@ def rollout_program(model, program, rng, start_pose, dish, fish_id=0, n_max=None
     if not isinstance(model, JT.MLPMixJointDensity):
         raise TypeError(
             f"{type(model).__name__} is not a joint-family model. Programme rollouts need the "
-            "stim_provider hook in fit_MLP_joint.generate_mix_joint_loop (J10 / J17 lineage: "
+            "stim_provider hook in joint.generate_mix_joint_loop (J10 / J17 lineage: "
             "MLPMixJointDensity, MLPMixJointREDensity).")
     T = program.duration_s
     if n_max is None:

@@ -1,52 +1,16 @@
-"""Joint-likelihood bout model: one feature vector, one body, chained heads.
+"""The joint bout model: one input row, one body, three chained heads.
 
-WHAT IS DIFFERENT FROM ``fit_MLP_mix.MLPMixKinDensity``, and why it is worth measuring.
+A bout's turn, step and interval are emitted in that order, each head conditioned on what was drawn before it in
+the same bout:
 
-1. THE FACTORISATION MATCHES THE DATA. The kin model trains
-   ``p(dtheta|x_ang) . p(l|x_kin) . p(tau|x_kin, l)`` -- the distance head sees no turn angle at
-   all, and neither does the dt head. Here the emission is the full chain
+    L = -[ log p(dtheta | x) + log p(l | x, dtheta) + log p(tau | x, dtheta, l) ]
 
-       L = -[ log p(dtheta | x) + log p(l | x, dtheta) + log p(tau | x, dtheta, l) ]
-
-   so each channel is conditioned on everything sampled before it within the same bout.
-
-2. ONE FEATURE VECTOR. The kin model hard-codes ``use_kin=False`` and builds a SEPARATE 6-column
-   kin trunk, so the angle body never sees kinematic history and the kin trunk never sees the
-   stimulus, the border or the turn history. Here ``use_kin=True`` puts everything in one ``x``
-   that a single shared body consumes -- ``MB.build_feature_matrix`` already supports this, the
-   switch was simply never flipped.
-
-3. METRIC A COVERS ALL THREE CHANNELS. ``MLPMixKinDensity`` inherits a ``score`` that evaluates
-   only the angle mixture, so about two thirds of the fitted emission is optimised against a
-   likelihood that is never reported. ``score`` here returns ``logdens`` (angle, same key as
-   before) plus ``logdens_dist`` and ``logdens_dt``.
-
-DELIBERATELY ABSENT: vigor, artr, kin_feedback, kin_var_comp, qmap, indiv, innov_comp. This is a
-clean baseline, not the accumulated lineage. ``contain`` is available because it corrects the
-radial OCCUPANCY distribution; the thing that actually keeps the fish in the dish is the
-``guardrail``, which is on regardless and is not a "fix".
-
-CONDITIONER CONVENTION. The heads receive ``|dtheta|``, not signed dtheta: left and right should
-not change step size or timing by symmetry, and feeding the sign would break a symmetry the angle
-mixture otherwise enforces. Every conditioner is scaled the same way the corresponding history
-block is (``/dth_scale``, and centred by ``kin_scales``) so the heads see inputs on the scale they
-were trained at.
-
-HEAD ORDER (``head_order``, default ``"a,d,t"`` = the chain written above). The chain rule is exact
-in all SIX orderings of (dtheta, distance, dt), so they all target the same joint density and their
-summed bits/bout ARE comparable. What differs is CAPACITY: a channel emitted first is predicted
-from ``x`` alone, a channel emitted last sees the other two outcomes of the same bout. Which
-ordering wins is therefore an empirical question, and the EDA points at ``t`` first -- |dtheta|
-scales with the time the bout spans (rho = 0.17) while distance barely does (rho = -0.01), so
-"draw the interval, then turn and travel within it" may be the cheaper description.
-
-``"a,d,t"`` is bit-identical to the pre-ordering code, RNG draw for RNG draw, and is what every
-archived checkpoint reloads as. A head at position ``i`` is a ``Linear(hidden + i, ...)``; the
-conditioners are appended in the ordering's own order, so position is the only thing that changes.
-
-COMPARABILITY WARNING: because the angle body now also reads kinematic history, this model's
-angle ``bits_per_bout`` is NOT comparable to the historical turn-only series from the kin zoo.
-Within this family it is fine.
+the turn a 5-component mixture (``emission``), the step and the interval log-normal mixtures (the interval
+optionally truncated at 10 s). ``MLPMixJointDensity`` fits it (``fit_mix_joint``), scores held-out fish and
+generates with ``generate_mix_joint_loop``: the closed-loop rollout from the model's own pose, with the wall
+rejection, the per-fish latent and the drift (``latent``), the stimulus from a provider (a recorded programme, a
+new programme, other simulated fish) and the multi-group rules (``MULTI_RULES``). Also here: the profile
+correction's term (``StimTurnTermV5``) and the group repulsion term (``grouprep_shifts``).
 """
 from __future__ import annotations
 
@@ -57,9 +21,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from twin import evaluate as E                    # noqa: E402
-from twin import fit_MLP as M                     # noqa: E402
-from twin import fit_MLP_border as MB             # noqa: E402
-from twin import fit_MLP_mix as MX                # noqa: E402
+from twin import stimulus as M                     # noqa: E402
+from twin import features as MB             # noqa: E402
+from twin import emission as MX                # noqa: E402
 
 
 
@@ -1769,7 +1733,7 @@ class MLPMixJointDensity(MX.MLPMixLoopDensity):
         # epochs_override / patience_override are how colab_run_ladder's --force-epochs runs a PAIRED
         # budget contrast inside one select. They were read only from ctx.cfg here, so they never
         # reached any joint rung and a budget ladder silently ran both arms at the same budget.
-        # Same precedence as MLPMixKinDensity.fit (fit_MLP_mix.py:1552).
+        # Same precedence as MLPMixKinDensity.fit (emission.py:1552).
         self.epochs = int(getattr(self, "epochs_override", None)
                           if getattr(self, "epochs_override", None) is not None
                           else c.get("mlp_epochs", self.epochs))

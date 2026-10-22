@@ -253,7 +253,7 @@ def _stim_kw(model, rec, reanchor=None):
             and getattr(model, "stim_loop", False) and int(cf.get("K_stim", 1)) == 1
             and getattr(rec, "frame_onset", None) is not None):
         return {}
-    from twin import fit_MLP_mix as MX
+    from twin import emission as MX
     if cf.get("stim_mode") not in MX.ONLINE_STIM_MODES:
         return {}
     prog = eval_program()
@@ -307,10 +307,10 @@ def _time_in_block(rec):
     shoal is PLACED relative to the real fish at block onset, so early-block fish-to-shoal
     distance is an initial condition, not behaviour.
 
-    Delegates to ``fit_MLP_border.block_onsets``, which is also what the K_stim FEATURES are
+    Delegates to ``features.block_onsets``, which is also what the K_stim FEATURES are
     built from -- so the block structure a model is told about and the block structure this
     metric judges it on cannot drift apart."""
-    from twin import fit_MLP_border as _MB
+    from twin import features as _MB
     start_fr, _bid, fr = _MB.block_onsets(rec, fps=_FPS)
     return (fr - start_fr) / _FPS         # ONE division: bit-identical to the pre-refactor code
 

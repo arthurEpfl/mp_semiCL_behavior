@@ -25,8 +25,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 from twin import evaluate as E
-from twin import fit_MLP_border as MB
-from twin import fit_MLP_mix as MX
+from twin import features as MB
+from twin import emission as MX
 from twin import generative_metrics as GM
 from twin import paths
 from twin import stim_program as SP
@@ -652,7 +652,7 @@ def dot_profile(ckpt_dir, arm, rej=REJ_BAND, r_per_model=3, band="sem"):
 # Everything here is either the real data cut a different way or the FIT read at the real feature rows
 # (no rollout): Metric-C style, so a difference is the model's law, not rollout noise.
 import torch                                    # noqa: E402
-from twin import fit_MLP_joint as JT                     # noqa: E402
+from twin import joint as JT                     # noqa: E402
 
 CI_Z = 1.96
 AQUA, GREEN, PURPLE = "#1baf7a", "#4c9a52", "#9b59b6"

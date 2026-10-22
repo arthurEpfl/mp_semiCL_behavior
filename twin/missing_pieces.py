@@ -74,7 +74,7 @@ _REC = {}
 def records():
     if "r" not in _REC:
         from twin import evaluate as E
-        from twin import fit_MLP_border as MB
+        from twin import features as MB
         with contextlib.redirect_stdout(io.StringIO()):
             _REC["r"] = MB.build_border_records(E.load_bouts())
     return _REC["r"]
@@ -95,7 +95,7 @@ def folds_of(d, arm):
 
 
 def load_model(d, file, rej=True):
-    from twin import fit_MLP_mix as MX
+    from twin import emission as MX
     with contextlib.redirect_stdout(io.StringIO()):
         MX._numpy2_unpickle_compat()
         m = MX.load_mix(str(_ckpt(d) / file))

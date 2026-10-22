@@ -1,7 +1,7 @@
 """Several simulated fish in one dish, each seeing the others as moving dots: do they shoal?
 
 The data never show a fish another fish, so this is an extrapolation of the dot response. Every fish runs the trained
-generator unchanged (``fit_MLP_joint.generate_mix_joint_loop``, multi-group mode); only its stimulus provider is new:
+generator unchanged (``joint.generate_mix_joint_loop``, multi-group mode); only its stimulus provider is new:
 at each bout onset it reads where the OTHER fish are and turns them into dot groups.
 
 COUPLING. One thread per fish around the unchanged generator. The generator asks its provider for the stimulus exactly
@@ -18,7 +18,7 @@ values, not a property of the model. In the training dish it hides only the rare
 agglomerative, closest centroids first, a merge kept only while every member stays within the spread a trained dot group
 of that size had (ENV_PX: farthest moving dot from its centroid over the whole programme). A group's count is its size,
 capped at 8 (the network does NOT clip the count above 8 itself). The groups are combined by the two-group rules
-('effects' = each group's effect added; 'nearest' = the nearest group only; ``fit_MLP_joint.MULTI_RULES``).
+('effects' = each group's effect added; 'nearest' = the nearest group only; ``joint.MULTI_RULES``).
 
 DISH. The 5x dish passes its own (cx, cy, R) everywhere. Every wall mechanism of the model is relative to R (the wall input
 (R - r)/R and the bearing to the centre, the 2-10 mm rejection band, the forbidden ring, start poses at the same r/R), so

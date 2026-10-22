@@ -28,8 +28,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from twin import fit_MLP as M                      # noqa: E402
-from twin import fit_MLP_border as MB              # noqa: E402
+from twin import stimulus as M                      # noqa: E402
+from twin import features as MB              # noqa: E402
 
 _UNSUPPORTED = ("dt_latent", "vigor", "indiv", "kin_innov", "kin_feedback", "dt_snap", "stim_onset",
                 "stim_static_clock", "stim_static_bump", "stim_lags", "rad_gate", "use_adapt")
@@ -58,7 +58,7 @@ def _check_scope(model, cfg):
         bad.append("net state / dt_latent / body path / border gain")
     if not model.closed_loop or not model.guardrail or not model.stim_loop:
         bad.append("open-loop / no guardrail")
-    from twin import fit_MLP_joint as JT
+    from twin import joint as JT
     if tuple(JT.parse_order(getattr(net, "order", None))) != tuple(JT.parse_order("adt")):
         bad.append(f"head order {getattr(net, 'order', None)}")
     if bad:
@@ -395,7 +395,7 @@ def rollout_starts(model, batch, M_, seed, step, zmap, crn=1, chunk=2048):
     """``profile_finetune.rollout_starts``, batched: the same trajectories (M per block start, odd ones from the
     warm-up variant when it exists), the same per-rollout dicts, in the same order."""
     from twin.profile_finetune import PX_TO_MM, _binned
-    from twin import fit_MLP_joint as JT
+    from twin import joint as JT
     cf = model._cfg_feat
     jobs = []
     for s in batch:

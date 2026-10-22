@@ -1,4 +1,4 @@
-"""The GROUP REPULSION term (fit_MLP_joint.grouprep_shifts) on F: calibration on the Larsch screen, the variants, the
+"""The GROUP REPULSION term (joint.grouprep_shifts) on F: calibration on the Larsch screen, the variants, the
 held-out screen test and the held-out likelihood on our own recordings (2026-10-18, Final_report_shoaling.ipynb).
 
 One representation for attraction and repulsion: the dot groups the network sees. Each visible moving group's term is

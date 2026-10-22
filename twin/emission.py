@@ -19,8 +19,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from twin import evaluate as E
-from twin import fit_MLP as M
-from twin import fit_MLP_border as MB
+from twin import stimulus as M
+from twin import features as MB
 
 _LOG2PI = float(math.log(2.0 * math.pi))
 
@@ -91,7 +91,7 @@ def mix_logdens(dtheta, params):
 
 def symbol_logq_mix(w, sF, aL1, tL1, aL2, tL2, aR1, tR1, aR2, tR2, dtheta0=None, eps=1e-300):
     """(n,3) predictive log-PMF over {F,L,R}: integrate each component over +/-dtheta0
-    (generalises fit_MLP.symbol_logq_full to 2 Gammas per side)."""
+    (generalises stimulus.symbol_logq_full to 2 Gammas per side)."""
     from scipy.special import erf, gammainc
     d0 = M.DTHETA0 if dtheta0 is None else dtheta0
     sqrt2 = math.sqrt(2.0)
@@ -112,7 +112,7 @@ def symbol_logq_mix(w, sF, aL1, tL1, aL2, tL2, aR1, tR1, aR2, tR2, dtheta0=None,
 def _dot_stim_row(stim_mode, dot_cx_t, dot_cy_t, x, y, h, moving_t, n_dots_t=0.0, dish=None):
     """The stimulus row of one bout from the CURRENT generated pose (x, y, h) and the dot centroid shown
     (dot_cx_t, dot_cy_t): the fish reacts to its OWN bearing and range to the dots, through the same
-    ``fit_MLP.shoal_channels`` as at train time (so the layout cannot drift); count and moving are block constants.
+    ``stimulus.shoal_channels`` as at train time (so the layout cannot drift); count and moving are block constants.
     ``dish`` is unused (kept in the signature)."""
     if stim_mode not in M.SHOAL_MODES:
         raise ValueError(f"unknown stim_mode {stim_mode!r}")
@@ -135,7 +135,7 @@ ONLINE_STIM_MODES = M.SHOAL_MODES
 # =========================================================================== #
 class MLPMixDensity(E.GenerativeModel):
     """MDN-MLP with the 5-component (2-Gamma/side) emission; full mode only. Inputs
-    (history + stim + optional border) come from fit_MLP_border.build_feature_matrix."""
+    (history + stim + optional border) come from features.build_feature_matrix."""
     has_density = True
     has_symbol = True
     can_sample = True
@@ -191,17 +191,17 @@ def save_mix(model, path):
     used (``.sample`` / ``.score``) WITHOUT retraining. Stores the MDN weights + the feature
     config + the dt/distance resample pools + the wrapper flags -- everything the numpy
     sampler and the density scorer need. Records are NOT stored (rebuild them locally with
-    ``fit_MLP_border.build_border_records``)."""
+    ``features.build_border_records``)."""
     if not hasattr(model, "_model"):
         raise RuntimeError("model is not fitted; call .fit(...) before save_mix")
     # Different head layout -> own serialiser. isinstance, NOT a class-name string: a SUBCLASS of
     # the joint model (e.g. the per-fish random-effect variant) used to fall straight through this
     # test to the generic branch below, which writes a checkpoint with none of its extra parameters
     # -- and that checkpoint then LOADS WITHOUT ERROR as a plain joint model. Silent and plausible.
-    from twin import fit_MLP_joint as _J
+    from twin import joint as _J
     if isinstance(model, _J.MLPMixJointDensity):
         try:
-            from twin import fit_MLP_fishre as _FR
+            from twin import latent as _FR
         except ImportError:
             _FR = None
         if _FR is not None and isinstance(model, _FR.MLPMixJointREDensity):
@@ -249,10 +249,10 @@ def load_mix(path, map_location="cpu", closed_loop=None, guardrail=None):
         # NOTE both branches must be kept in step with save_mix: a class that can be SAVED by a
         # specialised serialiser and not LOADED by one fails only at the call site, far away.
         if _cls == "MLPMixJointREDensity":
-            from twin import fit_MLP_fishre as _J
+            from twin import latent as _J
             m = _J.load_fishre(path, map_location=map_location)
         else:
-            from twin import fit_MLP_joint as _J
+            from twin import joint as _J
             m = _J.load_joint(path, map_location=map_location)
         if closed_loop is not None:
             m.closed_loop = bool(closed_loop)
@@ -309,7 +309,7 @@ def _dt_logpdf(x, logw, mu, sigma, hi=None):
 
 def _gen_for(cfg_feat, records=None):
     """The free-run generator a calibrator rolls the model out with: the joint model's closed loop."""
-    from twin import fit_MLP_joint as _J
+    from twin import joint as _J
     return _J.generate_mix_joint_loop
 
 

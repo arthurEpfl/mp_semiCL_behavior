@@ -1,76 +1,28 @@
-"""Per-fish random effect: individuality as a FITTED variance component, not a sampler constant.
+"""The per-fish latent and the slow drift: individuality and slow state as fitted parts of the likelihood.
 
-THE DEFECT. ``between_fish_share`` is 0.061 generated against 0.255 real; the across-fish SD of
-forward fraction is 0.0061 against a real 0.0537 (8.8x too narrow) and of median |dtheta| is 1.30 deg
-against 6.73 (5.2x). Every generated fish turns like the average fish. This is not a mistuned
-mechanism -- there is no mechanism: ``vigor`` covers the interval and distance LEVEL only, and
-``_calibrate_vigor`` hard-sets its turn term to zero.
+THE LATENT. z_i in R^m (m = 2), prior N(0, I), enters as a bias offset on the three heads and nowhere else (the
+body does not see z): the forward-mixture weight logit of the turn head, and the locations of the step and the
+interval (``turn`` / ``dist`` / ``dt`` loadings; with ``re_tsize`` also the four turning components' scales).
+Level-only on purpose: real fish differ mostly in level, and a body path let the latent reshape every conditional.
 
-WHY IT MATTERS BEYOND INDIVIDUALITY. Decomposing the missing window variance, ~65% of the missing
-turn variance and ~87% of the missing distance variance is BETWEEN-fish. So the under-dispersion
-deficit (distance 0.442, dt 0.466 against a target of 1.0) is largely a manifestation of this one,
-and under-dispersion is the measured MASKING defect -- an identical injected coupling defect is worth
-+0.001 alongside a 20% marginal error and +0.049 once the marginals are repaired. Repairing it here
-unmasks everything measured afterwards.
+ESTIMATION.
+  A. FIT. z_i are embedding rows trained jointly with the net, with the N(0, I) prior penalty in every batch. The
+     prior is FIXED and the scale lives in the loadings (with both free only their product is identified).
+     Both factors start nonzero: zero loadings x zero embedding is an exact saddle.
+  B. DE-SHRINK. Joint MAP shrinks the between-fish spread, so one global gain on the loadings is chosen by rollout
+     to match the real between-fish spread of three per-fish levels (``search_loading_gain``; the marginal
+     likelihood is monotone in the gain and cannot set it), and folded into the weights with a log-normal
+     re-centring (``apply_loading_gain``).
+  C. SCORE. A held-out fish has no embedding: ``score`` reports the exact marginal predictive
+     log p(y_t | y_<t, x), z integrated out by Gauss-Hermite quadrature.
 
-WHY IT ESCAPES THE sigma^2/(1-phi^2) TRAP. A per-trajectory CONSTANT adds window-MEAN variance and
-contributes exactly zero to ``dist_acf1``/``dt_acf1``, because ``_acf1`` subtracts the window mean
-(generative_metrics.py:491). It does not touch the coupled knob at all. That is the difference from
-``nofb``, which fixed the spread perfectly (0.51 -> 0.98) and lost 0.068 AUC because the free-run
-lag-1 autocorrelation blew to 0.394 against a real 0.218.
+THE DRIFT (``drift``). An AR(1) state s_t, timescale pinned (tau = 70 bouts by default), loading on the same three
+quantities; trained on contiguous per-fish blocks with s marginalised by a forward recursion over a discretised
+chain, scored on the product grid (z, s). Its generation gains are searched by rollout against the real
+across-window autocorrelations (``emission._search_drift_gain``).
 
-THE MODEL. Latent z_i in R^m, m=2, prior z ~ N(0, I). It enters as a bias offset on the three head
-pre-activations and NOWHERE else -- head variances and mixture shapes are shared across z:
-
-    turn:  o[0]           += B_turn z_i     (the FORWARD-mixture weight logit only)
-    dist:  do[nd:2nd]     += B_dist z_i     (all log-normal mu shifted equally)
-    dt:    to[ndt:2ndt]   += B_dt   z_i
-
-The shared body does NOT see z (``use_body=False``). It did in the first version, and that version
-measured +0.0299 WORSE than its own anchor: 90% of the latent's turn effect, 74% of its distance
-effect and 59% of its interval effect were flowing through the body rather than the level loadings,
-so the mechanism was an unconstrained per-fish reshaping of every conditional rather than the level
-shift it was designed to be. The pooled marginals broke (abs_dtheta_w1 6.83 -> 10.29, dist_w1
-3.33 -> 4.93 -- a level shift cannot do that), distance dispersion overshot 0.40 -> 2.03, wall
-contact rose with it, and radial went from 0.22 to 0.56 of all remaining detectability. The body
-path is retained behind a flag purely so those checkpoints still load.
-
-Level-only is not a shortcut: ``smoke_state_layer`` recorded that "with a free per-state emission the
-chain spends its states on the MARGINAL instead". And the turn loading sits on the forward-mixture
-WEIGHT, not on a scale -- scaling |dtheta| is exactly how ``vigor_turn`` failed, and forward fraction
-spans 4.5x across the 15 fish while median |dtheta| spans only 2x, so weight-tilting is the axis real
-fish actually vary on and it leaves the pooled turn marginal alone. m=2 comes from the measured ICCs:
-one turn-style axis (forward fraction 0.835, |dtheta| median 0.796), one tempo axis (bout rate 0.893).
-
-THREE-STAGE ESTIMATION.
-  A. FIT. z_i are learnable embedding rows trained jointly with the net on the existing shuffled-row
-     minibatches, with the Gaussian prior penalty added in every batch. ~187 optimiser steps/epoch --
-     no sequence batching, so none of the step-collapse risk a recursion would bring.
-     The prior is FIXED at N(0, I) and the scale lives in the loadings. That is the standard factor
-     parameterisation and it is not cosmetic: with both the prior SD and the loadings free, only
-     their product is identified, and re-estimating Sigma by EM afterwards then diverges -- measured,
-     on 3 fish: sd 0.49 -> 27.0 over five iterations, because each iteration widens the quadrature
-     grid that the next iteration's second moment is computed on.
-  B. DE-SHRINK. Joint MAP still shrinks the fitted product toward zero, so the generated between-fish
-     spread would come out too narrow -- and ``vigor``'s intercept is moment-matched to the real
-     spread by construction, so an uncorrected swap would REGRESS rather than merely fail to help.
-     The correction is a single global gain on the loadings, chosen on a BOUNDED grid by marginal
-     likelihood. One dimension, cannot run away, and the fitted gain is the reportable number.
-  C. SCORE. A held-out fish has no embedding, so ``logdens`` is the exact marginal predictive
-     log p(y_t | y_{1:t-1}, x) = log int p(y_t|z) p(z|y_{1:t-1}) dz. Because z is STATIC this is a
-     cumsum, not a loop, and it is exact up to Gauss-Hermite quadrature.
-
-FITTED AND SCORED, which is the point. ``vigor`` and ``_search_indiv`` are sequentially-fitted
-generation-time constants that ``score()`` never reads; this replaces them with one prior estimated by
-maximum likelihood. It is the largest single reduction of the "two objects, one likelihood" surface
-available in this project.
-
-GENERATION. z is drawn once per trajectory from the fitted prior -- the honest "new fish" claim, and
-the only option that cannot leak, since the evaluated fish is held out. The draw lives in
-``JT.generate_mix_joint_loop`` (keyed off ``cfg_feat['fish_re']``) rather than here, so the shared
-calibrators reach it through ``MX._gen_for`` unchanged and automatically calibrate against PRIOR
-draws -- which is what they must do, since they roll out train fish and the fitted z_i would
-calibrate against a different law than the one evaluated.
+GENERATION. z is drawn once per trajectory from the prior (a new fish), the drift advanced once per bout; both in
+``joint.generate_mix_joint_loop``, keyed off ``cfg_feat['fish_re']`` and ``cfg_feat['drift']``.
 """
 from __future__ import annotations
 
@@ -80,10 +32,10 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from twin import fit_MLP as M                     # noqa: E402
-from twin import fit_MLP_border as MB             # noqa: E402
-from twin import fit_MLP_joint as JT              # noqa: E402
-from twin import fit_MLP_mix as MX                # noqa: E402
+from twin import stimulus as M                     # noqa: E402
+from twin import features as MB             # noqa: E402
+from twin import joint as JT              # noqa: E402
+from twin import emission as MX                # noqa: E402
 
 
 # =========================================================================== #
@@ -301,7 +253,7 @@ def _chan_logliks(net, Xt, az, lc, ya, yd, yt, z):
 #  Slow TIMING latent: an AR(1) state entering the interval head's location ONLY
 # =========================================================================== #
 # WHY THIS EXISTS, AND WHY THE PER-FISH LATENT CANNOT DO IT. `z_re` is drawn once per trajectory
-# (fit_MLP_joint.py:363, before the bout loop at :470), so it is a CONSTANT offset on the three
+# (joint.py:363, before the bout loop at :470), so it is a CONSTANT offset on the three
 # head levels. It shifts every window of a fish equally and therefore contributes exactly zero to
 # within-fish, window-to-window variance -- which is what `rate_acf_1min` (gap -0.268),
 # `quiesc20` (-0.112) and the dt dispersion (0.55 against a target of 1.0) all measure. That it has

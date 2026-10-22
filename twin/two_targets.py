@@ -4,7 +4,7 @@ The paradigm of Sridhar et al. (2021, PNAS), where zebrafish following two virtu
 parallel switch from swimming between them to following one as their lateral separation grows. Here the targets are two
 dot groups (A and B) whose centroids move back and forth along two parallel tracks through the dish centre, at lateral
 separation L, both at the same speed and in step; the trained models (no retraining) see them through one of the
-combination rules of fit_MLP_joint (effects, add, avg, nearest), and the references show only A, or nothing ('blind'),
+combination rules of joint (effects, add, avg, nearest), and the references show only A, or nothing ('blind'),
 on the same tracks.
 
 GEOMETRY (per block, seeded by (fish, block)): the track axis u through the dish centre at a random angle; the two tracks
