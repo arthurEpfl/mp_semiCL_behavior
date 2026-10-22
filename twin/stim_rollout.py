@@ -216,8 +216,6 @@ class SyntheticRecord:
     moving: np.ndarray
     dt_s: np.ndarray
     distance_px: np.ndarray
-    u_raw: object = None
-    stim_csv: object = None
     # attached by build_border_records in the real pipeline
     x_px: np.ndarray = field(default=None)
     y_px: np.ndarray = field(default=None)

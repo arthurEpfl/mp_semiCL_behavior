@@ -16,6 +16,7 @@ all groups and the whole readout, so a typical window can be told from a lucky o
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -194,10 +195,40 @@ def render(npz, out_mp4, trail_s=4.0, dpi=90):
     plt.close(fig)
 
 
+def _render_env(out_path):
+    """Env for the render subprocess (+ a temp dir to clean up, or None).
+
+    Always forces UTF-8. For ``.mp4`` output with no system ffmpeg on PATH, transparently points matplotlib at the
+    ffmpeg binary bundled by ``imageio-ffmpeg`` (``pip install imageio-ffmpeg``) via a throwaway
+    matplotlibrc -- so .mp4 just works without a system ffmpeg install. Raises a clear,
+    actionable error if .mp4 is requested and no ffmpeg is available anywhere."""
+    import shutil
+    import tempfile
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+    if Path(out_path).suffix.lower() != ".mp4" or shutil.which("ffmpeg"):
+        return env, None
+    try:
+        import imageio_ffmpeg
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        exe = None
+    if not exe or not os.path.exists(exe):
+        raise RuntimeError(
+            f"Cannot write {Path(out_path).name}: no ffmpeg found for .mp4 output.\n"
+            "  Fix (pick one):\n"
+            "    * pip install imageio-ffmpeg      (bundles ffmpeg, no admin) then re-run, or\n"
+            "    * install ffmpeg on your PATH, or\n"
+            "    * render a .gif instead (just change the output extension to .gif).")
+    rc_dir = Path(tempfile.mkdtemp(prefix="mplffmpeg_"))
+    (rc_dir / "matplotlibrc").write_text(
+        f"animation.ffmpeg_path: {exe.replace(os.sep, '/')}\n", encoding="utf-8")
+    env["MATPLOTLIBRC"] = str(rc_dir)                    # matplotlib in the child reads this
+    return env, rc_dir
+
+
 def _render_one(npz):
-    from twin import bout_video as BV
     out = npz.with_suffix(".mp4")
-    env, rc_dir = BV._render_env(out)
+    env, rc_dir = _render_env(out)
     try:
         subprocess.run([sys.executable, str(Path(__file__).resolve()), "--render", str(npz), str(out)], check=True,
                        env=env)

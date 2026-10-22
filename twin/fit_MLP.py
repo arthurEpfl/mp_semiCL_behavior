@@ -21,13 +21,11 @@ import os
 import numpy as np
 import torch
 
-from twin import fit_hmm as H          # emission constants
-
 # ----------------------------- constants ------------------------------------ #
-DTHETA0 = H.DTHETA0_DEG       # 10.0 deg forward/turn threshold
-LOG_FLOOR = H.LOG_FLOOR       # -700.0
-ALPHA_MIN = H.ALPHA_MIN       # 1.0  (Gamma shape floor, paper constraint)
-EPS = H.EPS                   # 1e-12
+DTHETA0 = 10.0                # deg: the forward / turn threshold of the bout symbols
+LOG_FLOOR = -700.0            # log of ~1e-304, where an emission has no support
+ALPHA_MIN = 1.0               # the Gamma shape floor (alpha >= 1)
+EPS = 1e-12
 
 # ------------------- 'shoal' stimulus block constants ----------------------- #
 # Non-monotone RANGE tuning x group SIZE x MOTION. Real fish steer toward the shoal

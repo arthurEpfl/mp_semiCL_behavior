@@ -4,8 +4,8 @@ dataset, adapting the bout-detection method of Le Goc et al. 2021 (BMC Biology,
 "Thermal modulation of Zebrafish exploratory statistics", doi:10.1186/s12915-021-01126-w)
 to this experiment's per-frame continuous tracking.
 
-INPUT  : the per-fish `*_transformed_abs.csv` files (the `abs_dict` / `df_abs_raw`
-         representation) -- continuous tracking at 30 fps with columns
+INPUT  : the per-fish `*_transformed_abs.csv` files (data/frames, built by twin/frames.py) -- continuous
+         tracking at 30 fps with columns
          `frame, stimulus, f{N}_x, f{N}_y, f{N}_ori, d0_x..d7_stim`.
          Positions are in pixels; orientation in radians (CCW, 0 = right).
 
@@ -373,7 +373,7 @@ def add_dist_to_border(bouts, dish):
     return bouts
 
 
-R0_MM = 20.0     # proximity softening (mm); matches fit_hmm_stim retinal-size weight
+R0_MM = 20.0     # proximity softening (mm) of the dot-proximity column
 
 
 def add_dist_to_dot(bouts, transformed_dir=paths.FRAMES,

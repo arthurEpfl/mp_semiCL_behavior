@@ -160,7 +160,6 @@ class MLPMixDensity(E.GenerativeModel):
         self.wall_mode = wall_mode          # 'clip' (legacy) or 'reflect' (billiard bounce)
         self.use_adapt = use_adapt          # sensory-adaptation covariate (leaky-integrated proximity)
         self.adapt_lambda = adapt_lambda
-        self.requires_absdict = (stim_mode == "rich")
 
 
 class MLPMixLoopDensity(MLPMixDensity):
@@ -192,8 +191,7 @@ def save_mix(model, path):
     used (``.sample`` / ``.score``) WITHOUT retraining. Stores the MDN weights + the feature
     config + the dt/distance resample pools + the wrapper flags -- everything the numpy
     sampler and the density scorer need. Records are NOT stored (rebuild them locally with
-    ``fit_MLP_border.build_border_records``). Typical use: fit on all fish in Colab, save,
-    download the (~1 MB) file, then ``load_mix`` locally and feed it to ``bout_video``."""
+    ``fit_MLP_border.build_border_records``)."""
     if not hasattr(model, "_model"):
         raise RuntimeError("model is not fitted; call .fit(...) before save_mix")
     # Different head layout -> own serialiser. isinstance, NOT a class-name string: a SUBCLASS of
@@ -247,8 +245,7 @@ def load_mix(path, map_location="cpu", closed_loop=None, guardrail=None):
         # joint checkpoints have chained heads (dist_head/dt_head hang off the SHARED body), and
         # the random-effect subclass adds an embedding plus four loading matrices on top, so the
         # MDNMix rebuild below cannot take either state_dict. Delegate, mirroring save_mix.
-        # Doing this here means every downstream consumer -- render_video, bout_video, the diag
-        # scripts, the report notebook -- accepts either checkpoint with no change of its own.
+        # Doing this here means every downstream consumer accepts either checkpoint with no change of its own.
         # NOTE both branches must be kept in step with save_mix: a class that can be SAVED by a
         # specialised serialiser and not LOADED by one fails only at the call site, far away.
         if _cls == "MLPMixJointREDensity":

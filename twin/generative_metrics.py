@@ -1238,12 +1238,10 @@ def cross_validate_generative(records, model_factories, folds, cfg=None, R=20,
             skip = None
             if not getattr(model, "can_sample", True):   # baselines don't generate
                 skip = "not generative"
-            elif model.requires_absdict and any(records[f].u_raw is None for f in train_ids):
-                skip = "rich features unavailable"
             if skip is None:
                 try:
                     model.fit(train, ctx)
-                except Exception as ex:            # e.g. rich without abs_dict
+                except Exception as ex:
                     skip = str(ex)
             if skip is None:
                 wm = windows_by_model.setdefault(model.name, [{} for _ in range(c2st_reps)])
