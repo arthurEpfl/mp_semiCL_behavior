@@ -17,18 +17,16 @@ import pickle
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from style import *  # noqa: F401,F403,E402
+from figures.style import *  # noqa: F401,F403,E402
 
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
 from matplotlib.patches import Patch  # noqa: E402
 
-import fig_profiles as FP  # noqa: E402
-import fig_profiles_bands as FPB  # noqa: E402
+from figures import fig_profiles as FP  # noqa: E402
+from figures import fig_profiles_bands as FPB  # noqa: E402
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import scripts.make_report_figures as RF  # noqa: E402
 
 M6_ARM = "S4x_adt_z2_cdt_tr_rc_al_w3ft"

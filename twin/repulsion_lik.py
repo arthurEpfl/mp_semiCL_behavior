@@ -34,8 +34,7 @@ import numpy as np
 import pandas as pd
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE)); sys.path.insert(0, str(HERE.parent / "Model"))
-import twin_test as TT  # noqa: E402
+from twin import twin_test as TT  # noqa: E402
 
 NEAR_MM = 20.0
 CX, CY = 180.0, 174.0               # the training dish centre (model px); the dish radius is 35 mm here
@@ -46,9 +45,8 @@ def _segment_plate(args):
     """Real side as twin_test._real_plate, but returning per-fish bout tables with the dot (model px) instead of sums."""
     plate, rows = args
     import pyarrow.parquet as pq
-    sys.path.insert(0, str(TT.PKG)); sys.path.insert(0, str(HERE))
     import loader
-    import segment_bouts as SB
+    from twin import segment_bouts as SB
     z = zipfile.ZipFile(TT.ZIP)
     cols = ["frame"] + [f"{k}_{int(r['well']):02d}" for r in rows for k in ("x", "y", "heading", "flag")]
     tab = pq.read_table(io.BytesIO(z.read(f"schizscreen_twin_v1/trajectories/plate_{plate:03d}.parquet")), columns=cols,
@@ -83,9 +81,9 @@ def _segment_plate(args):
 
 def _record(fid, b):
     """One model record per fish from its bout table (several segments / runs concatenated, run_pos restarting)."""
-    import evaluate as E
-    import fit_MLP_border as MB
-    import fit_hmm_stim as S
+    from twin import evaluate as E
+    from twin import fit_MLP_border as MB
+    from twin import fit_hmm_stim as S
     b = b[np.isfinite(b.dtheta_deg.to_numpy(float))].copy()
     if len(b) < 10:
         return None
@@ -128,7 +126,7 @@ def _record(fid, b):
 
 
 def build_records(half="fit", workers=6):
-    import repulsion_fit as RF
+    from twin import repulsion_fit as RF
     keep = set(RF.clutch_split()[half])
     f = TT.fish_table()
     f = f[(f.group == "ref") & f.clutch.isin(keep)]
@@ -147,8 +145,8 @@ def base_params(model, rec):
     """Teacher-forced per-bout predictions of ``model`` on ``rec`` at z = 0, no drift, block clock held late, with the
     model's own repulsion term (side input). Returns numpy arrays (angle params, dist params, dt params)."""
     import torch
-    import fit_MLP_border as MB
-    import fit_MLP_joint as JT
+    from twin import fit_MLP_border as MB
+    from twin import fit_MLP_joint as JT
     cf = model._cfg_feat
     X = MB.build_feature_matrix(rec, cf)
     st = getattr(model._model, "stim_turn", None)
@@ -167,9 +165,8 @@ def base_params(model, rec):
 
 def cache_base(key):
     """Records of the fit half + the base predictions of model ``key`` (F + turn, 43a / 43b) -> twin_test/replik_<key>.pkl."""
-    import report_models as RM
-    sys.path.insert(0, str(HERE.parent / "Model"))
-    import model_figures as MF
+    from twin import report_eval as RM
+    from twin import model_figures as MF
     u = RM._unit(key)
     with contextlib.redirect_stdout(io.StringIO()):
         ms, ho = MF.fold_models(u["src"], u["arm"])
@@ -207,7 +204,7 @@ def _stack(rows):
 def loglik(D, term, theta, dt_hi):
     """Per-bout log-likelihood (turn, step, interval) with ``term`` at parameters ``theta`` (torch, differentiable)."""
     import torch
-    import fit_MLP_mix as MX
+    from twin import fit_MLP_mix as MX
     T = lambda a: torch.as_tensor(a, dtype=torch.float64)
     d, phi = T(D["d"]), T(D["phi"])
     logw, sF, aL1, tL1, aL2, tL2, aR1, tR1, aR2, tR2 = [T(a) for a in D["ang"]]
@@ -294,7 +291,7 @@ def _comp(S, num, den, b):
 def diagnose(half="fit", bins=(0, 1, 2, 3, 4), nb=200):
     """Table: per component and distance bin, real - null for the real fish (``half`` of the clutches; 95 % over
     clutches) and for F / F + turn at both seeds (simulated, screen protocol)."""
-    import repulsion_fit as RF
+    from twin import repulsion_fit as RF
     real = pickle.load(open(TT.OUT / "real.pkl", "rb"))
     m, res = real["meta"], real["res"]
     keep = set(RF.clutch_split()[half])
@@ -334,8 +331,8 @@ def build_step(key):
     cfg_feat['repulsion'] extended by s_amp / s_r / s_w, new arm name, manifest, held-out likelihood table."""
     import shutil
     import torch
-    import report_models as RM
-    import profile_finetune as PF
+    from twin import report_eval as RM
+    from twin import profile_finetune as PF
     u = RM._unit(key)
     src = TT.ROOT / "Model" / u["src"]
     fr = next(r for r in json.loads((TT.OUT / f"replik_fit_{key}.json").read_text()) if r["term"] == "step")

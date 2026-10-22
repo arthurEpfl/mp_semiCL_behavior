@@ -24,8 +24,7 @@ Run:  uv run python scripts/report_figs/fig_rule.py                # build the h
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from style import *  # noqa: F401,F403,E402
+from figures.style import *  # noqa: F401,F403,E402
 
 import argparse  # noqa: E402
 import contextlib  # noqa: E402
@@ -41,7 +40,7 @@ from matplotlib.colors import LinearSegmentedColormap, to_rgb  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
 from scipy import stats  # noqa: E402
 
-import missing_pieces as P  # noqa: E402
+from twin import missing_pieces as P  # noqa: E402
 
 N_MAP = (2, 4, 6, 8)               # moving-dot counts pooled in the maps
 MIN_BOUTS, MIN_FISH = 5, 10        # a fish counts in a cell with >= MIN_BOUTS bouts; cell shown with >= MIN_FISH fish
@@ -82,7 +81,7 @@ def _hg_job(key):
         os.environ[v] = "1"
     import torch
     torch.set_num_threads(1)
-    import model_figures as MF
+    from twin import model_figures as MF
     arm = _arm_of(key)
     with contextlib.redirect_stdout(io.StringIO()):
         D, S = MF.head_gaps({key: (str(MODEL / "report_ckpts" / f"M{key}"), arm)}, plot=False)

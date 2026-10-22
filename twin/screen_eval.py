@@ -36,8 +36,7 @@ import numpy as np
 import pandas as pd
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE)); sys.path.insert(0, str(HERE.parent / "Model"))
-import twin_test as TT  # noqa: E402
+from twin import twin_test as TT  # noqa: E402
 
 OUT = TT.OUT
 PX = TT.PX
@@ -58,9 +57,8 @@ NAMES = None
 def _real_plate(args):
     plate, rows = args
     import pyarrow.parquet as pq
-    sys.path.insert(0, str(TT.PKG)); sys.path.insert(0, str(HERE))
     import loader
-    import segment_bouts as SB
+    from twin import segment_bouts as SB
     z = zipfile.ZipFile(TT.ZIP)
     cols = ["frame"] + [f"{k}_{int(r['well']):02d}" for r in rows for k in ("x", "y", "heading", "flag")]
     tab = pq.read_table(io.BytesIO(z.read(f"schizscreen_twin_v1/trajectories/plate_{plate:03d}.parquet")), columns=cols,
@@ -110,7 +108,7 @@ def run_real(workers=10):
 
 def _sim(args):
     key, i, show = args
-    import stim_rollout as SR
+    from twin import stim_rollout as SR
     S = TT._sim_setup()
     m = TT._models(key)[i % 5]
     cx, cy, R = S["dish"]
@@ -177,8 +175,8 @@ def bout_table(r, kind_fr):
 
 
 def fish_windows(r, kind_fr):
-    import generative_metrics as GM
-    import evaluate as E
+    from twin import generative_metrics as GM
+    from twin import evaluate as E
     b = bout_table(r, kind_fr)
     if b is None:
         return None, None
@@ -289,7 +287,7 @@ def curves(res, ids, nb=300, seed=0):
 
 
 def analyse(workers=10):
-    import repulsion_fit as RF
+    from twin import repulsion_fit as RF
     R = pickle.load(open(OUT / "screen_raw_real.pkl", "rb"))
     print("windows: real ...", flush=True)
     wr = windows_of(R["res"], workers)
@@ -355,8 +353,8 @@ def analyse(workers=10):
 
 def our_windows():
     """Our own 15 real fish (active bouts, windows inside one run): the 30 turn / step / interval features."""
-    import generative_metrics as GM
-    import evaluate as E
+    from twin import generative_metrics as GM
+    from twin import evaluate as E
     d = pd.read_csv(HERE.parent / "clean_data" / "bouts_clean.csv",
                     usecols=["fish_id", "dtheta_deg", "dt_s", "distance_px", "active", "run_id"])
     d = d[d.active == 1]
@@ -372,7 +370,7 @@ def analyse_ref(workers=10):
     """The scale for the screen classifier: OUR real fish against the screen's real fish, on the 30 features that
     carry over between the two experiments (turns, displacement, interval; not the dot or the dish), next to the
     floor and the models on the same features."""
-    import repulsion_fit as RF
+    from twin import repulsion_fit as RF
     R = pickle.load(open(OUT / "screen_raw_real.pkl", "rb"))
     wr = windows_of(R["res"], workers)
     real_ids = np.array(sorted(wr))

@@ -49,10 +49,9 @@ from pathlib import Path
 import numpy as np
 import torch
 
-sys.path.insert(0, str(Path(__file__).parent))
-import fit_MLP as M                      # noqa: E402
-import fit_MLP_border as MB              # noqa: E402
-import fit_MLP_mix as MX                 # noqa: E402
+from twin import fit_MLP as M                      # noqa: E402
+from twin import fit_MLP_border as MB              # noqa: E402
+from twin import fit_MLP_mix as MX                 # noqa: E402
 
 _LOG2PI = float(math.log(2.0 * math.pi))
 
@@ -647,7 +646,7 @@ def verify_against_numpy(model, records, n_bouts=4000, reps=3, seed=0, verbose=T
     within replicate spread. Compared with ``wall_reject`` removed on BOTH sides, because the
     rejection loop is deliberately not ported (see the module docstring).
     """
-    import generative_metrics as GM
+    from twin import generative_metrics as GM
     net, cfg = model._model, dict(model._cfg_feat)
     cfg.pop("wall_reject", None)
     cfg["wall_mode"] = "reflect"

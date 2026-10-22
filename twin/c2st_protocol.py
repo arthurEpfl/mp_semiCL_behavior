@@ -25,8 +25,8 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from twin import paths
 
-sys.path.insert(0, str(Path(__file__).parent))
 
 W, REPS, SEED = 60, 8, 0
 FPS = 30.0
@@ -34,15 +34,15 @@ FPS = 30.0
 
 def _ckpt_dir(d):
     d = Path(d)
-    for q in (d, Path("Model") / d, Path(__file__).parent.parent / "Model" / d):
+    for q in (d, paths.CKPTS / d):
         if (q / "manifest_model1.json").exists():
             return q
     raise FileNotFoundError(f"no manifest_model1.json under {d}")
 
 
 def _records():
-    import evaluate as E
-    import fit_MLP_border as MB
+    from twin import evaluate as E
+    from twin import fit_MLP_border as MB
     return MB.build_border_records(E.load_bouts())
 
 
@@ -56,7 +56,7 @@ def condition_share_table(recs=None):
     """Share of bouts by stimulus condition inside the windows each side of the C2ST uses. The generated
     side is bout-indexed on the record, so its windowed bouts are the plain tiling of the record's own
     bouts; the real side is the run-restricted tiling (and its steady-state subset)."""
-    import generative_metrics as GM
+    from twin import generative_metrics as GM
     recs = recs or _records()
     pools = {"all active bouts": [], "real windows (inside runs)": [], "real steady-state windows": [],
              "generated windows (tiled straight through)": []}
@@ -95,8 +95,8 @@ def _job(job):
     ckpt, fid, rej, reps, seed = job
     import torch
     torch.set_num_threads(1)
-    import fit_MLP_mix as MX
-    import generative_metrics as GM
+    from twin import fit_MLP_mix as MX
+    from twin import generative_metrics as GM
     recs = _records()
     rec = recs[fid]
     m = MX.load_mix(str(ckpt))
@@ -134,7 +134,7 @@ def matched_c2st_table(ckpt_dir, arm, rej=None, reps=REPS, seed=SEED, jobs=10):
     per real one), and generated windows matched to the real run ids (identical bout indices, 1:1) --
     on all windows and on the steady-state windows, with feature blocks dropped. Cached next to the
     checkpoints as ``protocol_windows_<arm>.npz``."""
-    import generative_metrics as GM
+    from twin import generative_metrics as GM
     d = _ckpt_dir(ckpt_dir)
     cache = d / f"protocol_windows_{arm}.npz"
     if cache.exists():
@@ -174,7 +174,7 @@ def profile_pause_split(recs=None, within_s=(20.0, 60.0)):
     at its start or end), per condition: bouts and the mean distance to the dots early (0-20 s) and
     late (20-60 s). The dot-profile plot pools both; a never-pausing model is like-for-like with the
     fully active blocks only."""
-    import fit_MLP_border as MB
+    from twin import fit_MLP_border as MB
     recs = recs or _records()
     rows = []
     for f, rec in recs.items():

@@ -32,15 +32,15 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from twin import paths
 
-sys.path.insert(0, str(Path(__file__).parent))
 
 W_REPS, W_SEED = 8, 0
 
 
 def _ckpt_dir(d):
     d = Path(d)
-    for q in (d, Path("Model") / d, Path(__file__).parent.parent / "Model" / d):
+    for q in (d, paths.CKPTS / d):
         if (q / "manifest_model1.json").exists():
             return q
     raise FileNotFoundError(f"no manifest_model1.json under {d}")
@@ -51,10 +51,10 @@ def _windows_job(job):
     ckpt, fid, rej, seed, reps = job
     import torch
     torch.set_num_threads(1)
-    import evaluate as E
-    import fit_MLP_border as MB
-    import fit_MLP_mix as MX
-    import generative_metrics as GM
+    from twin import evaluate as E
+    from twin import fit_MLP_border as MB
+    from twin import fit_MLP_mix as MX
+    from twin import generative_metrics as GM
     recs = MB.build_border_records(E.load_bouts())
     m = MX.load_mix(str(ckpt))
     if rej:
@@ -165,7 +165,7 @@ def feature_drop_table(ckpt_dir, arms, rej=None, reps=W_REPS, seed=W_SEED, jobs=
     """The held-out C2ST of each arm with feature blocks REMOVED from the same rollouts: all 39, without
     the radial block, the three heads only (turn + step + interval), turn only. ``arms`` = list of arm
     names or {label: arm}. Same GroupKFold-by-fish classifier as the ladder (``c2st_auc_replicates``)."""
-    import generative_metrics as GM
+    from twin import generative_metrics as GM
     d = _ckpt_dir(ckpt_dir)
     arms = arms if isinstance(arms, dict) else {a: a for a in arms}
     rows = []

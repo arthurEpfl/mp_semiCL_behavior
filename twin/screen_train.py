@@ -48,8 +48,7 @@ import pandas as pd
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
-sys.path.insert(0, str(HERE)); sys.path.insert(0, str(ROOT / "Model")); sys.path.insert(0, str(ROOT))
-import twin_test as TT  # noqa: E402
+from twin import twin_test as TT  # noqa: E402
 
 TABLE = TT.OUT / "screen_train_bouts.npz"      # plain arrays: built in one interpreter, trained in another
 TABLE_META = TT.OUT / "screen_train_bouts.json"
@@ -80,8 +79,8 @@ def _install_models():
         if key not in TT._SIM_CACHE:
             import contextlib
             import io
-            import fit_MLP_border as MB
-            import model_figures as MF
+            from twin import fit_MLP_border as MB
+            from twin import model_figures as MF
             MB.DISH_MM = 2.0 * TT.R_MM
             TT._sim_setup()
             m, s = SKEYS[key]
@@ -102,7 +101,7 @@ def _wrap(a):
 
 def _table(fid_new, b):
     """One fish's training rows from its segment_fish bout table (+ dot_cx, dot_cy, kind)."""
-    import segment_bouts as SB
+    from twin import segment_bouts as SB
     b = b.sort_values("frame_onset").reset_index(drop=True)
     b = b[np.isfinite(b.dtheta_deg.to_numpy(float))].reset_index(drop=True)
     seg = b["segment_id"].to_numpy()
@@ -140,7 +139,7 @@ def _table(fid_new, b):
 
 
 def build(workers=10):
-    import repulsion_lik as RL
+    from twin import repulsion_lik as RL
     ids = json.loads(FISH_JSON.read_text())
     ids = ids["fish"] if isinstance(ids, dict) else ids
     f = TT.fish_table().set_index("fish_id", drop=False).loc[[int(i) for i in ids]]
@@ -170,8 +169,8 @@ def build(workers=10):
 def fold(seed, k, arm, outdir, smoke=False):
     """One fit of train_model1_colab.py, with the screen patched in (see the module docstring)."""
     outdir = Path(outdir); outdir.mkdir(parents=True, exist_ok=True)
-    import train_model1_colab as T
-    import fit_MLP_border as MB
+    from twin import training as T
+    from twin import fit_MLP_border as MB
     z = np.load(TABLE, allow_pickle=False)
     df = pd.DataFrame({c: z[c] for c in z.files})
     fish = sorted(df.fish_id.unique())
@@ -192,8 +191,7 @@ def fold(seed, k, arm, outdir, smoke=False):
 
 
 def run(slots=18, only=None):
-    sys.path.insert(0, str(ROOT / "Model"))
-    from rollout_model1_local import merge_ckpt_dirs
+    from twin.rollout_eval import merge_ckpt_dirs
     env = dict(os.environ, PYTHONPATH=os.pathsep.join([str(HERE), str(ROOT), str(ROOT / "Model")]),
                PYTHONIOENCODING="utf-8", MPLBACKEND="Agg", OMP_NUM_THREADS="1", MKL_NUM_THREADS="1")
     sem = threading.Semaphore(slots)
@@ -246,7 +244,7 @@ def _sim_decoupled(args):
     import contextlib
     import io
     import zlib
-    import stim_rollout as SR
+    from twin import stim_rollout as SR
     key, i = args
     S = TT._sim_setup()
     m = TT._models(key)[i % 5]
@@ -271,7 +269,7 @@ def _sim_decoupled(args):
 
 def sim(workers=8, only=None):
     import pickle
-    import screen_eval as SE
+    from twin import screen_eval as SE
     for key in [k for k in SKEYS if only is None or SKEYS[k][0] == only]:
         for show in ("sighted", "blind", "decoupled"):
             nm = TT.OUT / f"screen_raw_sim_{key}_{show}.pkl"
@@ -309,8 +307,8 @@ def _mfr(args):
 
 def analyse(workers=10, reps=None):
     import pickle
-    import repulsion_fit as RF
-    import screen_eval as SE
+    from twin import repulsion_fit as RF
+    from twin import screen_eval as SE
     reps = reps or SE.REPS
     meta = json.loads(TABLE_META.read_text())
     used = set(meta["clutch"].values())
@@ -389,7 +387,7 @@ def switch_profiles(out, pool, sims):
     """Distance to the dot across the switch to bout-like motion, and how much closer than chance. Chance = the mean
     distance to the dot rotated by 90 / 180 / 270 deg; for a DECOUPLED fish the rotation it saw is left out (it follows
     that dot, so including it would put the fish closer to 'chance' than to nothing)."""
-    import screen_eval as SE
+    from twin import screen_eval as SE
     clock = SE._episode_clock(SE._kind())
 
     def both(res, decoupled=False):

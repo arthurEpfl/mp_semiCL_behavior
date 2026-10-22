@@ -28,8 +28,7 @@ from pathlib import Path
 import numpy as np
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE)); sys.path.insert(0, str(HERE.parent / "Model"))
-import twin_test as TT  # noqa: E402
+from twin import twin_test as TT  # noqa: E402
 
 OUT = TT.OUT
 UNITS = {"M6 zero-shot s0": "26e", "M6 zero-shot s101": "30d", "F zero-shot s0": "14f", "F zero-shot s101": "32b",
@@ -47,8 +46,8 @@ def _pool():
 
 
 def importances(workers=10, n_repeats=5, only=None):
-    import generative_metrics as GM
-    import screen_eval as SE
+    from twin import generative_metrics as GM
+    from twin import screen_eval as SE
     from sklearn.ensemble import RandomForestClassifier
     from sklearn.metrics import roc_auc_score
     from sklearn.model_selection import GroupKFold
@@ -96,14 +95,14 @@ def importances(workers=10, n_repeats=5, only=None):
 
 def _cr_one(args):
     i, r = args
-    import close_range_diag as CR
+    from twin import close_range_diag as CR
     S = TT._sim_setup()
     f = r["f"].astype(int); x = r["x"].astype(float); y = r["y"].astype(float); seg = r["seg"].astype(int)
     return i, CR.diag(x, y, f, seg, S["dxa"], S["dya"], S["kind"]), CR.diag_p(x, y, f, seg, S["dxa"], S["dya"], S["kind"])
 
 
 def closerange(workers=10, nb=200, only=None):
-    import close_range_diag as CR
+    from twin import close_range_diag as CR
     pool, clutch, used = _pool()
     Rd = pickle.load(open(OUT / "crd_real.pkl", "rb"))["res"]
     Rp = pickle.load(open(OUT / "crp_real.pkl", "rb"))["res"]
@@ -158,7 +157,7 @@ def tow_clutch(nb=300, only=None):
     """The real fish's turn toward the dot by distance (screen_eval.curves, row 0), for the pool's reference fish (the
     98 clutches not used in training), with the 95 % bootstrap over CLUTCHES instead of fish, so that it shares its
     resampling unit with the close-range readouts. -> Model/twin_test/screen_tow_clutch.json"""
-    import screen_eval as SE
+    from twin import screen_eval as SE
     used = set(json.loads((OUT / "screen_train_bouts.json").read_text())["clutch"].values())
     T = pickle.load(open(OUT / "real.pkl", "rb"))
     by = {}

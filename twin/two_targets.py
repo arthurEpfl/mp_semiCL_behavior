@@ -60,11 +60,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-import fit_MLP_border as MB
-import fit_MLP_joint as JT
-import model_figures as MF
-import stim_program as SPm
-import stim_rollout as SR
+from twin import fit_MLP_border as MB
+from twin import fit_MLP_joint as JT
+from twin import model_figures as MF
+from twin import stim_program as SPm
+from twin import stim_rollout as SR
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = Path(os.environ.get("TWO_TARGETS_OUT", ROOT / "Model" / "two_targets"))

@@ -281,8 +281,8 @@ _CACHE = {}
 def _imports():
     if "MF" not in _CACHE:
         sys.path[:0] = [str(HERE), str(ROOT / "Model")]
-        import model_figures as MF
-        import stim_rollout as SR
+        from twin import model_figures as MF
+        from twin import stim_rollout as SR
         _CACHE.update(MF=MF, SR=SR)
     return _CACHE["MF"], _CACHE["SR"]
 
@@ -1288,7 +1288,7 @@ def check_hook(tag="14f", T=600.0):
     """The provider hook ``block_time_s`` reproduces the generator's own clock bit for bit when it returns what the
     generator would compute (the recorded programme as a one-group scene)."""
     MF, SR = _imports()
-    import multi_stim as MS
+    from twin import multi_stim as MS
     prog, dsh, ref = MF._programme()
 
     class Mirror(MS.ProgramGroupsProvider):
@@ -1605,8 +1605,7 @@ def render_npz(npz, out_mp4, trail_s=4.0, dpi=110):
 def make_video(panels, t0, t1, out_mp4, labels, speed=2.0, view=None, body_mm=None):
     """Frame data in this process, rendering in a subprocess (with the bundled ffmpeg when none is on PATH)."""
     import subprocess
-    sys.path.insert(0, str(HERE))
-    import bout_video as BV
+    from twin import bout_video as BV
     out_mp4 = Path(out_mp4)
     out_mp4.parent.mkdir(parents=True, exist_ok=True)
     npz = out_mp4.with_suffix(".npz")

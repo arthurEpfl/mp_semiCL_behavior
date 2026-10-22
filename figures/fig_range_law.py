@@ -15,14 +15,12 @@ Writes Final_Report/figures/fig_range_law.pdf (+ PNG preview) and prints every p
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from style import *  # noqa: F401,F403,E402
+from figures.style import *  # noqa: F401,F403,E402
 
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import scripts.make_report_figures as RF  # noqa: E402
 
 BINS = [0, 10, 20, 30, 45, 70]

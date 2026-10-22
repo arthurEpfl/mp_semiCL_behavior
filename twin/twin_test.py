@@ -165,7 +165,6 @@ def stimulus():
 
 def dot_mm(st, cx, cy, ppm):
     """The dot path in a well's dish-centred mm (y up), NaN while not shown."""
-    sys.path.insert(0, str(PKG))
     import loader
     dx, dy, _ = loader.to_mm(st.stim_x.to_numpy(float), st.stim_y.to_numpy(float), None, cx, cy, ppm)
     shown = st.dot_shown.to_numpy()
@@ -184,9 +183,8 @@ def dot_velocity(dx, dy, f):
 def _real_plate(args):
     plate, rows = args
     import pyarrow.parquet as pq
-    sys.path.insert(0, str(PKG)); sys.path.insert(0, str(HERE))
     import loader
-    import segment_bouts as SB
+    from twin import segment_bouts as SB
     z = zipfile.ZipFile(ZIP)
     cols = ["frame"] + [f"{k}_{int(r['well']):02d}" for r in rows for k in ("x", "y", "heading", "flag")]
     tab = pq.read_table(io.BytesIO(z.read(f"schizscreen_twin_v1/trajectories/plate_{plate:03d}.parquet")), columns=cols,
@@ -280,8 +278,7 @@ _SIM_CACHE = {}
 
 def _sim_setup():
     if "st" not in _SIM_CACHE:
-        sys.path.insert(0, str(HERE)); sys.path.insert(0, str(ROOT / "Model"))
-        import model_figures as MF
+        from twin import model_figures as MF
         st = stimulus()
         fish = pd.read_csv(PKG / "fish.csv")
         ref = fish[fish.exclusion_class == "none"]
@@ -295,8 +292,7 @@ def _sim_setup():
 
 def _models(key):
     if key not in _SIM_CACHE:
-        sys.path.insert(0, str(ROOT / "Model"))
-        import report_models as RM
+        from twin import report_eval as RM
         u = RM._unit(key)
         S = _sim_setup()
         with contextlib.redirect_stdout(io.StringIO()):
@@ -307,8 +303,7 @@ def _models(key):
 
 def _sim_one(args):
     key, i, show = args
-    sys.path.insert(0, str(HERE))
-    import stim_rollout as SR
+    from twin import stim_rollout as SR
     S = _sim_setup()
     m = _models(key)[i % 5]
     cx, cy, R = S["dish"]

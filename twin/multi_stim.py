@@ -57,11 +57,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-import fit_MLP_joint as JT
-import fit_MLP_border as MB
-import model_figures as MF
-import stim_program as SPm
-import stim_rollout as SR
+from twin import fit_MLP_joint as JT
+from twin import fit_MLP_border as MB
+from twin import model_figures as MF
+from twin import stim_program as SPm
+from twin import stim_rollout as SR
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = Path(os.environ.get("MULTI_STIM_OUT", ROOT / "Model" / "multi_stim"))

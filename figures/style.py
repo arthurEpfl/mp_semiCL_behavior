@@ -6,8 +6,7 @@ Okabe-Ito colours, vector PDFs written into ``Final_Report/figures/`` at the wid
 Usage in a figure script (one script per figure, ``scripts/report_figs/fig_<name>.py``):
 
     import sys; from pathlib import Path
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from style import *          # noqa: F401,F403  (sets rcParams, gives save(), panel(), colours)
+    from figures.style import *          # noqa: F401,F403  (sets rcParams, gives save(), panel(), colours)
 
     fig, ax = plt.subplots(figsize=(TEXTWIDTH_IN, 2.4))
     ...
@@ -35,7 +34,6 @@ PNG_DIR = Path(os.environ.get("REPORT_FIG_PNG", REPORT_FINAL_DIR / "png"))
 
 for p in (str(SCRIPTS), str(MODEL)):
     if p not in sys.path:
-        sys.path.insert(0, p)
 
 TEXTWIDTH_IN = 6.3          # \textwidth at a4paper with 2.5 cm margins
 

@@ -39,7 +39,6 @@ MODEL = ROOT / "Model"
 OUT = Path(os.environ.get("MISSING_PIECES_OUT", MODEL / "missing_pieces"))
 for _p in (str(HERE), str(MODEL)):
     if _p not in sys.path:
-        sys.path.insert(0, _p)
 
 PX_MM = 3.60                      # px per mm (Ch. 3); the profile code uses 3.67 (see section 10)
 REJ = {"d0": 2.0, "d1": 10.0, "max_draws": 20}
@@ -80,8 +79,8 @@ _REC = {}
 
 def records():
     if "r" not in _REC:
-        import evaluate as E
-        import fit_MLP_border as MB
+        from twin import evaluate as E
+        from twin import fit_MLP_border as MB
         with contextlib.redirect_stdout(io.StringIO()):
             _REC["r"] = MB.build_border_records(E.load_bouts())
     return _REC["r"]
@@ -102,7 +101,7 @@ def folds_of(d, arm):
 
 
 def load_model(d, file, rej=True):
-    import fit_MLP_mix as MX
+    from twin import fit_MLP_mix as MX
     with contextlib.redirect_stdout(io.StringIO()):
         MX._numpy2_unpickle_compat()
         m = MX.load_mix(str(_ckpt(d) / file))
@@ -136,7 +135,7 @@ REF_KINDS = ("shuffled", "block3", "block10", "block30", "pooled", "hmm")
 
 
 def _bout_arrays(rec):
-    import generative_metrics as GM
+    from twin import generative_metrics as GM
     dd = getattr(rec, "dot_dist_px", None)
     return dict(dth=np.asarray(rec.dtheta, float), sym=np.asarray(rec.symbol, int),
                 dist=np.asarray(rec.distance_px, float), dt=np.asarray(rec.dt_s, float),
@@ -149,7 +148,7 @@ def _take(A, idx):
 
 
 def _win(A, runs):
-    import generative_metrics as GM
+    from twin import generative_metrics as GM
     return GM.window_features_traj(A["dth"], A["sym"], A["dist"], A["dt"], A["dd"], W=W, runs=runs, radial=A["rad"])
 
 
@@ -162,7 +161,7 @@ def _ref_job_real(job):
     step, interval, dot distance and radial position from a random bout of the other 14 fish."""
     fid, hmm_params, reps, seed = job
     _threads1()
-    import fit_hmm as H
+    from twin import fit_hmm as H
     recs = records()
     rec = recs[fid]
     A = _bout_arrays(rec)
@@ -189,7 +188,7 @@ def _ref_job_real(job):
                 gen = H.generate_bouts(hmm_params, n, pool["dt"], pool["dist"], rng)
                 G = _take(pool, rng.integers(0, len(pool["dth"]), size=n))
                 G["dth"] = np.asarray(gen["angle_deg"], float)
-                import evaluate as E
+                from twin import evaluate as E
                 G["sym"] = np.asarray(E.symbols_from_dtheta(G["dth"]), int)
             gens.append(_win(G, runs))
         out[kind] = gens
@@ -199,7 +198,7 @@ def _ref_job_real(job):
 def _fit_hmm_fold(job):
     k, train = job
     _threads1()
-    import fit_hmm as H
+    from twin import fit_hmm as H
     recs = records()
     with contextlib.redirect_stdout(io.StringIO()):
         m = H.fit_hmm_g3_sym([recs[f].dtheta for f in train], n_restarts=2, max_iter=200, seed=0, verbose=False)
@@ -209,7 +208,7 @@ def _fit_hmm_fold(job):
 def realism_refs(reps=WIN_REPS, seed=0, jobs=5):
     """Matched-windowing C2ST AUC of each reference generator (all features / no radial / three heads), the real-vs-real
     floor on the same feature sets, and the models' matched AUC from their saved windows. Cached as 'refs'."""
-    import generative_metrics as GM
+    from twin import generative_metrics as GM
     _threads1()
     folds = folds_of(*HEAD["M6 s0"][:2])
     fish_all = sorted(records())
@@ -260,7 +259,7 @@ def _baseline_job(job):
     """Fit the classical baselines on one fold's training fish and score its held-out fish (bits per bout)."""
     seed, k, train, held = job
     _threads1()
-    import evaluate as E
+    from twin import evaluate as E
     from sklearn.mixture import GaussianMixture
     recs = records()
     tr = [recs[f] for f in train]
@@ -392,7 +391,7 @@ def _props(dth, dist_px, dt, x, y, dish, runs):
 def _prop_job(job):
     lab, d, file, fids, reps, seed = job
     _threads1()
-    import generative_metrics as GM
+    from twin import generative_metrics as GM
     m = load_model(d, file)
     recs = records()
     rows = []
@@ -445,7 +444,7 @@ def properties_table():
 def importances(seed=0):
     """Permutation importance of each window feature for the matched classifier of each headline model (one
     replicate of its cached matched windows). Cached as 'importances'."""
-    import generative_metrics as GM
+    from twin import generative_metrics as GM
     out = {}
     for lab, (d, arm, key) in HEAD.items():
         z = np.load(_ckpt(d) / f"protocol_windows_{arm}.npz", allow_pickle=True)["res"].item()
@@ -460,7 +459,7 @@ def importances(seed=0):
 
 def nearest(jobs=5):
     """Nearest-real-neighbour distance (unseen_fish_yardstick) and the feature-drop AUCs, per headline model."""
-    import unseen_fish_yardstick as Y
+    from twin import unseen_fish_yardstick as Y
     out = {}
     for lab, (d, arm, key) in HEAD.items():
         buf = io.StringIO()
@@ -607,8 +606,8 @@ def _stream_job(job):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    import model_figures as MF
-    from input_ablation import profile_variants_matched
+    from twin import model_figures as MF
+    from twin.input_ablation import profile_variants_matched
     MF.BLOCK_SEED = True                                     # the report units' per-block random streams
     with contextlib.redirect_stdout(io.StringIO()):
         models, _ = MF.fold_models(str(_ckpt(d)), arm, REJ)
@@ -765,7 +764,7 @@ PAIRS = [  # (label, (key A, key B) at seed 0, (key A, key B) at seed 101): diff
 
 
 def _lik_fish(key):
-    import report_models as RM
+    from twin import report_eval as RM
     u = RM._unit(key)
     p = MODEL / "report_ckpts" / f"M{key}" / "likA_model1.csv"
     if not p.exists():
@@ -801,7 +800,7 @@ def centroid_choice(min_dots=2, rng_mm=(5.0, 60.0)):
     """Real data: on bouts with >= 2 dots, turning toward (a) the centroid, (b) the nearest dot, (c) the 1/r-weighted
     centroid, on the bouts where the candidates lie on DIFFERENT sides of the fish (the only bouts that can tell them
     apart). Per fish, moving and static separately. Cached as 'centroid'."""
-    import fit_MLP_border as MB
+    from twin import fit_MLP_border as MB
     rows = []
     for f, rec in sorted(records().items()):
         xs, ys = np.asarray(rec.dot_xs, float), np.asarray(rec.dot_ys, float)
@@ -867,7 +866,7 @@ def neighbour_map(cond, half_mm=40.0, bin_mm=2.0, shifts_s=(60, 120, 180, 240, 3
     """2-D density of neighbour positions in the focal fish's frame (x = its last travel direction), 1 Hz frames over
     the readout window, divided by the same map with the neighbours' tracks shifted in time (chance). Returns (ratio
     map, bin edges, radial profile of the ratio)."""
-    import multi_fish as MFish
+    from twin import multi_fish as MFish
     blob = MFish.load(cond)
     spec = blob["spec"]
     taus = MFish.grid(spec, 1.0)

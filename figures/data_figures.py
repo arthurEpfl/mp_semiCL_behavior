@@ -653,8 +653,7 @@ def _blind_profile_frame(c, keep_outside=False, bin_s=2.0, reps=BLIND_REPS, seed
     static blocks per pause."""
     import sys
     if str(ROOT / "scripts") not in sys.path:
-        sys.path.insert(0, str(ROOT / "scripts"))
-    import model_figures as MF
+    from twin import model_figures as MF
     from scripts.segment_bouts import load_physical_dish
     prog, _, _ = MF._programme()
     dish = load_physical_dish(ROOT / "data/data/Original_data/ROIdef2025-02-20T12_09_16.csv")

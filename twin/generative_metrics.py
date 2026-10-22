@@ -42,8 +42,8 @@ from pathlib import Path
 import numpy as np
 from scipy.stats import wasserstein_distance, ks_2samp
 
-sys.path.insert(0, str(Path(__file__).parent))
-import evaluate as E
+from twin import paths
+from twin import evaluate as E
 
 EPS = 1e-12
 
@@ -225,23 +225,21 @@ def tuning_curve(dtheta, stim_angle, moving, n_bins=7, bin_edges=None):
 # so the block/condition masks still line up with rec. `reanchor=False` reproduces the old replay.
 REANCHOR_EVAL = True
 _PROGRAM_CACHE = {}
-_PROGRAM_FILES = ("assets/stimulus/2025.02.20-0957_trajectory_GsizeMotionSingle_180min.csv.gz",
-                  "data/data/Original_data/2025.02.20-0957_trajectory_GsizeMotionSingle_180min.csv")
+_PROGRAM_FILES = (paths.PROGRAM, paths.TRAJECTORY)
 
 
 def eval_program():
     """The recorded stimulus programme (identical for all 15 fish), loaded once per process. None
     if the file is absent -- sampling then falls back to replaying the recorded dots, loudly."""
     if "p" not in _PROGRAM_CACHE:
-        root = Path(__file__).resolve().parents[1]
-        path = next((root / c for c in _PROGRAM_FILES if (root / c).exists()), None)
+        path = next((c for c in _PROGRAM_FILES if c.exists()), None)
         if path is None:
             import warnings
             warnings.warn("stimulus programme not found -- evaluation rollouts will REPLAY the "
                           "recorded dot positions (block-onset placement artefact NOT removed)")
             _PROGRAM_CACHE["p"] = None
         else:
-            import stim_program as SP
+            from twin import stim_program as SP
             _PROGRAM_CACHE["p"] = SP.load_program(str(path))
     return _PROGRAM_CACHE["p"]
 
@@ -257,13 +255,13 @@ def _stim_kw(model, rec, reanchor=None):
             and getattr(model, "stim_loop", False) and int(cf.get("K_stim", 1)) == 1
             and getattr(rec, "frame_onset", None) is not None):
         return {}
-    import fit_MLP_mix as MX
+    from twin import fit_MLP_mix as MX
     if cf.get("stim_mode") not in MX.ONLINE_STIM_MODES:
         return {}
     prog = eval_program()
     if prog is None:
         return {}
-    import stim_rollout as SR
+    from twin import stim_rollout as SR
     return {"stim_provider": SR.RecordAnchoredProvider(prog, rec)}
 
 
@@ -314,7 +312,7 @@ def _time_in_block(rec):
     Delegates to ``fit_MLP_border.block_onsets``, which is also what the K_stim FEATURES are
     built from -- so the block structure a model is told about and the block structure this
     metric judges it on cannot drift apart."""
-    import fit_MLP_border as _MB
+    from twin import fit_MLP_border as _MB
     start_fr, _bid, fr = _MB.block_onsets(rec, fps=_FPS)
     return (fr - start_fr) / _FPS         # ONE division: bit-identical to the pre-refactor code
 

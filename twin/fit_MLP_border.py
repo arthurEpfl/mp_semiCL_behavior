@@ -22,13 +22,13 @@ from pathlib import Path
 import numpy as np
 import torch
 
-import evaluate as E
-import fit_MLP as M
-from segment_bouts import PX_PER_MM, R0_MM, load_physical_dish
+from twin import evaluate as E
+from twin import paths
+from twin import fit_MLP as M
+from twin.segment_bouts import PX_PER_MM, R0_MM, load_physical_dish
 
 # raw physical ROIdef (true 100 mm dish geometry) -> per-fish (cx, cy, radius)
-_DEFAULT_ROI = (Path(__file__).resolve().parents[1]
-                / "data" / "data" / "Original_data" / "ROIdef2025-02-20T12_09_16.csv")
+_DEFAULT_ROI = paths.ROI_PHYS
 
 DISH_MM = 100.0               # physical dish DIAMETER (Larsch rig); r/R -> mm via 50*(1 - r/R)
 
@@ -387,15 +387,14 @@ def jump_age_table(rebuild=False):
     """(n_frames,) uint8: frames since the last dot jump (or block onset) at each programme frame, capped at 255."""
     if "t" in _JUMP_TABLE and not rebuild:
         return _JUMP_TABLE["t"]
-    root = Path(__file__).resolve().parents[1]
-    cache = root / "clean_data" / "dot_jump_age.npy"
+    cache = paths.CACHE / "dot_jump_age.npy"
     if cache.exists() and not rebuild:
         _JUMP_TABLE["t"] = np.load(cache)
         return _JUMP_TABLE["t"]
     import pandas as pd
-    src = sorted((root / "data" / "data" / "df_transformed").glob("*_f0_transformed_abs.csv"))
+    src = sorted(paths.FRAMES.glob("*_f0_transformed_abs.csv"))
     if not src:
-        raise FileNotFoundError("jump_age_table needs data/data/df_transformed/*_f0_transformed_abs.csv")
+        raise FileNotFoundError(f"jump_age_table needs {paths.FRAMES}/*_f0_transformed_abs.csv")
     d = pd.read_csv(src[0], usecols=["frame", "stimulus"] + [f"d{k}_{s}" for k in range(8) for s in ("x", "y")])
     X = d[[f"d{k}_x" for k in range(8)]].to_numpy(float)
     Y = d[[f"d{k}_y" for k in range(8)]].to_numpy(float)
@@ -1540,7 +1539,6 @@ class MLPBorderLoopDensity(MLPBorderDensity):
 if __name__ == "__main__":
     import sys
     root = Path(__file__).resolve().parents[1]
-    sys.path.insert(0, str(root / "scripts"))
     df = E.load_bouts(str(root / "data" / "bouts_GsizeMotionSingle.csv"))
     records = build_border_records(df)
     recs = list(records.values())

@@ -18,7 +18,7 @@ TW = ROOT / "Model" / "twin_test"
 OUTDIR = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "MSc_Thesis_local" / "figures"
 BINS = np.array([0, 2, 4, 6, 8, 10, 12, 15, 20, 25, 30, 40, 70], float)
 NB = 11                                           # bins up to 40 mm, as fig_screen_response
-from thesis_screen_figs import RESP_XLIM, RESP_YLIM  # noqa: E402  same axes as fig_screen_response
+from figures.fig_screen import RESP_XLIM, RESP_YLIM  # noqa: E402  same axes as fig_screen_response
 plt.rcParams.update({"font.size": 9, "axes.spines.top": False, "axes.spines.right": False, "font.family": "sans-serif"})
 
 VARS = (("F", "F", "#D55E00", 1.4), ("grT", r"$\times 1$", "#9ecae1", 1.6), ("grT2", r"$\times 2$", "#6baed6", 1.6),

@@ -38,9 +38,8 @@ import numpy as np
 import pandas as pd
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE)); sys.path.insert(0, str(HERE.parent / "Model"))
-import twin_test as TT  # noqa: E402
-import repulsion_fit as RF  # noqa: E402
+from twin import twin_test as TT  # noqa: E402
+from twin import repulsion_fit as RF  # noqa: E402
 
 OUT = TT.OUT
 GOUT = HERE.parent / "Model" / "grouprep"
@@ -206,8 +205,8 @@ def variants(key):
 
 def build(key):
     import torch
-    import report_models as RM
-    import profile_finetune as PF
+    from twin import report_eval as RM
+    from twin import profile_finetune as PF
     u = RM._unit(key)
     src = TT.ROOT / "Model" / u["src"]
     for name, (gp, extra) in variants(key).items():
@@ -275,8 +274,8 @@ def test(key, workers=WORKERS):
 # --------------------------------------------------------------------------- #
 def _base_params(model, rec):
     import torch
-    import fit_MLP_border as MB
-    import fit_MLP_joint as JT
+    from twin import fit_MLP_border as MB
+    from twin import fit_MLP_joint as JT
     cf = model._cfg_feat
     X = MB.build_feature_matrix(rec, cf)
     az, lc, lt = JT._cond_cols(rec.dtheta, rec.distance_px, cf["dth_scale"], cf["kin_scales"], y_dt=rec.dt_s)
@@ -286,8 +285,8 @@ def _base_params(model, rec):
 
 
 def _rec_shifts(rec, gp):
-    import fit_MLP_border as MB
-    import fit_MLP_joint as JT
+    from twin import fit_MLP_border as MB
+    from twin import fit_MLP_joint as JT
     h = np.asarray(MB._travel_ref(rec), float)
     dx, dy = np.asarray(rec.dot_xs, float), np.asarray(rec.dot_ys, float)
     s = np.zeros(len(h)); u = np.zeros(len(h)); dmin = np.full(len(h), np.inf)
@@ -302,9 +301,9 @@ def _rec_shifts(rec, gp):
 
 def lik(keys=("14f", "32b"), n_boot=2000):
     import torch
-    import fit_MLP_mix as MX
-    import model_figures as MF
-    import report_models as RM
+    from twin import fit_MLP_mix as MX
+    from twin import model_figures as MF
+    from twin import report_eval as RM
     GOUT.mkdir(parents=True, exist_ok=True)
     rows = []
     recs = MF.records()

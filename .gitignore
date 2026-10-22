@@ -3,68 +3,26 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .ipynb_checkpoints/
-
-# Data and run artifacts (large, not versioned)
-data/
-runs/
-tool_videos/
-abs_dict.pkl
-*.pkl
-
-# Research artifacts: trained checkpoints, ladder result archives and their extracted
-# directories. These are large and reproducible; only the one shipped model is versioned.
-*.pt
-!assets/models/*.pt
-*_results.zip
-*_out/
-data.zip
-colab_bundle.zip
-artifacts.pkl
-
-# Write-up material (large binaries, not part of the code)
-Presentation/
-MasterThesis.pdf
-*.ipynb.bak
-
-# The thesis report is its own git repository, synced with Overleaf. It lives here for
-# convenience but is versioned separately -- do not track it from this repo.
-Final_Report/
-
-# Superseded legacy notebooks: the old per-frame `src/` pipeline, replaced by the bout-level
-# pipeline in scripts/. Untracked (not deleted) -- they still exist in git history and, for
-# whoever has them, on disk.
-notebooks/NN_overfit_1_fish.ipynb
-notebooks/NN_overfit_1_trial_moving.ipynb
-notebooks/NN_all_data.ipynb
-notebooks/prediction/
-notebooks/evaluate.ipynb
-
-# Local tooling config
-.claude/
-
-# Virtual environments
 .venv/
 venv/
 
-# Larsch lab data and repos shared for the collaboration (unpublished; DATA_USE.md: keep out of git)
+# Recordings, trained models and every computed result: never versioned (see data/README.md).
+# Only data/README.md is tracked under data/.
+data/*
+!data/README.md
+output/
+figures/out/
+*.pt
+*.pkl
+*.npz
+*.parquet
+*.mp4
+*.zip
+!assets/*.npz
+
+# Larsch lab screen data and anything derived from it (unpublished; its DATA_USE.md: keep out of git)
 schizscreen_twin_v1*
 behavior-phenotypes-main*
-# derived from the Larsch screen data (twin_test.py caches); same terms as the data
-Model/twin_test/
-Model/twin_test_*.log
-# results derived from the Larsch screen data: keep out of git until J. Larsch agrees on where they may go
-Model/Final_report_extra_data.ipynb
-Model/repfit_*.log
-Model/rep43_*/
-Model/report_ckpts/M43*/
-Model/eval_43*.log
-Model/repfit_ext_*.log
-Model/repfit_run_*.log
-Model/rep50_*/
-Model/report_ckpts/M50*/
-Model/replik_*.log
-Model/eval_50*.log
-Model/twin_test_sim*.log
 
-# screen-trained models (unpublished Larsch screen data)
-Model/screen_trained*/
+# Local tooling
+.claude/

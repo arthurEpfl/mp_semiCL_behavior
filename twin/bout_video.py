@@ -29,7 +29,7 @@ plus ``x_px/y_px/f_ori_rad`` and the physical dish).
 
 Usage (from a notebook, after fitting ``model`` on ``records``):
 
-    import bout_video as BV
+    from twin import bout_video as BV
     BV.make_comparison_video(
         model, records,
         transformed_dir="data/data/df_transformed",
@@ -48,13 +48,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from fit_hmm_stim import _stim01_frame                 # verified real-dots -> 0/1 converter
-from segment_bouts import parse_stimulus, fish_prefix  # exact HMM stimulus-block parsing
+from twin import paths
+from twin.fit_hmm_stim import _stim01_frame                 # verified real-dots -> 0/1 converter
+from twin.segment_bouts import parse_stimulus, fish_prefix  # exact HMM stimulus-block parsing
 
-_ROOT = Path(__file__).resolve().parents[1]
-_DEFAULT_TRANSFORMED = _ROOT / "data" / "data" / "df_transformed"
+_DEFAULT_TRANSFORMED = paths.FRAMES
 FPS = 30
 N_STIMULI = 8
 
@@ -78,7 +77,7 @@ def _bout_positions(model, rec, rng):
     g = model.sample(rec, rng)
     if "x_px" in g and "y_px" in g:
         return np.asarray(g["x_px"], float), np.asarray(g["y_px"], float)
-    import fit_hmm
+    from twin import fit_hmm
     rx, ry, _ = fit_hmm.reconstruct_xy(np.asarray(g["dtheta"], float),
                                        np.asarray(g["distance_px"], float),
                                        theta0=float(rec.f_ori_rad[0]))
@@ -393,9 +392,9 @@ def make_comparison_video_like_hmm(model, records, out_dir, out_mp4, *,
 # Smoke test:  python scripts/bout_video.py
 # --------------------------------------------------------------------------- #
 if __name__ == "__main__":
-    import evaluate as E
-    import fit_MLP_border as MB
-    import fit_MLP_mix as MX
+    from twin import evaluate as E
+    from twin import fit_MLP_border as MB
+    from twin import fit_MLP_mix as MX
 
     df = E.load_bouts(str(_ROOT / "data" / "bouts_GsizeMotionSingle.csv"))
     records = MB.build_border_records(df)

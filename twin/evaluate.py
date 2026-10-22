@@ -51,9 +51,8 @@ from pathlib import Path
 import numpy as np
 from scipy.special import erf, gammainc          # normal / gamma CDFs for the symbol track
 
-sys.path.insert(0, str(Path(__file__).parent))
-import fit_hmm as H
-import fit_hmm_stim as S
+from twin import fit_hmm as H
+from twin import fit_hmm_stim as S
 
 LN2 = np.log(2.0)
 DTHETA0 = H.DTHETA0_DEG                            # +/-10 deg forward/turn threshold
@@ -97,13 +96,10 @@ def load_bouts(path=None):
     run-aware metric path silently falls back to its flat form -- pass it explicitly only
     when reproducing an archived number.
 
-    ``path=None`` resolves against the REPO ROOT, not the working directory -- the previous
-    relative default only worked when run from the root."""
+    ``path=None`` is ``paths.BOUTS``."""
     import pandas as pd
-    from pathlib import Path as _P
-    if path is None:
-        path = _P(__file__).resolve().parents[1] / "clean_data" / "bouts_clean.csv"
-    return pd.read_csv(path)
+    from twin import paths
+    return pd.read_csv(paths.BOUTS if path is None else path)
 
 
 def build_records(df, min_len=10, group_cols=("fish_id", "segment_id"),

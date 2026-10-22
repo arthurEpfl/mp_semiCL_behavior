@@ -12,8 +12,7 @@ single-bout scatter). Writes Final_Report/figures/fig_rule_3panel.pdf (fig_rule.
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from style import *  # noqa: F401,F403,E402
+from figures.style import *  # noqa: F401,F403,E402
 
 import json  # noqa: E402
 from concurrent.futures import ProcessPoolExecutor  # noqa: E402
@@ -21,8 +20,8 @@ from concurrent.futures import ProcessPoolExecutor  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
-import fig_rule as FR  # noqa: E402
-import missing_pieces as P  # noqa: E402
+from figures import fig_rule as FR  # noqa: E402
+from twin import missing_pieces as P  # noqa: E402
 
 
 N_DRAW = P.N_DRAW
@@ -60,7 +59,7 @@ def _kin_draws(MF, model, rec, rng, n_draw):
 def _kin_job(job):
     lab, d, file, fids = job
     P._threads1()
-    import model_figures as MF
+    from twin import model_figures as MF
     m = P.load_model(d, file)
     recs = P.records()
     parts = []

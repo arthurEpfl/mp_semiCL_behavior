@@ -13,8 +13,7 @@ import sys
 import os
 
 repo_root = os.path.abspath(os.path.join(os.getcwd(), '..'))
-sys.path.append(repo_root)
-from src import analyse as an
+from twin import frames_helpers as an
 
 
 

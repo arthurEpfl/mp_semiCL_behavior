@@ -18,8 +18,7 @@ import glob
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from style import *  # noqa: F401,F403,E402
+from figures.style import *  # noqa: F401,F403,E402
 
 import numpy as np  # noqa: E402
 import torch  # noqa: E402

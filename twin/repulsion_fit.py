@@ -36,8 +36,7 @@ from pathlib import Path
 import numpy as np
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE)); sys.path.insert(0, str(HERE.parent / "Model"))
-import twin_test as TT  # noqa: E402
+from twin import twin_test as TT  # noqa: E402
 
 SPLIT_SEED = 2026
 N_FISH = 200
@@ -243,8 +242,8 @@ def build(key):
     """Copy F's fold checkpoints with cfg_feat['repulsion'] set to the fitted values (T and TB), new arm names, the
     manifest, and the held-out likelihood table (profile_finetune.write_likA, which scores with the term)."""
     import torch
-    import report_models as RM
-    import profile_finetune as PF
+    from twin import report_eval as RM
+    from twin import profile_finetune as PF
     u = RM._unit(key)
     src = TT.ROOT / "Model" / u["src"]
     fitres = json.loads((TT.OUT / f"repfit_{key}.json").read_text())

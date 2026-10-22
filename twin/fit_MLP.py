@@ -49,9 +49,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-sys.path.insert(0, str(Path(__file__).parent))
-import fit_hmm as H          # emission constants + numpy reference emissions
-import evaluate as E         # GenerativeModel, build_records, make_context, symbol_logmass
+from twin import fit_hmm as H          # emission constants + numpy reference emissions
+from twin import evaluate as E         # GenerativeModel, build_records, make_context, symbol_logmass
 
 # ----------------------------- constants ------------------------------------ #
 DTHETA0 = H.DTHETA0_DEG       # 10.0 deg forward/turn threshold
@@ -986,7 +985,7 @@ def _stim_block(rec, stim_mode, rich_scales, phi_ref="ori"):
         if kw.get("drift"):
             # each dot's velocity across the line of sight since the PREVIOUS bout of the record, on the
             # record's own frame clock -- the generator does the same on whichever clock its dots come from
-            from fit_MLP_border import _FPS
+            from twin.fit_MLP_border import _FPS
             X = np.asarray(xs, float); Y = np.asarray(ys, float)
             Xp = np.vstack([np.full((1, X.shape[1]), np.nan), X[:-1]])
             Yp = np.vstack([np.full((1, Y.shape[1]), np.nan), Y[:-1]])

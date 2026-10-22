@@ -50,7 +50,6 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).parent))
 
 FPS = 30.0
 PX_TO_MM = 3.67
@@ -71,7 +70,7 @@ def attach_stim_turn(model, v2=False, v3=False, v4=False, v5=None):
     late-block factor (15 numbers; Model 40), centroid layout only; ``v5`` = 'S' / 'B' / 'BS' / 'Bst', the
     count-gated terms (report Model 11; ``JT.StimTurnTermV5``), centroid layout only."""
     import torch
-    import fit_MLP_joint as JT
+    from twin import fit_MLP_joint as JT
     net = model._model
     if int(getattr(net, "state", 0) or 0):
         raise ValueError("the profile fine-tune is built for non-recurrent nets (state = 0)")
@@ -104,7 +103,7 @@ def _unfold_gain(m):
     ``_refold``. They were calibrated for FRESH prior draws; the fine-tune rolls the TRAINING fish out at their
     FITTED z, which belongs with the loadings as fitted -- the g3h step gain of ~0.5 would otherwise halve each
     training fish's own step level."""
-    import fit_MLP_fishre as FR
+    from twin import fit_MLP_fishre as FR
     g = getattr(m, "re_gain", None)
     if g is None:
         return None
@@ -114,7 +113,7 @@ def _unfold_gain(m):
 
 
 def _refold(m, gd):
-    import fit_MLP_fishre as FR
+    from twin import fit_MLP_fishre as FR
     if gd is not None:
         FR.apply_loading_gain(m._model, dict(gd), which="all")
 
@@ -154,7 +153,7 @@ def block_starts(model, rec, conds=MOVING_CONDS, t_max=T_MAX_S, p_max=P_MAX, min
     the early curve, and pushed every v5 fine-tune toward more pull (the lost late-block rebound). With ``reanchor`` the
     warm-up record carries ``_reanchor_at = P``: both engines move the track rigidly onto the simulated fish's pose at
     bout P (``MB.reanchor_track``, the rig's rule) and score the rollout against those dots."""
-    import fit_MLP_border as MB
+    from twin import fit_MLP_border as MB
     cf = model._cfg_feat
     lev = MB.kin_dt_level(rec.dt_s, cf["kin_scales"][2])
     s0, bid, fr = MB.block_onsets(rec)
@@ -232,7 +231,7 @@ def rollout_starts(model, batch, M, seed, step, crn=1):
     free-run turn and step DRAWS and the step head's turn conditioner) -- the forced prefix is excluded from
     everything scored. ``crn`` > 1 = COMMON RANDOM NUMBERS: the same draws for ``crn`` consecutive steps, so
     step-to-step changes in the gradient come from theta, not from fresh noise."""
-    import fit_MLP_joint as JT
+    from twin import fit_MLP_joint as JT
     cf = model._cfg_feat
     res = []
     for s in batch:
@@ -277,7 +276,7 @@ def rollouts(model, batch, M, seed, step, zmap, crn=1, engine="numpy"):
     'batch' = ``rollout_batch`` (all trajectories of a chunk at once; verified equal in features, equal in
     distribution). Same per-rollout dicts, same order."""
     if engine == "batch":
-        import rollout_batch as RB
+        from twin import rollout_batch as RB
         return RB.rollout_starts(model, batch, M, seed, step, zmap, crn=crn)
     return rollout_starts(model, batch, M, seed, step, crn=crn)
 
@@ -304,8 +303,8 @@ def _logp(net, base, X, dth, base_do=None, dist=None):
     """(n,) log p(turn | row; theta) [+ log p(step | row, turn; theta) when the v2 step lever is attached and
     ``base_do`` / ``dist`` are given], with the frozen parts ``base`` / ``base_do`` -- differentiable in theta."""
     import torch
-    import fit_MLP_mix as MX
-    import fit_MLP as M
+    from twin import fit_MLP_mix as MX
+    from twin import fit_MLP as M
     Xt = torch.as_tensor(X, dtype=torch.float32)
     lp = MX.mix_logdens(torch.as_tensor(dth, dtype=torch.float32), net._angle_params(base + net.stim_turn(Xt)))
     if base_do is not None and getattr(net.stim_turn, "v2", False):
@@ -378,7 +377,7 @@ def profile_surrogate(net, rolls, w, zmap, chunk=65536):
 # ----------------------------------------------------------------------------- the likelihood anchor
 def _head_weights(r, rw):
     """{turn, dist, dt} per-bout training weights, exactly as the trainer applies ``regime_w``."""
-    import fit_MLP_border as MB
+    from twin import fit_MLP_border as MB
     ones = np.ones(r.n)
     if not rw:
         return dict(turn=ones, dist=ones, dt=ones)
@@ -392,8 +391,8 @@ def _head_weights(r, rw):
 def nll_cache(model, recs, train_fish, zmap):
     """Everything the JOINT likelihood needs, built once per fold: feature rows, the three real channels,
     the within-bout conditioners, each fish's fitted z per row, and the training regime weights per head."""
-    import fit_MLP_border as MB
-    import fit_MLP_joint as JT
+    from twin import fit_MLP_border as MB
+    from twin import fit_MLP_joint as JT
     cf = model._cfg_feat
     rw = getattr(model, "regime_w", None)
     parts = []
@@ -414,7 +413,7 @@ def nll_joint(net, cache, idx):
     and step terms depend on theta; the interval head reads the REAL turn and step at training time and no
     lever, so its NLL is a constant here: computed and logged, not trained."""
     import torch
-    import fit_MLP_fishre as FR
+    from twin import fit_MLP_fishre as FR
     t = lambda k, dt=torch.float32: torch.as_tensor(cache[k][idx], dtype=dt)
     la, ld, lt, md, mt = FR._chan_logliks(net, t("X"), t("az"), t("lc"), t("ya"), t("yd"), t("yt"), t("z"))
     wa, wd, wt = t("wa"), t("wd"), t("wt")
@@ -468,7 +467,7 @@ def _freeze_base(net):
 
 
 def _load(src, rej):
-    import fit_MLP_mix as MX
+    from twin import fit_MLP_mix as MX
     import torch
     m = MX.load_mix(str(src))
     if rej:
@@ -485,7 +484,7 @@ def gradient_gate(src, rej=None, B=40, M=8, pairs=4, seed=0, v2=False, v3=False,
     pre-registered bar is a mean cosine >= 0.4 at the planned batch size; below it the fine-tune would be
     pushing on noise, as ``rollout_aware.py`` did."""
     import torch
-    import model_figures as MF
+    from twin import model_figures as MF
     torch.set_num_threads(1)
     m, blob = _load(src, rej)
     attach_stim_turn(m, v2=v2, v3=v3, v4=v4)
@@ -531,8 +530,8 @@ def finetune_fold(job):
     nll_batch, seed."""
     src, dst, cfg = job
     import torch
-    import fit_MLP_mix as MX
-    import model_figures as MF
+    from twin import fit_MLP_mix as MX
+    from twin import model_figures as MF
     torch.set_num_threads(1)
     t0 = time.time()
     m, blob = _load(src, cfg.get("rej"))
@@ -701,10 +700,9 @@ def write_likA(dst_dir, new_arm):
     """Held-out Metric A / C per fish for the ``new_arm`` checkpoints in ``dst_dir`` -> ``likA_model1.csv`` (appended),
     the per-fish table every ladder folder carries and ``merge_ckpt_dirs`` requires. Teacher-forced, no rollouts."""
     import pandas as pd
-    import fit_MLP_mix as MX
-    import model_figures as MF
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from train_model1_colab import metricA, metricC
+    from twin import fit_MLP_mix as MX
+    from twin import model_figures as MF
+    from twin.training import metricA
     dst_dir = Path(dst_dir)
     recs = MF.records()
     rows = []
@@ -714,7 +712,7 @@ def write_likA(dst_dir, new_arm):
         m = MX.load_mix(str(dst_dir / e["file"]))
         for f in e.get("heldout", []):
             rows.append(dict(arm=new_arm, rep=e.get("rep"), order=e.get("order"), latent=e.get("latent"),
-                             fold=e["fold"], fish=int(f), **metricA(m, recs[int(f)]), **metricC(m, recs[int(f)])))
+                             fold=e["fold"], fish=int(f), **metricA(m, recs[int(f)])))
     lik = pd.DataFrame(rows)
     if (dst_dir / "likA_model1.csv").exists():
         lik = pd.concat([pd.read_csv(dst_dir / "likA_model1.csv"), lik], ignore_index=True)

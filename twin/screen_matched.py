@@ -29,9 +29,8 @@ from pathlib import Path
 import numpy as np
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE))
-import screen_eval as SE  # noqa: E402
-import twin_test as TT  # noqa: E402
+from twin import screen_eval as SE  # noqa: E402
+from twin import twin_test as TT  # noqa: E402
 
 OUT = TT.OUT
 W = SE.W
@@ -63,8 +62,8 @@ def kept(r):
 
 
 def feats(b, a):
-    import evaluate as E
-    import generative_metrics as GM
+    from twin import evaluate as E
+    from twin import generative_metrics as GM
     s = slice(a, a + W)
     X = GM.window_features_traj(b["dth"][s], E.symbols_from_dtheta(b["dth"][s]), b["dist"][s], b["dt"][s], b["dd"][s],
                                 W=W, radial=b["rad"][s])
@@ -73,7 +72,7 @@ def feats(b, a):
 
 def real_windows(args):
     """(features (k, 39), start frames (k,)) of one real fish, exactly screen_eval's windows."""
-    import generative_metrics as GM
+    from twin import generative_metrics as GM
     fid, r = args
     b = kept(r)
     if b is None:
@@ -153,7 +152,7 @@ def c2st_strat(XA, gA, XB, gB, seed):
 
 
 def importances(XR, gR, XS, gS, n_repeats=5):
-    import generative_metrics as GM
+    from twin import generative_metrics as GM
     from sklearn.ensemble import RandomForestClassifier
     from sklearn.metrics import roc_auc_score
     from sklearn.model_selection import GroupKFold
@@ -231,7 +230,7 @@ def single_table(workers=10):
     CLUTCH (no sibling of a test fish in training; grouped by fish, ~4 siblings per clutch let the classifier recognise
     clutches, 0.577), the zero-shot BLIND models matched on the pool, and our 15 real fish against the pool (30
     features; unmatched by nature, no shared session)."""
-    import repulsion_fit as RF
+    from twin import repulsion_fit as RF
     from sklearn.ensemble import RandomForestClassifier
     from sklearn.metrics import roc_auc_score
     from sklearn.model_selection import GroupKFold, StratifiedGroupKFold
@@ -319,7 +318,7 @@ if __name__ == "__main__" and len(sys.argv) > 1 and sys.argv[1] == "single":
     sys.exit(0)
 
 if __name__ == "__main__":
-    import repulsion_fit as RF
+    from twin import repulsion_fit as RF
     workers = int(sys.argv[1]) if len(sys.argv) > 1 else 10
     Rr = pickle.load(open(OUT / "screen_raw_real.pkl", "rb"))
     halves = RF.clutch_split()

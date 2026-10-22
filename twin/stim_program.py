@@ -25,7 +25,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from segment_bouts import PX_PER_MM, STIM_NONE, parse_stimulus
+from twin import paths
+from twin.segment_bouts import PX_PER_MM, STIM_NONE, parse_stimulus
 
 FPS = 30.0
 N_DOTS = 8
@@ -328,15 +329,14 @@ class PhysicalProgram:
                 f"{self.start_pose[2]:.2f} rad); dish {tuple(round(v, 1) for v in self.dish)}")
 
 
-def build_physical_program(fish_id, program, transformed_dir="data/data/df_transformed",
-                           roi_path="data/data/Original_data/ROIdef2025-02-20T12_09_16.csv"):
+def build_physical_program(fish_id, program, transformed_dir=paths.FRAMES, roi_path=paths.ROI_PHYS):
     """Resolve ``program`` through real fish ``fish_id``'s recording -> :class:`PhysicalProgram`.
 
     Reads the absolute dot columns the transform pipeline already produced, rather than re-deriving
     them: those are the ground truth for what that dish displayed (and this module's ``--verify``
     proves our own anchoring reproduces them to 1e-13 px).
     """
-    from segment_bouts import load_physical_dish
+    from twin.segment_bouts import load_physical_dish
 
     cands = sorted(Path(transformed_dir).glob(f"*_f{int(fish_id)}_transformed_abs.csv"))
     if not cands:
@@ -380,7 +380,7 @@ def build_physical_program(fish_id, program, transformed_dir="data/data/df_trans
 # Verification against the shipped transformed CSVs
 # --------------------------------------------------------------------------- #
 def verify_against_transformed(program, fish_id=0,
-                               transformed_dir="data/data/df_transformed",
+                               transformed_dir=paths.FRAMES,
                                max_blocks=6, tol=1e-9, verbose=True):
     """Re-derive the REAL absolute dot tracks from this program + the real fish pose at each
     block onset, and compare with the shipped ``*_f{N}_transformed_abs.csv``.

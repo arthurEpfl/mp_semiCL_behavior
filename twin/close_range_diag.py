@@ -35,8 +35,7 @@ import numpy as np
 import pandas as pd
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE)); sys.path.insert(0, str(HERE.parent / "Model"))
-import twin_test as TT  # noqa: E402
+from twin import twin_test as TT  # noqa: E402
 
 OUT = TT.OUT
 GOUT = HERE.parent / "Model" / "grouprep"
@@ -232,9 +231,8 @@ def phase_share(S):
 def _real_plate(args):
     plate, rows, fn = args
     import pyarrow.parquet as pq
-    sys.path.insert(0, str(TT.PKG)); sys.path.insert(0, str(HERE))
     import loader
-    import segment_bouts as SB
+    from twin import segment_bouts as SB
     z = zipfile.ZipFile(TT.ZIP)
     cols = ["frame"] + [f"{k}_{int(r['well']):02d}" for r in rows for k in ("x", "y", "heading", "flag")]
     tab = pq.read_table(io.BytesIO(z.read(f"schizscreen_twin_v1/trajectories/plate_{plate:03d}.parquet")), columns=cols,
@@ -285,13 +283,13 @@ def run_real(workers=10, fn="diag"):
 # Model side (the held-out test's simulations, same streams)
 # --------------------------------------------------------------------------- #
 def _gp(key, var):
-    import grouprep_fit as GF
+    from twin import grouprep_fit as GF
     return None if var == "F" else GF.variants(key)[var][0]
 
 
 def _sim(args):
     key, var, i, fn = args
-    import stim_rollout as SR
+    from twin import stim_rollout as SR
     S = TT._sim_setup()
     m = TT._models(key)[i % 5]
     base = m.__dict__.setdefault("_cfg_base", dict(m._cfg_feat))
@@ -388,7 +386,7 @@ def summarise(res, groups, nb=300, seed=0):
 
 
 def report(nb=300):
-    import repulsion_fit as RF
+    from twin import repulsion_fit as RF
     R = pickle.load(open(OUT / "crd_real.pkl", "rb"))
     keep = set(RF.clutch_split()["test"])
     by = {}
@@ -436,7 +434,7 @@ P_VARS = ("F", "grT", "grT2")
 
 
 def report_pursuit(nb=200):
-    import repulsion_fit as RF
+    from twin import repulsion_fit as RF
     R = pickle.load(open(OUT / "crp_real.pkl", "rb"))
     keep = set(RF.clutch_split()["test"])
     by = {}

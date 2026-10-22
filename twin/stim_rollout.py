@@ -24,14 +24,14 @@ from pathlib import Path
 
 import numpy as np
 
-import evaluate as E
-import fit_MLP_joint as JT
-import fit_MLP_mix as MX
-from segment_bouts import PX_PER_MM, load_physical_dish
+from twin import evaluate as E
+from twin import fit_MLP_joint as JT
+from twin import fit_MLP_mix as MX
+from twin import paths
+from twin.segment_bouts import PX_PER_MM, load_physical_dish
 
-_ROOT = Path(__file__).resolve().parents[1]
-_DEFAULT_ROI = _ROOT / "data" / "data" / "Original_data" / "ROIdef2025-02-20T12_09_16.csv"
-_DEFAULT_TRANSFORMED = _ROOT / "data" / "data" / "df_transformed"
+_DEFAULT_ROI = paths.ROI_PHYS
+_DEFAULT_TRANSFORMED = paths.FRAMES
 
 # Generous per-bout budget: real median dt is ~1.3 s, so 0.2 s/bout over-allocates ~6x. Only
 # the array allocation scales with it (~0.4 ms/bout is paid per bout ACTUALLY generated). It was
@@ -531,7 +531,7 @@ def verify_provider_parity(program, records, fish_id=0,
 if __name__ == "__main__":
     import argparse
 
-    import stim_program as SP
+    from twin import stim_program as SP
 
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--traj", default=str(_ROOT / "data" / "data" / "Original_data"
@@ -543,7 +543,7 @@ if __name__ == "__main__":
     ap.add_argument("--smoke", action="store_true", help="short programme, plus all checks")
     a = ap.parse_args()
 
-    import fit_MLP_border as MB
+    from twin import fit_MLP_border as MB
 
     print("loading programme ...")
     prog = SP.load_program(a.traj)

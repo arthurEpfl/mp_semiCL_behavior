@@ -83,12 +83,11 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-sys.path.insert(0, str(Path(__file__).parent))
-import evaluate as E                    # noqa: E402
-import fit_MLP as M                     # noqa: E402
-import fit_MLP_border as MB             # noqa: E402
-import fit_MLP_joint as JT              # noqa: E402
-import fit_MLP_mix as MX                # noqa: E402
+from twin import evaluate as E                    # noqa: E402
+from twin import fit_MLP as M                     # noqa: E402
+from twin import fit_MLP_border as MB             # noqa: E402
+from twin import fit_MLP_joint as JT              # noqa: E402
+from twin import fit_MLP_mix as MX                # noqa: E402
 
 
 # =========================================================================== #
@@ -855,7 +854,7 @@ def ss_draw(net, X, a_z, ld_c, z, dth_scale, kin_scales, kin_clip):
     drift / state shift is off (``s=None``): this is the fast lag feedback; the slow state is the
     drift's job. Draws use the global torch RNG (seeded by the trainer) through rollout_torch's
     samplers, which clamp at the same ``kin_clip`` the generator uses."""
-    import rollout_torch as RT
+    from twin import rollout_torch as RT
     dm, ds, _tm, _ts = kin_scales
     ang, _d, _t = net.joint_forward_re(X, a_z, ld_c, z)
     ya = RT.sample_angle(ang, dth_scale, 1.0, reparam=False)
@@ -1606,7 +1605,7 @@ def state_rollout_batch(net, rec, cfg_feat, n, rng, n_cap=None):
     trajectories with real ones bout for bout, and a short rollout would change the comparison
     rather than just its precision. Default None = the record's own length.
     """
-    import rollout_torch as RT
+    from twin import rollout_torch as RT
     dev = torch.device("cpu")
     n = int(n)
     static = RT.build_static([rec], cfg_feat, dev)
@@ -1796,7 +1795,7 @@ def state_rollout_many(net, records, cfg_feat, n_draws, rng, n_cap=None, static=
     rolls out repeatedly -- it depends only on the records and cfg, so rebuilding it once per grid
     point (12 records x up to 6686 bouts of stimulus arrays) is pure repeated work.
     """
-    import rollout_torch as RT
+    from twin import rollout_torch as RT
     dev = torch.device("cpu")
     records = list(records)
     nd = int(n_draws)
@@ -1919,7 +1918,7 @@ def search_loading_gain_per_channel(net, records, cfg_feat, *, grid=GAIN_GRID, s
     # 12 records' worth of stimulus arrays for nothing.
     _static = None
     if _state:
-        import rollout_torch as _RT
+        from twin import rollout_torch as _RT
         _static = _RT.build_static(records, cfg_feat, torch.device("cpu"))
     cache = {}
 

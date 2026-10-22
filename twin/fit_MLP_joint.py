@@ -58,11 +58,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-sys.path.insert(0, str(Path(__file__).parent))
-import evaluate as E                    # noqa: E402
-import fit_MLP as M                     # noqa: E402
-import fit_MLP_border as MB             # noqa: E402
-import fit_MLP_mix as MX                # noqa: E402
+from twin import evaluate as E                    # noqa: E402
+from twin import fit_MLP as M                     # noqa: E402
+from twin import fit_MLP_border as MB             # noqa: E402
+from twin import fit_MLP_mix as MX                # noqa: E402
 
 _EMPTY = np.zeros(0)                    # allocation-free stand-in for an absent feature block
 

@@ -27,9 +27,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, str(Path(__file__).parent))
-import fit_MLP as M  # noqa: E402
-import fit_MLP_border as MB  # noqa: E402
+from twin import fit_MLP as M  # noqa: E402
+from twin import fit_MLP_border as MB  # noqa: E402
 
 
 @contextlib.contextmanager
@@ -80,7 +79,7 @@ def profile_variants(ckpt_dir, arm, variants, rej=None, r_per_model=10, progress
     seed of the unablated model is the profile's rollout-noise floor) and optionally ``arm`` /
     ``ckpt_dir`` to put ANOTHER arm on the same figure. Returns (summary table, {label: bouts})."""
     import matplotlib.pyplot as plt
-    from model_figures import (STIMULI_ORDER, _curves, generated_dot_profile, profile_metrics,
+    from twin.model_figures import (STIMULI_ORDER, _curves, generated_dot_profile, profile_metrics,
                                profile_summary, real_dot_profile, stim_label)
     st = real_dot_profile()
     gens, rows = {}, []
@@ -155,7 +154,7 @@ def profile_variants_matched(ckpt_dir, arm, variants, rej=None, r_per_model=10, 
     (the unmatched curve, i.e. what ``profile_variants`` draws) and `matched`.
     """
     import matplotlib.pyplot as plt
-    from model_figures import (STIMULI_ORDER, _curves, _programme, generated_dot_profile,
+    from twin.model_figures import (STIMULI_ORDER, _curves, _programme, generated_dot_profile,
                                metrics_from_curves, parse_stim, profile_summary, real_block_weights,
                                real_dot_profile, stim_label, weighted_curves)
     program, _, _ = _programme()

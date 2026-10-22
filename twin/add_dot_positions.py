@@ -16,16 +16,16 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from stim_program import STIM_NONE  # noqa: E402
+from twin import paths
+from twin.stim_program import STIM_NONE  # noqa: E402
 
 K = 8
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--bouts", type=Path, default=Path("clean_data/bouts_clean.csv"))
-    ap.add_argument("--transformed", type=Path, default=Path("data/data/df_transformed"))
+    ap.add_argument("--bouts", type=Path, default=paths.BOUTS)
+    ap.add_argument("--transformed", type=Path, default=paths.FRAMES)
     args = ap.parse_args()
     df = pd.read_csv(args.bouts)
     n0 = len(df)

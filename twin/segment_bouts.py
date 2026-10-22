@@ -58,6 +58,7 @@ import numpy as np
 import pandas as pd
 from scipy.ndimage import gaussian_filter1d
 from scipy.signal import find_peaks
+from twin import paths
 
 # ----------------------------- constants ------------------------------------ #
 FPS = 30.0
@@ -376,7 +377,7 @@ def add_dist_to_border(bouts, dish):
 R0_MM = 20.0     # proximity softening (mm); matches fit_hmm_stim retinal-size weight
 
 
-def add_dist_to_dot(bouts, transformed_dir=Path("data/data/df_transformed"),
+def add_dist_to_dot(bouts, transformed_dir=paths.FRAMES,
                     n_stimuli=8, r0_mm=R0_MM):
     """Add per-bout ACTIVE-DOT geometry, looked up from the per-frame transformed CSVs by
     ``frame_onset`` (the stimulus analogue of ``add_dist_to_border``):

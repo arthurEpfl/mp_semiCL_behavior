@@ -55,7 +55,6 @@ import pandas as pd
 
 OUT = Path(__file__).resolve().parent          # artifacts land next to this script
 ROOT = OUT if (OUT / "scripts").exists() else OUT.parent   # repo root, for imports only
-sys.path.insert(0, str(ROOT / "scripts"))
 
 # One source of truth for every knob, shared by the CLI and the notebook entry point, so the
 # two can never drift into different defaults.
@@ -128,10 +127,10 @@ def _recal_one(args_):
     src, dst, reps = args_
     import torch
     torch.set_num_threads(1)
-    import evaluate as E
-    import fit_MLP_border as MB
-    import fit_MLP_mix as MX
-    import fit_MLP_fishre as FR
+    from twin import evaluate as E
+    from twin import fit_MLP_border as MB
+    from twin import fit_MLP_mix as MX
+    from twin import fit_MLP_fishre as FR
     recs = _RECS if (_RECS := globals().get("_RECS")) else None
     if recs is None:
         recs = MB.build_border_records(E.load_bouts())
@@ -229,10 +228,10 @@ def _one(args_):
     ckpt, fid, R, seed, creps, skip_panel, cfg_override = args_
     import torch
     torch.set_num_threads(1)                     # see SPEED above
-    import evaluate as E
-    import fit_MLP_border as MB
-    import fit_MLP_mix as MX
-    import generative_metrics as GM
+    from twin import evaluate as E
+    from twin import fit_MLP_border as MB
+    from twin import fit_MLP_mix as MX
+    from twin import generative_metrics as GM
     recs = _RECS if (_RECS := globals().get("_RECS")) else None
     if recs is None:
         recs = MB.build_border_records(E.load_bouts())
@@ -263,8 +262,8 @@ def _profile_one(args_):
     ckpt, k, r, cfg_override = args_
     import torch
     torch.set_num_threads(1)
-    import fit_MLP_mix as MX
-    import model_figures as MF
+    from twin import fit_MLP_mix as MX
+    from twin import model_figures as MF
     m = MX.load_mix(str(ckpt))
     if cfg_override:
         m._cfg_feat = {**m._cfg_feat, **cfg_override}
@@ -301,7 +300,7 @@ def run(**kw):
     """NOTEBOOK ENTRY POINT -- run in a normal cell, no ``!``, output lands in the cell.
 
         import sys; sys.path.insert(0, "Model")          # or wherever this file lives
-        from rollout_model1_local import run
+        from twin.rollout_eval import run
         panel, c2st = run(ckpt_dir="model1_checkpoints", R=20)
 
         # the same checkpoints with a generation-time rule added (e.g. rej's wall rejection);
@@ -373,7 +372,7 @@ def _run(args):
         raise ValueError("skip_panel with c2st_reps=0 would compute nothing at all")
 
     import torch
-    import fit_MLP_mix as MX
+    from twin import fit_MLP_mix as MX
     # Colab pickles under numpy 2 ("numpy._core"); a local numpy 1 cannot find that module and
     # torch.load dies. The WORKERS get the shim for free via load_mix, but this parent-side read
     # of `rollout_seed` does not -- so the run failed before a single rollout started, purely on
@@ -430,7 +429,7 @@ def _run(args):
           f"R={'skipped' if args.skip_panel else args.R}, "
           f"c2st_reps={args.c2st_reps}, jobs={args.jobs}  "
           f"({len(jobs) * per:,} rollouts total)")
-    import generative_metrics as GM
+    from twin import generative_metrics as GM
     print("stimulus: " + ("RE-ANCHORED to each simulated fish at block onset (the rig's rule)"
                           if GM.REANCHOR_EVAL and GM.eval_program() is not None else
                           "REPLAYED from the real fish -- block-onset placement artefact PRESENT"))
@@ -446,7 +445,7 @@ def _run(args):
     _sp = p.arm.str.extract(r"^(?P<rep>.+?)_(?P<order>[adt]{3})(?:_.+)?$")
     p["rep"] = _sp["rep"].fillna(p.arm)
     p["order"] = _sp["order"]
-    import generative_metrics as GM
+    from twin import generative_metrics as GM
     if args.skip_panel:
         print(f"panel skipped ({time.time()-t0:.0f}s of C2ST rollouts); "
               f"{args.out} left as it was")
@@ -484,7 +483,7 @@ def profile(ckpts, ov, tag, d, args):
     are averaged per fish over the whole block and every dot condition, which is exactly what
     hides the transient (dip amplitude / latency), the static drift-away rate and the dot-count
     grading this section reports."""
-    import model_figures as MF
+    from twin import model_figures as MF
     by_arm = {}
     for ck in ckpts:
         by_arm.setdefault(re.sub(r"_fold\d+$", "", ck.stem), []).append(ck)
@@ -541,7 +540,7 @@ def c2st(p, wins, d, args):
     held it out, so the union over an arm's folds is a full 15-fish, fully held-out panel --
     the same construction the Metric B table above uses, just pooled instead of averaged.
     """
-    import generative_metrics as GM
+    from twin import generative_metrics as GM
     t0 = time.time()
     _tg = str(getattr(args, "tag", "") or "").strip("_")
     imp_arms = {(x if not _tg or x.endswith(f"_{_tg}") else f"{x}_{_tg}")
@@ -754,7 +753,7 @@ def plot_importances(c, arm=None, top=20, ax=None):
         if arm is None:
             raise ValueError(f"several arms present, pass arm=one of {sorted(raw)}")
     s = raw[arm].sort_values(ascending=False).head(int(top))
-    import generative_metrics as GM
+    from twin import generative_metrics as GM
     grp = {n: g for g, ns in GM.traj_groups(list(raw[arm].index)).items() for n in ns}
     col = {"turn": "#2a78d6", "distance": "#eb6834", "dt": "#4c9a52",
            "dot-dist": "#9b59b6", "radial": "#52514e"}

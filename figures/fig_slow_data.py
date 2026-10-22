@@ -18,15 +18,14 @@ import io
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from style import *  # noqa: F401,F403,E402
+from figures.style import *  # noqa: F401,F403,E402
 
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 from scipy.stats import t as _t  # noqa: E402
 
-import generative_metrics as GM  # noqa: E402
-import model_figures as MF  # noqa: E402
+from twin import generative_metrics as GM  # noqa: E402
+from twin import model_figures as MF  # noqa: E402
 
 W, LAGS, SHUFFLES, FPS, PX_MM = 60, range(1, 7), 200, 30.0, 3.60
 CH = [("dt", "interval (s)", BLUE), ("dist", "displacement (mm)", VERM), ("turn", "turn magnitude (deg)", GREEN),

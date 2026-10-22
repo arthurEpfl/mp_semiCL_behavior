@@ -32,8 +32,7 @@ missing). Latencies, SEM-unit errors and fish counts are not converted.
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from style import *  # noqa: F401,F403,E402  (sets rcParams, gives save(), panel(), colours)
+from figures.style import *  # noqa: F401,F403,E402  (sets rcParams, gives save(), panel(), colours)
 
 import argparse  # noqa: E402
 import contextlib  # noqa: E402
@@ -80,7 +79,7 @@ def _fold_job(job):
         os.environ[v] = "1"
     import torch
     torch.set_num_threads(1)
-    import model_figures as MF
+    from twin import model_figures as MF
     MF.BLOCK_SEED = True                                  # the report units' per-block random streams
     with contextlib.redirect_stdout(io.StringIO()):
         models, _ = MF.fold_models(str(MODEL / d), arm, REJ)
@@ -105,8 +104,8 @@ def _boot_band(pr, cond):
 def build(workers=8, have=None):
     """Regenerate the rollouts of every unit in HEAD; with ``have`` (a loaded cache), only the units it lacks."""
     import matplotlib.pyplot as plt
-    import model_figures as MF
-    from input_ablation import profile_variants_matched
+    from twin import model_figures as MF
+    from twin.input_ablation import profile_variants_matched
     CACHE.mkdir(parents=True, exist_ok=True)
     todo = {u: v for u, v in HEAD.items() if have is None or u not in have["models"]}
     jobs = [(name, seed, d, arm, k) for (name, seed), (d, arm, _) in todo.items() for k in range(N_FOLDS)]
@@ -162,7 +161,7 @@ def summary(key):
 
 def check(c):
     """The regenerated stream-0 readouts against the archived report units; returns the check table."""
-    import model_figures as MF
+    from twin import model_figures as MF
     rows = []
     for (name, seed), m in c["models"].items():
         s = summary(m["key"])
@@ -194,7 +193,7 @@ LAT_TAB = CACHE / "fig_profiles_latency.csv"
 def _null_per_fish(df, rng, reps=6, cap=40000):
     """``model_figures._null_plateau`` line for line, but returning the PER-FISH null (its last line averages
     these over fish). Same rng consumption, so the fish mean is the archived null exactly (checked below)."""
-    import model_figures as MF
+    from twin import model_figures as MF
     g = (df[df.tbin < 60].groupby(["block_id", "cond_label", "tbin"], observed=True)[["dx", "dy"]]
          .mean().reset_index())
     lut = {(int(b), float(t)): (x, y) for b, t, x, y in zip(g.block_id, g.tbin, g.dx, g.dy)}
@@ -224,7 +223,7 @@ def real_attraction_ci(c, rebuild=False):
     the cached ``attraction_table`` real null / plateau / attraction to 1e-9 and refuses otherwise."""
     if ATT_CI.exists() and not rebuild:
         return pd.read_csv(ATT_CI, index_col=0)
-    import model_figures as MF
+    from twin import model_figures as MF
     with contextlib.redirect_stdout(io.StringIO()):
         prog, _, _ = MF._programme()
         st = MF.real_dot_profile().copy()             # same preparation as attraction_table's real side
@@ -271,7 +270,7 @@ def _dip_edge_free(mu):
 def latency_table(c, write=False):
     """Per-condition dip and latency of every side, with the archived metric and with the edge-free variant.
     Dips in mm at the profile code's 3.67 px/mm (as the cache); ``to360_table`` converts them for printing."""
-    import model_figures as MF
+    from twin import model_figures as MF
     sides = {"real": c["real"]["mean"]}
     sides.update({_lab(*k): m["matched_mean"] for k, m in c["models"].items()})
     rows = []
@@ -297,7 +296,7 @@ def to360_table(t, cols):
 
 def real_numbers(c):
     """The real readouts from the same code, for the caption / prose, in mm at 3.60 px/mm (latency in s)."""
-    import model_figures as MF
+    from twin import model_figures as MF
     f = MM_3P67_TO_3P60
     r = c["real"]
     any_m = next(iter(c["models"].values()))
@@ -429,7 +428,7 @@ def main(argv=None):
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--rebuild-ci", action="store_true", help="recompute the real attraction bootstrap only")
     a = ap.parse_args(argv)
-    import model_figures as MF
+    from twin import model_figures as MF
     assert_code_scale(MF.PX_TO_MM, "model_figures.PX_TO_MM")
     if a.rebuild or not CURVES.exists():
         c = build(a.workers)

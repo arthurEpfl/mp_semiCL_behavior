@@ -22,8 +22,7 @@ Inputs: the fig_profiles cache (curves + fig_profiles_gen_<key>.pkl); run fig_pr
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from style import *  # noqa: F401,F403,E402
+from figures.style import *  # noqa: F401,F403,E402
 
 import contextlib  # noqa: E402
 import io  # noqa: E402
@@ -34,14 +33,14 @@ import pandas as pd  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
 from matplotlib.patches import Patch  # noqa: E402
 
-import fig_profiles as FP  # noqa: E402
+from figures import fig_profiles as FP  # noqa: E402
 
 N_FISH, N_BOOT, BOOT_SEED, THIN_REPS = 15, 4000, 0, 5
 OUT_RATIO = FP.CACHE / "fig_profiles_bands_ratio.csv"
 
 
 def _real_side():
-    import model_figures as MF
+    from twin import model_figures as MF
     MF.BLOCK_SEED = True
     MF.EXCLUDE_CENTROID_OUT = True
     MF._CACHE.pop("st", None)

@@ -24,8 +24,7 @@ from pathlib import Path
 import numpy as np
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE))
-import multi_fish as MF  # noqa: E402
+from twin import multi_fish as MF  # noqa: E402
 
 OUT = MF.VIDEO_DIR / "report"
 FPS = MF.VIDEO_FPS
@@ -197,7 +196,7 @@ def render(npz, out_mp4, trail_s=4.0, dpi=90):
 
 
 def _render_one(npz):
-    import bout_video as BV
+    from twin import bout_video as BV
     out = npz.with_suffix(".mp4")
     env, rc_dir = BV._render_env(out)
     try:

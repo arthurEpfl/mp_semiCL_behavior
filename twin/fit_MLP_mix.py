@@ -23,10 +23,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-import evaluate as E
-import fit_MLP as M
-import fit_MLP_border as MB
-from segment_bouts import PX_PER_MM, R0_MM     # for the honest closed-loop dot-proximity recompute
+from twin import evaluate as E
+from twin import fit_MLP as M
+from twin import fit_MLP_border as MB
+from twin.segment_bouts import PX_PER_MM, R0_MM     # for the honest closed-loop dot-proximity recompute
 
 _LOG2PI = float(math.log(2.0 * math.pi))
 
@@ -527,10 +527,10 @@ def save_mix(model, path):
     # the joint model (e.g. the per-fish random-effect variant) used to fall straight through this
     # test to the generic branch below, which writes a checkpoint with none of its extra parameters
     # -- and that checkpoint then LOADS WITHOUT ERROR as a plain joint model. Silent and plausible.
-    import fit_MLP_joint as _J
+    from twin import fit_MLP_joint as _J
     if isinstance(model, _J.MLPMixJointDensity):
         try:
-            import fit_MLP_fishre as _FR
+            from twin import fit_MLP_fishre as _FR
         except ImportError:
             _FR = None
         if _FR is not None and isinstance(model, _FR.MLPMixJointREDensity):
@@ -603,10 +603,10 @@ def load_mix(path, map_location="cpu", closed_loop=None, guardrail=None):
         # NOTE both branches must be kept in step with save_mix: a class that can be SAVED by a
         # specialised serialiser and not LOADED by one fails only at the call site, far away.
         if _cls == "MLPMixJointREDensity":
-            import fit_MLP_fishre as _J
+            from twin import fit_MLP_fishre as _J
             m = _J.load_fishre(path, map_location=map_location)
         else:
-            import fit_MLP_joint as _J
+            from twin import fit_MLP_joint as _J
             m = _J.load_joint(path, map_location=map_location)
         if closed_loop is not None:
             m.closed_loop = bool(closed_loop)
@@ -1253,7 +1253,7 @@ def _gen_for(cfg_feat, records=None):
     paragraph above claims.
     """
     if int(cfg_feat.get("state", 0)):
-        import fit_MLP_fishre as _FR
+        from twin import fit_MLP_fishre as _FR
 
         # BATCH ACROSS THE CALIBRATOR'S FISH LOOP. Every search here iterates the SAME record list
         # once per grid point, and a recurrent rollout is dispatch-bound -- so calling it once per
@@ -1322,7 +1322,7 @@ def _gen_for(cfg_feat, records=None):
             return got if got is not None else _FR.state_rollout_batch(model, rec, cfg, 1, rng)[0]
         return _state_gen
     if cfg_feat.get("joint"):
-        import fit_MLP_joint as _J
+        from twin import fit_MLP_joint as _J
         return _J.generate_mix_joint_loop
     return generate_mix_kin_loop
 

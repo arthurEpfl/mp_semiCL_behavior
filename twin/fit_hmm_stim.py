@@ -76,9 +76,8 @@ import numpy as np
 from scipy.optimize import minimize
 from scipy.special import logsumexp
 
-sys.path.insert(0, str(Path(__file__).parent))
-import fit_hmm as H                                   # emission / Gamma-MLE helpers
-from segment_bouts import (parse_stimulus, wrap_pi, STIM_NONE, fish_prefix, FPS,
+from twin import fit_hmm as H                                   # emission / Gamma-MLE helpers
+from twin.segment_bouts import (parse_stimulus, wrap_pi, STIM_NONE, fish_prefix, FPS,
                            PX_PER_MM)
 
 STATE_NAMES = ["forward", "turn-", "turn+"]           # 0=F, 1=dtheta<0, 2=dtheta>0

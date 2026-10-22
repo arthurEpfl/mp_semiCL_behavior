@@ -24,13 +24,14 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-import evaluate as E
-import fit_MLP_border as MB
-import fit_MLP_mix as MX
-import generative_metrics as GM
-import stim_program as SP
-import stim_rollout as SR
-import tool_reference as TR
+from twin import evaluate as E
+from twin import fit_MLP_border as MB
+from twin import fit_MLP_mix as MX
+from twin import generative_metrics as GM
+from twin import paths
+from twin import stim_program as SP
+from twin import stim_rollout as SR
+from twin import tool_reference as TR
 
 REJ_BAND = {"d0": 2.0, "d1": 10.0, "max_draws": 20}       # rej: redraw a bout landing 2-10 mm from the wall
 FEATS = [("dist_std", "step spread in a window (px)"),
@@ -44,28 +45,20 @@ BIN_S = 2.0                   # bouts are sampled at their onsets (~1.2 s apart)
 EXCLUDE_CENTROID_OUT = True   # closest available analogue of the original `dots_out < 1` filter
 STIMULI_ORDER = ["d1s3.5", "d2s3.5", "d4s3.5", "d6s3.5", "d8s3.5", "d1s0", "d4s0", "d8s0"]
 MOVING_SHOAL = ["d2s3.5", "d4s3.5", "d6s3.5", "d8s3.5"]     # the shoal-approach conditions
-PROGRAM = "assets/stimulus/2025.02.20-0957_trajectory_GsizeMotionSingle_180min.csv.gz"
-REFERENCE = "assets/real_reference.npz"
+PROGRAM = paths.PROGRAM
+REFERENCE = paths.ASSETS / "real_reference.npz"
 
 _CACHE = {}
 
 
 # --- shared ----------------------------------------------------------------------------------------
-def root():
-    """Repo root: the first directory at or above cwd holding clean_data/ and scripts/."""
-    p = Path.cwd().resolve()
-    for q in (p, *p.parents):
-        if (q / "clean_data").exists() and (q / "scripts").exists():
-            return q
-    raise FileNotFoundError(f"repo root (clean_data/ + scripts/) not found above {p}")
-
-
 def _ckpt_dir(ckpt_dir):
+    """A unit's checkpoint folder: a path, or a folder name under paths.CKPTS (e.g. "M26e")."""
     p = Path(ckpt_dir)
-    for q in (p, root() / "Model" / p):
+    for q in (p, paths.CKPTS / p):
         if (q / "manifest_model1.json").exists():
             return q
-    raise FileNotFoundError(f"no manifest_model1.json in {ckpt_dir} (looked in cwd and Model/)")
+    raise FileNotFoundError(f"no manifest_model1.json in {ckpt_dir} (nor under {paths.CKPTS})")
 
 
 def records():
@@ -330,7 +323,7 @@ def real_dot_profile():
     dist_mm to the dots' centroid and the 2-s bin; the centroid-outside-dish rule applied. Cached."""
     if "st" in _CACHE:
         return _CACHE["st"]
-    d = pd.read_csv(root() / "clean_data" / "bouts_clean.csv")
+    d = pd.read_csv(paths.BOUTS)
     a = d[d.active].copy()
     a["n_dots"] = (a.n_dots_left.fillna(0) + a.n_dots_right.fillna(0)).astype(int)
     st = a[(a.stimulus != "inter_stim_pause") & a.dot_dist_px.notna()].copy()
@@ -350,9 +343,9 @@ def real_dot_profile():
 def _programme():
     """(programme, simulated dish, real start-pose sampler), loaded once."""
     if "program" not in _CACHE:
-        _CACHE["program"] = SP.load_program(str(root() / PROGRAM))
+        _CACHE["program"] = SP.load_program(str(PROGRAM))
         _CACHE["dish_sim"] = SR.default_dish()                          # median PHYSICAL dish of the 15
-        _CACHE["ref"] = TR.load_reference(str(root() / REFERENCE))     # real start-pose sampler
+        _CACHE["ref"] = TR.load_reference(str(REFERENCE))     # real start-pose sampler
     return _CACHE["program"], _CACHE["dish_sim"], _CACHE["ref"]
 
 
@@ -832,7 +825,7 @@ def dot_profile(ckpt_dir, arm, rej=REJ_BAND, r_per_model=3, band="sem"):
 # Everything here is either the real data cut a different way or the FIT read at the real feature rows
 # (no rollout): Metric-C style, so a difference is the model's law, not rollout noise.
 import torch                                    # noqa: E402
-import fit_MLP_joint as JT                     # noqa: E402
+from twin import fit_MLP_joint as JT                     # noqa: E402
 
 RUN_BINS = [(0, 5), (5, 15), (15, 30), (30, 60), (60, 120), (120, 240), (240, 100000)]
 CI_Z = 1.96
@@ -947,7 +940,7 @@ def _real_blocks():
     stimulus bout). Cycle = frame // 3300 (the exact 50 s + 60 s grid, the same for all fish)."""
     if "blocks" in _CACHE:
         return _CACHE["blocks"]
-    b = pd.read_csv(root() / "clean_data" / "bouts_clean.csv").sort_values(["fish_id", "bout_index"])
+    b = pd.read_csv(paths.BOUTS).sort_values(["fish_id", "bout_index"])
     b["cyc"] = b.frame_onset // 3300
     stim = b[b.stimulus != "inter_stim_pause"]
     a = b[b.active].copy()
@@ -1418,7 +1411,7 @@ def head_gap_rows(ckpt_dir, arm, rej=REJ_BAND, min_n=10):
     recs = records()
     models, held = fold_models(ckpt_dir, arm, rej)
     st = real_dot_profile()
-    d = pd.read_csv(root() / "clean_data" / "bouts_clean.csv", usecols=["fish_id", "frame_onset", "active", "stimulus"])
+    d = pd.read_csv(paths.BOUTS, usecols=["fish_id", "frame_onset", "active", "stimulus"])
     pause = d[d.active & (d.stimulus == "inter_stim_pause")][["fish_id", "frame_onset"]]
     rows, n_st, n_hit = [], 0, 0
     for f, ck in sorted(held.items()):
