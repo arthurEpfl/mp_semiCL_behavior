@@ -4,8 +4,8 @@ every time bin reweighted to the real fish's common cell mix), but for the model
 the teacher-forced expectation on the real bouts.
 
 Real fish: exactly as in Figure 5.3 (the observed bouts; geometric mean over a fish's bouts for displacement and
-interval, mean over fish, 95 % bootstrap band over fish). M6 and F (both seeds): 15 simulated fish per unit (3 per
-fold model, as many as real fish, so the bands compare), each swimming the whole recorded programme on its own
+interval, mean over fish, 95 % bootstrap band over fish). M6 and F (both seeds): 50 simulated fish per unit (10 per
+fold model), each swimming the whole recorded programme on its own
 clock from a sampled start pose, the dots re-anchored to its pose at every block onset, wall rejection on, per-block
 random streams -- the rollouts of the units' dot profiles (model_figures.programme_bouts). A bout's bearing and
 range are the generated ones; its displacement and interval are the generated step and interval. Mean over the
@@ -26,8 +26,8 @@ from figures import fig_rule as FR  # noqa: E402
 from figures import fig_rule_kin as FK  # noqa: E402
 from twin import missing_pieces as P  # noqa: E402
 
-R_PER_MODEL = 3                                   # simulated fish per fold model: 5 x 3 = 15 per unit
-SIM_CACHE = FR.CACHE / "fig_rule_3panel_sim.pkl"
+R_PER_MODEL = 10                                  # simulated fish per fold model: 5 x 10 = 50 per unit
+SIM_CACHE = FR.CACHE / f"fig_rule_3panel_sim_r{R_PER_MODEL}.pkl"
 
 
 def _sim_job(job):
