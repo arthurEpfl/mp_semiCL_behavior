@@ -82,7 +82,12 @@ def save(fig, name):
     PNG_DIR.mkdir(parents=True, exist_ok=True)
     fig.savefig(PNG_DIR / f"{name}.png", dpi=170)
     plt.close(fig)
-    print(f"  wrote {OUT / (name + '.pdf')}")
+    out = OUT / f"{name}.pdf"
+    try:
+        out = out.relative_to(paths.ROOT).as_posix()
+    except ValueError:                                  # TWIN_FIGURES outside the repository
+        pass
+    print(f"  wrote {out}")
     show(name)
 
 

@@ -15,6 +15,7 @@ Run:  uv run python -m figures.fig_slow_data      (writes figures/out/fig_slow_d
 """
 import contextlib
 import io
+import warnings
 
 from figures.style import *  # noqa: F401,F403,E402
 
@@ -24,6 +25,8 @@ from scipy.stats import t as _t  # noqa: E402
 
 from twin import generative_metrics as GM  # noqa: E402
 from twin import model_figures as MF  # noqa: E402
+
+warnings.filterwarnings("ignore", "Mean of empty slice", RuntimeWarning)   # fish with no pair at a lag
 
 W, LAGS, SHUFFLES, FPS, PX_MM = 60, range(1, 7), 200, 30.0, 3.60
 CH = [("dt", "interval (s)", BLUE), ("dist", "displacement (mm)", VERM), ("turn", "turn magnitude (deg)", GREEN),
