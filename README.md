@@ -36,7 +36,7 @@ Put the recordings in `data/` as described in `data/README.md`. Trained checkpoi
 
 | Notebook | Thesis | What it reproduces |
 |---|---|---|
-| `01_bout_discretisation` | Data | from the 30 fps tracking to the bout table (Figures fig:detection, fig:bouttraj), checked identical to the training table |
+| `01_bout_discretisation` | Data | from the rig's raw files to the 30 fps tables and on to the bout table (Figures fig:detection, fig:bouttraj), checked identical to the training table |
 | `02_data_exploration` | Data | every figure and number of the Data chapter |
 | `03_models` | Methods, Results | the main line M1-M6 and the drift branch D1-D4, F: Tables tab:storyline, tab:realism, tab:app-imp-*, tab:profile-spread; Figures fig:slow, fig:profiles, fig:app-bands-*, fig:app-latent-gain, fig:app-drift-gain, fig:app-correction-trace; every model's measurements |
 | `04_other_results` | Appendix (negative results) | Tables tab:app-negres-net, tab:app-negres-drift, tab:app-negres-other |
@@ -70,8 +70,8 @@ versions, retrained models differ within the seed-to-seed noise.
 
 The code was cleaned from the development repository (tag `pre-cleanup`) and checked against it: the training
 recipes against the ones that trained every thesis checkpoint; two-epoch fits bit-identical; the evaluation of M6
-reproducing its saved summary exactly; the bout table and the training table rebuilt identically from the 30 fps
-tracking; every thesis figure pixel-identical; the thesis tables reproduced from the saved evaluations.
+reproducing its saved summary exactly; the 30 fps tables rebuilt from the rig's files, and the bout table and the
+training table from them; every thesis figure pixel-identical; the thesis tables reproduced from the saved evaluations.
 
 ## Second data set
 

@@ -23,7 +23,6 @@ from pathlib import Path
 
 import numpy as np
 
-HERE = Path(__file__).resolve().parent
 from twin import multi_fish as MF  # noqa: E402
 
 OUT = MF.VIDEO_DIR / "report"

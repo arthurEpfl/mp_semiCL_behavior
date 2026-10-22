@@ -27,7 +27,6 @@ from pathlib import Path
 
 import numpy as np
 
-HERE = Path(__file__).resolve().parent
 from twin import twin_test as TT  # noqa: E402
 
 OUT = TT.OUT

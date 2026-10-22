@@ -35,7 +35,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-HERE = Path(__file__).resolve().parent
 from twin import twin_test as TT  # noqa: E402
 
 OUT = TT.OUT
@@ -57,7 +56,7 @@ NAMES = None
 def _real_plate(args):
     plate, rows = args
     import pyarrow.parquet as pq
-    import loader
+    loader = TT.load_loader()
     from twin import segment_bouts as SB
     z = zipfile.ZipFile(TT.ZIP)
     cols = ["frame"] + [f"{k}_{int(r['well']):02d}" for r in rows for k in ("x", "y", "heading", "flag")]
@@ -287,13 +286,12 @@ def curves(res, ids, nb=300, seed=0):
 
 
 def analyse(workers=10):
-    from twin import repulsion_fit as RF
     R = pickle.load(open(OUT / "screen_raw_real.pkl", "rb"))
     print("windows: real ...", flush=True)
     wr = windows_of(R["res"], workers)
     real_ids = np.array(sorted(wr))
     print(f"  {len(wr)} real fish, {sum(len(v[0]) for v in wr.values())} windows", flush=True)
-    halves = RF.clutch_split()
+    halves = TT.clutch_split()
     hA = set(halves["fit"]); hB = set(halves["test"])
     idA = np.array([i for i in real_ids if R["clutch"].get(int(i)) in hA])
     idB = np.array([i for i in real_ids if R["clutch"].get(int(i)) in hB])

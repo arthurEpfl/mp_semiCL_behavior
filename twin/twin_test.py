@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import pickle
 import sys
 import zipfile
@@ -48,11 +49,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-HERE = Path(__file__).resolve().parent
-ROOT = HERE.parent
-ZIP = ROOT / "schizscreen_twin_v1.zip"
-PKG = ROOT / "schizscreen_twin_v1"
-OUT = ROOT / "Model" / "twin_test"
+from twin import paths
+
+ZIP = paths.SCREEN_ZIP
+PKG = paths.SCREEN
+OUT = paths.SCREEN_OUT
 
 PX = 3.60                                   # model px per mm (the physical scale of the training rig)
 FPS = 30
@@ -66,6 +67,18 @@ ROTS = np.radians([90.0, 180.0, 270.0])
 SECTORS = ((0, 45), (45, 135), (135, 181))   # |bearing| of the dot from the fish: ahead, side, behind
 N_SIM = 200                                 # simulated fish per model unit
 SIM_SEED = 8101
+
+
+SPLIT_SEED = 2026                           # the clutch split into a calibration and a test half
+TRAIN_CX, TRAIN_CY = 180.0, 174.0           # the training dish centre (model px)
+
+
+def load_loader():
+    """The screen package's own reader (``loader.py`` in the package folder)."""
+    if str(PKG) not in sys.path:
+        sys.path.insert(0, str(PKG))
+    import loader
+    return loader
 
 
 def wrap(a):
@@ -144,7 +157,7 @@ def extract_meta():
     names = [n for n in z.namelist() if not n.startswith("schizscreen_twin_v1/trajectories/")
              and not n.startswith("schizscreen_twin_v1/pilot/")]
     for n in names:
-        z.extract(n, ROOT)
+        z.extract(n, PKG.parent)
     print(f"extracted {len(names)} files to {PKG}")
 
 
@@ -165,7 +178,7 @@ def stimulus():
 
 def dot_mm(st, cx, cy, ppm):
     """The dot path in a well's dish-centred mm (y up), NaN while not shown."""
-    import loader
+    loader = load_loader()
     dx, dy, _ = loader.to_mm(st.stim_x.to_numpy(float), st.stim_y.to_numpy(float), None, cx, cy, ppm)
     shown = st.dot_shown.to_numpy()
     return np.where(shown, dx, np.nan), np.where(shown, dy, np.nan)
@@ -183,7 +196,7 @@ def dot_velocity(dx, dy, f):
 def _real_plate(args):
     plate, rows = args
     import pyarrow.parquet as pq
-    import loader
+    loader = load_loader()
     from twin import segment_bouts as SB
     z = zipfile.ZipFile(ZIP)
     cols = ["frame"] + [f"{k}_{int(r['well']):02d}" for r in rows for k in ("x", "y", "heading", "flag")]
@@ -292,11 +305,10 @@ def _sim_setup():
 
 def _models(key):
     if key not in _SIM_CACHE:
-        from twin import report_eval as RM
-        u = RM._unit(key)
+        from twin import registry
         S = _sim_setup()
         with contextlib.redirect_stdout(io.StringIO()):
-            ms, _ = S["MF"].fold_models(u["src"], u["arm"])
+            ms, _ = S["MF"].fold_models(registry.ckpt_dir(key), registry.arm(key))
         _SIM_CACHE[key] = [ms[k] for k in sorted(ms)]
     return _SIM_CACHE[key]
 
@@ -343,6 +355,74 @@ def run_sim(keys, workers=10, sighted_only=False):
     for (k, show), r in res.items():
         pickle.dump(dict(res=r, key=k, sighted=show), open(OUT / f"sim_{k}_{'sighted' if show else 'blind'}.pkl", "wb"))
     print("wrote", sorted(f"sim_{k}_{'sighted' if s else 'blind'}.pkl" for k, s in res))
+
+
+
+
+def clutch_split():
+    p = OUT / "clutch_split.json"
+    if p.exists():
+        return json.loads(p.read_text())
+    real = pickle.load(open(OUT / "real.pkl", "rb"))
+    m = real["meta"]
+    cl = sorted({c for c, g in zip(m["clutch"], m["group"]) if g == "ref"})
+    perm = np.random.default_rng(SPLIT_SEED).permutation(len(cl))
+    half = len(cl) // 2
+    out = {"fit": sorted(cl[i] for i in perm[:half]), "test": sorted(cl[i] for i in perm[half:])}
+    p.write_text(json.dumps(out, indent=1))
+    return out
+
+
+def pool(res, ids, kind="dot_bout"):
+    S = {}
+    for i in ids:
+        for k, v in res[i][kind].items():
+            S[k] = S.get(k, 0.0) + np.asarray(v, float)
+    return S
+
+
+def curves(S):
+    with np.errstate(all="ignore"):
+        return (S["ntow"] / S["nturn"] - S["ntow_null"] / S["nturn_null"],
+                S["gain"] / S["ng"] - S["gain_null"] / S["ng_null"])
+
+
+def _segment_plate(args):
+    """Real side as _real_plate, but per-fish bout tables with the dot (model px around the training dish centre)."""
+    plate, rows = args
+    import pyarrow.parquet as pq
+    loader = load_loader()
+    from twin import segment_bouts as SB
+    z = zipfile.ZipFile(ZIP)
+    cols = ["frame"] + [f"{k}_{int(r['well']):02d}" for r in rows for k in ("x", "y", "heading", "flag")]
+    tab = pq.read_table(io.BytesIO(z.read(f"schizscreen_twin_v1/trajectories/plate_{plate:03d}.parquet")), columns=cols,
+                        filters=[("frame", ">=", WIN[0]), ("frame", "<", WIN[1])]).to_pandas()
+    st = stimulus()
+    frames = tab.frame.to_numpy()
+    epi = st.episode.to_numpy().astype(str)
+    kind_all = st.stim_kind.to_numpy().astype(str)
+    out = {}
+    for r in rows:
+        w = int(r["well"])
+        x, y, o = loader.to_mm(tab[f"x_{w:02d}"].to_numpy(float), tab[f"y_{w:02d}"].to_numpy(float),
+                               tab[f"heading_{w:02d}"].to_numpy(float) / loader.HEADING_SCALE,
+                               r["centre_x_px"], r["centre_y_px"], r["px_per_mm"])
+        fl = tab[f"flag_{w:02d}"].fillna(1).to_numpy().astype(np.uint8)
+        bad = ((fl & loader.DEFAULT_MASK) > 0) | ~np.isfinite(x)
+        df = pd.DataFrame({"frame": frames, "stimulus": epi[frames],
+                           "f_x": np.where(bad, np.nan, TRAIN_CX + x * PX), "f_y": np.where(bad, np.nan, TRAIN_CY + y * PX),
+                           "f_ori": np.where(bad, np.nan, o)})
+        with contextlib.redirect_stdout(io.StringIO()):
+            b = pd.DataFrame(SB.segment_fish(df, "f", int(r["fish_id"]), 1.0))
+        if b.empty:
+            continue
+        dxa, dya = dot_mm(st, r["centre_x_px"], r["centre_y_px"], r["px_per_mm"])
+        f = b.frame_onset.to_numpy(int)
+        b["dot_cx"] = TRAIN_CX + dxa[f] * PX
+        b["dot_cy"] = TRAIN_CY + dya[f] * PX
+        b["kind"] = kind_all[f]
+        out[int(r["fish_id"])] = b
+    return out
 
 
 if __name__ == "__main__":

@@ -1,13 +1,11 @@
-"""Two moving targets at a controlled separation: does a simulated fish average them or choose one? (2026-10-15,
-Final_report_extrapolations_2.ipynb)
+"""Two moving targets at a controlled separation: does a simulated fish average them or choose one?
 
 The paradigm of Sridhar et al. (2021, PNAS), where zebrafish following two virtual conspecifics moving back and forth in
 parallel switch from swimming between them to following one as their lateral separation grows. Here the targets are two
 dot groups (A and B) whose centroids move back and forth along two parallel tracks through the dish centre, at lateral
 separation L, both at the same speed and in step; the trained models (no retraining) see them through one of the
-combination rules of fit_MLP_joint (effects, add, avg, nearest) or the heading-weighted rule 'heading<kappa>' (each
-group's effect weighted by softmax(kappa cos(bearing)), weights summing to one), and the references show only A or only
-B on the same tracks.
+combination rules of fit_MLP_joint (effects, add, avg, nearest), and the references show only A, or nothing ('blind'),
+on the same tracks.
 
 GEOMETRY (per block, seeded by (fish, block)): the track axis u through the dish centre at a random angle; the two tracks
 at +-L/2 along the normal n; both centroids at s(t) u + (+-L/2) n with s(t) a triangle wave of amplitude A_MM at SPEED_MM_S,
@@ -16,27 +14,20 @@ through the centroid code (centroid, count, moving flag), so the dots' spread in
 mm at 3.60 px/mm. The block clock starts at each block's onset, as in training (the rig's block-onset structure: 100 s
 lead-in pause, then N_BLOCKS x (60 s with the targets + 50 s pause)).
 
-READOUT. A bout is FOLLOWING when the fish is behind the pair along the direction the targets move (along-track offset
-between -FOLLOW_BEHIND_MM and 0 from the pair's midpoint) and within L/2 + FOLLOW_LAT_MM of the midline. Its lateral
-position x = (fish - midpoint) . n_A / (L/2): 0 between the targets, +1 at A, -1 at B (L > 0). Per trial (fish x block)
-and window (0-20 s, 20-60 s): mean |x|, mean x, the share of following bouts closer to A than to B; then mean over fish
-(each fish = the mean of its trials) with a 95 % bootstrap CI over fish.
+THE MAPS (figures/fig_bifurcation.py): per separation, the distribution of the fish's lateral position over the bouts
+behind the pair, in a dish of twice the radius with an anchored (equidistant) start.
 
-    python two_targets.py validate        # one group: heading rule == effects == the standard simulator
-    python two_targets.py run [--jobs 14] # every (model, pair, L, condition) -> Model/two_targets/*.pkl
-    python two_targets.py run-fine        # 4 v 4, L = 0-50 mm in 2.5 mm steps (the bifurcation map)
-    python two_targets.py run-big         # 4 v 4 and 1 v 1 in a dish of twice the radius, L = 0-100 mm in 2.5 mm steps
-    python two_targets.py run-big-anch    # the same with the onset ANCHORED on the fish (equidistant start)
-    python two_targets.py run-uneq        # 1 v 4 and 2 v 8, 2x dish, 0-100 mm in 2.5 mm steps, equidistant start
+    python -m twin.two_targets validate               # one visible group: the four rules give the same bouts
+    python -m twin.two_targets run-report [--jobs 14] # every map: M6 and F at both seeds, 4 pairs, L = 0-100 mm
 
-LARGE DISH (run-big). The training dish (radius 49 mm) holds tracks up to L = 50 mm; Sridhar et al. ran separations to
+LARGE DISH. The training dish (radius 49 mm) holds tracks up to L = 50 mm; Sridhar et al. ran separations to
 100 mm, so the dish radius is doubled (ARENA = 2, as multi_fish's 5x dish): every wall mechanism of the model is relative
 to R, so the fish senses the training dish magnified (its preferred radius, ~0.45 R, moves from ~22 to ~44 mm); steps,
 the tracks (A_MM) and the readout are absolute. The model's log-range input saturates at 280 px = 78 mm (multi_fish), so
 a target farther away pulls as one at 78 mm: no range input leaves the trained values. 'blind' (no target shown, same
 tracks and readout box) measures what the magnified dish alone does to the lateral positions.
 
-ANCHORED ONSET (run-big-anch, AnchoredParallelProvider). With the tracks fixed in the dish the fish starts each block
+ANCHORED ONSET (AnchoredParallelProvider). With the tracks fixed in the dish the fish starts each block
 wherever the pause left it, often nearer one group, and that group is then the one followed in about 2/3 of committed
 effects trials. Here every block is anchored on the fish instead: at the block's first bout (the fish's pose then is
 its pose at the block onset; it has not moved since), the pair's midpoint is put ANCHOR_AHEAD_MM ahead of the fish
@@ -73,13 +64,9 @@ SPEED_MM_S = 2.0                                    # both centroids; trained mo
 A_MM = 20.0                                         # track half-length (inside the 49 mm dish with the widest L)
 STIM_S, PAUSE_S, LEAD_S = 60.0, 50.0, 100.0
 N_BLOCKS, N_FISH = 10, 15                           # 15 fish = 3 per fold model, 10 blocks each = 150 trials
-SEPS_MM = (0, 5, 10, 15, 20, 30, 40)
 PAIRS = {"1v1": (1, 1), "4v4": (4, 4), "1v4": (1, 4), "2v8": (2, 8)}
-RULES = ("effects", "add", "avg", "nearest", "heading0", "heading0.25", "heading0.5", "heading1", "heading2", "heading4")
+RULES = ("effects", "add", "avg", "nearest")
 REFS = {"ref-A": (0,), "ref-B": (1,)}
-CONDS = RULES + tuple(REFS)
-WINDOWS = {"onset": (0.0, 20.0), "steady": (20.0, 60.0)}
-FOLLOW_BEHIND_MM, FOLLOW_LAT_MM = 40.0, 15.0
 GEOM_SEED = 7171
 ARM_M6 = "S4x_adt_z2_cdt_tr_rc_al_w3ft"
 ARM_F = "S4_adt_z2_drift_cdt_tr_rc_al_w3ft_st_pf5Bcr_last"
@@ -292,62 +279,23 @@ def run_one(job):
     return job, f"{len(b)} bouts, runaway {b.attrs.get('runaway', 0)}", time.time() - t0
 
 
-def jobs(tags=tuple(MODELS)):
-    out = []
-    for tag, pair, L, cond in itertools.product(tags, PAIRS, SEPS_MM, CONDS):
-        if cond == "ref-B" and PAIRS[pair][0] == PAIRS[pair][1]:
-            continue                                                   # symmetric pair: ref-B mirrors ref-A
-        out.append((tag, pair, L, cond))
-    return out
-
-
-FINE_SEPS_MM = tuple(np.round(np.arange(0.0, 50.01, 2.5), 1))    # the bifurcation map's fine grid (4 v 4)
-FINE_CONDS = ("effects", "add", "heading0", "heading1", "nearest", "ref-A")
-
-
-def fine_jobs(tags=tuple(MODELS)):
-    return [(tag, "4v4", float(L), c) for tag, L, c in itertools.product(tags, FINE_SEPS_MM, FINE_CONDS)]
-
-
 ARENA_BIG = 2.0                                                  # the large dish: twice the training radius (98 mm)
 BIG_SEPS_MM = tuple(float(v) for v in np.arange(0.0, 100.01, 2.5))
-BIG_CONDS = FINE_CONDS + ("blind",)
-BIG_PAIRS = ("4v4", "1v1")                                       # 1 v 1 = one virtual fish per target, as in the paper
-
-
-def big_jobs(tags=tuple(MODELS), onset="free"):
-    return [(tag, pair, L, c, ARENA_BIG) + ((onset,) if onset != "free" else ())
-            for pair, tag, L, c in itertools.product(BIG_PAIRS, tags, BIG_SEPS_MM, BIG_CONDS)]
-
-
-
-
-UNEQ_PAIRS = ("1v4", "2v8")                                     # A = the smaller group, B = the larger
-UNEQ_CONDS = ("effects", "add", "heading0", "heading1", "nearest", "ref-A", "ref-B")
-
-
-def uneq_jobs(tags=tuple(MODELS)):
-    """Unequal pairs, 2x dish, L = 0-100 mm in 2.5 mm steps, equidistant (anchored) start; no blind fish (it sees no
-    target, so it is the 4 v 4 blind run)."""
-    return [(tag, pair, L, c, ARENA_BIG, "anchored")
-            for pair, tag, L, c in itertools.product(UNEQ_PAIRS, tags, BIG_SEPS_MM, UNEQ_CONDS)]
-
-
 REPORT_PAIRS = ("1v1", "4v4", "1v4", "2v8")
 REPORT_CONDS = ("effects", "add", "avg", "nearest", "ref-A", "blind")
 
 
 def report_jobs(tags=tuple(MODELS)):
-    """The report's maps: every pair x REPORT_CONDS, 2x dish, 0-100 mm in 2.5 mm steps, equidistant start. Only what
-    the other grids lack is new: 'avg' everywhere (blind of 1v4 / 2v8 = the 4v4 blind run: it sees no target)."""
-    return [(tag, pair, L, "avg", ARENA_BIG, "anchored")
-            for pair, tag, L in itertools.product(REPORT_PAIRS, tags, BIG_SEPS_MM)]
+    """Every map of the thesis: each pair x REPORT_CONDS, 2x dish, 0-100 mm in 2.5 mm steps, equidistant start. The
+    unequal pairs have no blind run of their own: a blind fish sees no target, so it is the 4 v 4 blind run."""
+    return [(tag, pair, L, c, ARENA_BIG, "anchored")
+            for pair, tag, L, c in itertools.product(REPORT_PAIRS, tags, BIG_SEPS_MM, REPORT_CONDS)
+            if not (c == "blind" and PAIRS[pair][0] != PAIRS[pair][1])]
 
 
-def run_all(n_jobs=14, fine=False, big=False, onset="free", uneq=False, report=False):
+def run_all(n_jobs=14):
     from concurrent.futures import ProcessPoolExecutor
-    J = (report_jobs() if report else uneq_jobs() if uneq else big_jobs(onset=onset) if big
-         else fine_jobs() if fine else jobs())
+    J = report_jobs()
     todo = [j for j in J if not _path(j[0], scene(j[1], j[2]), j[3], *j[4:]).exists()]
     print(f"{len(J)} jobs, {len(todo)} to run", flush=True)
     t0 = time.time()
@@ -362,8 +310,6 @@ def load(tag, pair, L, cond, arena=1, onset="free"):
     return pd.read_pickle(_path(tag, scene(pair, L), cond, arena, onset))
 
 
-def following(b, L_mm):
-    return b[(b.along_mm <= 0) & (b.along_mm >= -FOLLOW_BEHIND_MM) & (b.lat_mm.abs() <= L_mm / 2 + FOLLOW_LAT_MM)]
 
 
 
@@ -381,25 +327,20 @@ DIP_SPLIT = 0.9                                                  # a clear troug
 
 # ----------------------------------------------------------------------------------------------- validate ------
 def validate(tag="26e"):
-    """With one visible group, 'heading2' must give exactly what 'effects' gives (a single group's row)."""
+    """With only group A visible, the four rules reduce to that group's row: the same bouts under each."""
     sc = scene("4v4", 20)
-    m = _models(tag)[:1]
-    a = simulate(tag, sc, "ref-A", n_fish=1, n_blocks=2, models=m)
-    rule_h = "heading2"
-    # the same reference run through the heading rule: one visible group -> its own row
+    m = _models(tag)[0]
     _, dish, ref = MF._programme()
-    rng = np.random.default_rng([0, 0])
-    pose = ref.sample_start_pose(rng, dish)
-    prov = ParallelProvider(sc, 0, dish, 2, visible=(0,))
-    rec = SR.make_synthetic_record(int(prov.T / 0.2) + 100, pose, dish, fish_id=0)
-    g = m[0].sample(rec, rng, stim_provider=prov, stop_time_s=prov.T, block_seed=(0, 0), multi_rule=rule_h)
-    keep = sorted(t for t in prov.rec if t < len(g["dtheta"]))
-    same = np.allclose(np.asarray(g["dtheta"])[keep], a.dth.to_numpy(), atol=1e-9)
-    print(f"one group: heading2 == effects (ref-A): {same} ({len(keep)} bouts)")
-    t0 = time.time()
-    b = simulate(tag, sc, "heading2", n_fish=1, n_blocks=2, models=m)
-    print(f"two groups, heading2: {len(b)} bouts in {time.time() - t0:.1f} s; following share "
-          f"{len(following(b, sc.L_mm)) / max(len(b), 1):.2f}")
+    out = {}
+    for rule in RULES:
+        rng = np.random.default_rng([0, 0])
+        pose = ref.sample_start_pose(rng, dish)
+        prov = ParallelProvider(sc, 0, dish, 2, visible=(0,))
+        rec = SR.make_synthetic_record(int(prov.T / 0.2) + 100, pose, dish, fish_id=0)
+        out[rule] = np.asarray(m.sample(rec, rng, stim_provider=prov, stop_time_s=prov.T, block_seed=(0, 0),
+                                        multi_rule=rule)["dtheta"])
+    same = all(len(v) == len(out["effects"]) and np.allclose(v, out["effects"], atol=1e-9) for v in out.values())
+    print(f"one visible group: {', '.join(RULES)} give the same bouts: {same} ({len(out['effects'])} bouts)")
     return same
 
 
@@ -408,6 +349,6 @@ if __name__ == "__main__":
     if cmd == "validate":
         sys.exit(0 if validate() else 1)
     elif cmd == "run-report":
-        run_all(int(sys.argv[sys.argv.index("--jobs") + 1]) if "--jobs" in sys.argv else 14, report=True)
+        run_all(int(sys.argv[sys.argv.index("--jobs") + 1]) if "--jobs" in sys.argv else 14)
     else:
         raise SystemExit(__doc__)

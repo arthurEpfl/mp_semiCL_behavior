@@ -34,11 +34,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-HERE = Path(__file__).resolve().parent
+from twin import paths
 from twin import twin_test as TT  # noqa: E402
 
 OUT = TT.OUT
-GOUT = HERE.parent / "Model" / "grouprep"
+GOUT = paths.GROUPREP
 DBINS = TT.DBINS
 NB = len(DBINS) - 1
 KIND = "dot_bout"
@@ -227,7 +227,7 @@ def readouts_p(S, phase=None):
 def _real_plate(args):
     plate, rows, fn = args
     import pyarrow.parquet as pq
-    import loader
+    loader = TT.load_loader()
     from twin import segment_bouts as SB
     z = zipfile.ZipFile(TT.ZIP)
     cols = ["frame"] + [f"{k}_{int(r['well']):02d}" for r in rows for k in ("x", "y", "heading", "flag")]
@@ -382,9 +382,8 @@ def summarise(res, groups, nb=300, seed=0):
 
 
 def report(nb=300):
-    from twin import repulsion_fit as RF
     R = pickle.load(open(OUT / "crd_real.pkl", "rb"))
-    keep = set(RF.clutch_split()["test"])
+    keep = set(TT.clutch_split()["test"])
     by = {}
     for fid, c in R["clutch"].items():
         if c in keep and fid in R["res"]:

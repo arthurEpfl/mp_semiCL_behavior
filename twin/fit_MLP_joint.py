@@ -1438,8 +1438,7 @@ def multi_bout(raw, rule, group_rows, base_row=None, comb_row=None, weights=None
 def generate_mix_joint_loop(model, rec, cfg_feat, rng, closed_loop=True, guardrail=True, eps=1e-3,
                             stim_loop=True, keep_features=False,
                             stim_provider=None, stop_time_s=None, block_seed=None, multi_rule=None):
-    """Free-run one trajectory. Same contract as ``MX.generate_mix_kin_loop`` so the calibrators
-    and the harness can use either.
+    """Free-run one trajectory.
 
     Closed-loop from the model's own pose: the border covariate and (when ``stim_loop``) the
     shoal bearing/range are recomputed each bout from the generated position. The turn history and
@@ -1450,18 +1449,24 @@ def generate_mix_joint_loop(model, rec, cfg_feat, rng, closed_loop=True, guardra
     so a fixed stimulus timeline cannot be pre-baked into it -- the bout times are themselves
     generated here. ``stim_provider(t, time_s, x, y, h) -> (dot_cx, dot_cy, moving, n_dots)`` is
     called instead, with the live clock and pose, so the program can be resolved online (see
-    ``scripts/stim_rollout.py``). ``stop_time_s`` ends the run at the last bout whose ONSET is
+    ``twin/stim_rollout.py``). ``stop_time_s`` ends the run at the last bout whose ONSET is
     still inside the programme and truncates every returned array to that length.
 
     Both are pure additions: with ``stim_provider=None`` and ``stop_time_s=None`` the reads and
-    the RNG draw order are exactly as before, so output stays bit-identical (asserted by
-    ``scripts/smoke_stim_program.py``).
+    the RNG draw order are exactly as before, so output stays bit-identical.
 
     MULTI-GROUP SCENES (``multi_rule`` in MULTI_RULES, default None = off): the provider's ``groups(t, time_s, x, y, h)``
     returns one ``(centroid x, centroid y, moving, n_dots)`` per dot group on screen, and the network's input is built
     from them by the rule (see MULTI_RULES). Extra outputs ``grp_cx`` / ``grp_cy`` / ``grp_phi`` (n, 4) and ``grp_n``.
     """
     n = rec.n
+    _off = [k for k in ("repulsion", "vigor", "indiv", "kin_innov", "kin_feedback", "centre_bias", "dt_latent",
+                        "rad_gate", "stim_lags", "stim_static_clock", "stim_static_bump", "stim_onset", "dt_snap")
+            if cfg_feat.get(k)]
+    if (_off or int(cfg_feat.get("K_stim", 1)) > 1 or cfg_feat["stim_mode"] in M.POP_MODES
+            or "rad_sd" in (cfg_feat.get("fish_re") or {}) or (cfg_feat.get("wall_reject") or {}).get("pull") is not None
+            or float((cfg_feat.get("drift") or {}).get("bord", 0.0))):
+        raise NotImplementedError(f"generator option not in this code: {_off or cfg_feat['stim_mode']}")
     # BLOCK-START FORCING (the profile fine-tune, scripts/profile_finetune.py): a sliced record may carry
     # `_force_P` = how many of its leading bouts to REPLAY (the real turn, step and interval, and the real
     # pose after each) before free-running, `_rp_off` = its first bout's real run position (run clock and
@@ -1478,7 +1483,7 @@ def generate_mix_joint_loop(model, rec, cfg_feat, rng, closed_loop=True, guardra
     # 'centred': interval lags as deviations from the fish's OWN running level (MB.kin_dt_level),
     # the EMA maintained here on the EMITTED log intervals exactly as the builder does on the real.
     _kin_dt_c = (cfg_feat.get("kin_dt_lags", True) == "centred")
-    _kdt_a = 1.0 / max(float(cfg_feat.get("kin_dt_ema", MB.KIN_DT_EMA)), 1.0)
+    _kdt_a = 1.0 / max(float(MB.KIN_DT_EMA), 1.0)
     dth_scale = cfg_feat["dth_scale"]
     dm, ds, tm, ts = cfg_feat["kin_scales"]
     dist_hi, dt_hi = cfg_feat.get("kin_clip", (400.0, 600.0))
@@ -1495,12 +1500,6 @@ def generate_mix_joint_loop(model, rec, cfg_feat, rng, closed_loop=True, guardra
                          phi_ref=cfg_feat.get("phi_ref", "ori"))
     use_border = cfg_feat.get("use_border")
     tf_border = MB._border_block(rec, cfg_feat) if use_border else np.zeros((n, 0))
-    # K_stim block: pure function of the record's own stimulus programme, so it is indexed by
-    # bout exactly as the teacher-forced stim block is. (The whole rollout is indexed by bout
-    # number rather than wall-clock -- the known clock_ratio caveat -- so this is consistent with
-    # how `moving` and `n_dots` are already fed.)
-    tf_shist = (MB._stimhist_block(rec, cfg_feat) if int(cfg_feat.get("K_stim", 1)) > 1
-                else np.zeros((n, 0)))
     recompute_stim = (stim_loop and closed_loop
                       and cfg_feat["stim_mode"] in MX.ONLINE_STIM_MODES)
     if stim_provider is not None and not recompute_stim:
@@ -1511,37 +1510,12 @@ def generate_mix_joint_loop(model, rec, cfg_feat, rng, closed_loop=True, guardra
             f"closed_loop=True and stim_mode in {MX.ONLINE_STIM_MODES}; got "
             f"stim_loop={stim_loop}, closed_loop={closed_loop}, "
             f"stim_mode={cfg_feat['stim_mode']!r}.")
-    if stim_provider is not None and tf_shist.shape[1]:
-        # Same reasoning as above: the K_stim channels describe the RECORD's block programme, so
-        # replaying them under a new programme would be a silent replay of the old one.
-        raise ValueError("stim_provider is incompatible with K_stim > 1: the stimulus-memory "
-                         "block would still describe the record's own programme. Resolve the "
-                         "previous onsets from the provider's programme before enabling both.")
     if recompute_stim:
         dot_cx_a = np.asarray(getattr(rec, "dot_cx", np.full(n, np.nan)), float)
         dot_cy_a = np.asarray(getattr(rec, "dot_cy", np.full(n, np.nan)), float)
         mv_a = np.asarray(rec.moving, float); phi_gen = np.full(n, np.nan)
         nd_a = np.asarray(getattr(rec, "n_dots", np.zeros(n)), float)
         dcx_used = np.full(n, np.nan); dcy_used = np.full(n, np.nan)
-    # PER-DOT population code (Model 26): the row needs every active dot's position, from the
-    # provider's `dots()` when there is one and from the record's per-dot arrays otherwise.
-    _pop = cfg_feat["stim_mode"] in M.POP_MODES
-    _pop_kw = M.pop_kw(cfg_feat["stim_mode"]) if cfg_feat["stim_mode"] in M.POP_MODES else {}
-    # DOT DRIFT (Model 31, 'shoal_popld'): the previous bout's dot slots and the time they were read, in
-    # the clock the positions come from -- the record's frames on the replay path and under the
-    # record-anchored provider, the generated clock under the programme provider (``last_time_s``).
-    _pop_drift = bool(_pop_kw.get("drift"))
-    _prev_dots = None
-    _fo_rec = getattr(rec, "frame_onset", None)
-    _dxs = _dys = None
-    if _pop and recompute_stim:
-        if stim_provider is not None and not callable(getattr(stim_provider, "dots", None)):
-            raise ValueError("stim_mode='shoal_pop' needs a provider with a dots() method")
-        if stim_provider is None:
-            _dxs = getattr(rec, "dot_xs", None); _dys = getattr(rec, "dot_ys", None)
-            if _dxs is None:
-                raise RuntimeError("stim_mode='shoal_pop' needs rec.dot_xs / rec.dot_ys (add_dot_positions.py)")
-            _dxs = np.asarray(_dxs, float); _dys = np.asarray(_dys, float)
     # WARM-UP RE-ANCHORING (profile fine-tune, ``PF.block_starts(reanchor=True)``): a sliced record may carry
     # `_reanchor_at` = P, the block-onset bout of a FREE-WARM-UP start. Its replayed dot track was placed around the REAL
     # fish's onset pose, but the simulated fish reaches bout P wherever its own warm-up took it (measured: 32 mm from the
@@ -1550,33 +1524,15 @@ def generate_mix_joint_loop(model, rec, cfg_feat, rng, closed_loop=True, guardra
     # Absent -> byte-identical.
     _ra = getattr(rec, "_reanchor_at", None)
     _ra = None if _ra is None else int(_ra)
-    # REPULSION TERM (see ``repulsion_shifts``): per-dot positions every bout -- the provider's dots() or the record's
-    _rep = cfg_feat.get("repulsion") or None
     _rep_cur = [0.0, 0.0]                                    # this bout's (turn shift, step log-mean shift)
-    _rdx = _rdy = None
-    if _rep:
-        _no_dots = multi_rule is not None and not callable(getattr(stim_provider, "dots", None))
-        if _no_dots or _ra is not None or _pop or not recompute_stim:
-            raise NotImplementedError("repulsion term: closed-loop centroid codes only (multi-group scenes only with a "
-                                      "provider giving the individual neighbours via dots(); no warm-up re-anchoring, "
-                                      "per-dot codes or replayed stimulus rows)")
-        if stim_provider is not None and not callable(getattr(stim_provider, "dots", None)):
-            raise ValueError("repulsion term: the stimulus provider needs a dots() method (individual dots)")
-        if stim_provider is None:
-            _rdx, _rdy = getattr(rec, "dot_xs", None), getattr(rec, "dot_ys", None)
-            if _rdx is None:
-                raise RuntimeError("repulsion term: the record carries no per-dot positions (rec.dot_xs)")
-            _rdx = np.asarray(_rdx, float); _rdy = np.asarray(_rdy, float)
     # GROUP REPULSION TERM (see ``grouprep_shifts``): each visible group's nearest member every bout -- the multi-group
     # provider's group_nearest(), the single-group provider's dots(), or the record's own dot positions
     _grp_rep = cfg_feat.get("grouprep") or None
     _gdx = _gdy = None
     if _grp_rep:
-        if _rep:
-            raise ValueError("cfg_feat: 'grouprep' and 'repulsion' are exclusive")
-        if _ra is not None or _pop or not recompute_stim:
-            raise NotImplementedError("grouprep term: closed-loop centroid codes only (no warm-up re-anchoring, "
-                                      "per-dot codes or replayed stimulus rows)")
+        if _ra is not None or not recompute_stim:
+            raise NotImplementedError("grouprep term: closed-loop centroid codes only (no warm-up re-anchoring "
+                                      "or replayed stimulus rows)")
         if multi_rule is not None and not callable(getattr(stim_provider, "group_nearest", None)):
             raise ValueError("grouprep term: a multi-group provider needs group_nearest()")
         if multi_rule is None and stim_provider is not None and not callable(getattr(stim_provider, "dots", None)):
@@ -1590,9 +1546,8 @@ def generate_mix_joint_loop(model, rec, cfg_feat, rng, closed_loop=True, guardra
     if _coll_px and not callable(getattr(stim_provider, "neighbours_xy", None)):
         raise ValueError("collision_mm: the stimulus provider needs neighbours_xy()")
     if _ra is not None:
-        if not recompute_stim or stim_provider is not None or _pop or int(cfg_feat.get("stim_lags") or 0):
-            raise NotImplementedError("_reanchor_at: centroid stimulus replayed from the record only "
-                                      "(no provider, no per-dot code, no stimulus lags)")
+        if not recompute_stim or stim_provider is not None:
+            raise NotImplementedError("_reanchor_at: centroid stimulus replayed from the record only (no provider)")
         dot_cx_a = dot_cx_a.copy(); dot_cy_a = dot_cy_a.copy()        # never write into the record
         _trv_ra = MB._travel_ref(rec)
     # PER-FISH RANDOM EFFECT. One draw per TRAJECTORY from the fitted prior -- the honest "new fish"
@@ -1608,74 +1563,19 @@ def generate_mix_joint_loop(model, rec, cfg_feat, rng, closed_loop=True, guardra
     # Asserted in smoke_fishre.py, not assumed.
     _re = cfg_feat.get("fish_re")
     z_re = None
-    u_rad_re = 0.0
     if _re is not None:
         _sd_re = np.asarray(_re["sd"], float).reshape(-1)
         z_re = rng.spawn(1)[0].normal(size=_sd_re.shape[0]) * _sd_re
-        if _re.get("z_fixed") is not None:
-            # TWIN MODE (in-sample checkpoints only, see fishre.z_twin): a KNOWN fish's fitted
-            # embedding replaces the prior draw. The spawn above is still consumed, so every
-            # other stream is byte-identical to the prior-draw rollout of the same (seed, fish, rep).
-            z_re = np.asarray(_re["z_fixed"], float).reshape(_sd_re.shape[0])
-        if "rad_sd" in _re:
-            # RADIAL individuality for the fishre family (rad_indiv): a per-trajectory
-            # multiplicative swing on the containment bias, mirroring indiv's u_rad -- an
-            # additive offset leaks into the turn marginal and can flip a fish outward.
-            # SPAWN ORDER IS LOAD-BEARING: z stays child 0 (a cfg without the key draws exactly
-            # as before), this is child 1, and the main emission stream is never touched, so the
-            # CRN pairing against the no-rad control arm holds bout for bout.
-            # Gate on KEY PRESENCE, not truthiness: _search_rad_indiv's base pass sets
-            # rad_sd=0.0 and shares one rng across its fish, so both passes must consume the
-            # SAME spawn count per rollout -- a truthiness gate shifts every later fish's z_re
-            # to a different spawn child and the two-point solve reads z-resampling noise.
-            # rad_sd=0.0 still yields u_rad_re == 0.0, i.e. a bit-identical rollout.
-            u_rad_re = float(rng.spawn(1)[0].normal() * float(_re["rad_sd"]))
-    # PER-FISH GATE OFFSET (rad_gate): each trajectory shifts the containment gate u0 by a fixed
-    # draw -- a personal HOME RADIUS, moving where wall avoidance engages rather than how hard.
-    # Built because the multiplicative swing (u_rad/rad_sd) is measured INERT on graded bulk=0
-    # biases: scaling a bias that only acts in the outer ring cannot move per-fish MEAN r/R,
-    # while moving the gate 0.60->0.45 shifts it by ~0.03. Same CRN contract as rad_sd: spawned
-    # stream (never the main one), key-presence gated so the calibrator's base pass stays paired.
-    u_gate = 0.0
-    _rg = cfg_feat.get("rad_gate")
-    if _rg is not None and "sd" in _rg:
-        u_gate = float(rng.spawn(1)[0].normal() * float(_rg["sd"]))
-    # SLOW TIMING STATE. Unlike every latent above it, this one EVOLVES: s_t = phi s_{t-1} +
-    # sqrt(1-phi^2) eps, entering the interval head's location as mu_tau + lam*s. That is the
-    # whole point -- a per-trajectory constant shifts every window equally and so contributes
-    # nothing to rate_acf_1min / quiesc20 / dt dispersion, which is exactly what the fishre latent
-    # cannot fix. Drawn from a SPAWNED stream (same contract as rad_indiv/rad_gate) so a control
-    # arm without the key consumes the identical main-stream variates and stays CRN-paired.
-    _dtl = cfg_feat.get("dt_latent")
-    s_lam = s_phi = 0.0
-    s_lam_c = 0.0
-    s_state = 0.0
-    s_rng = None
-    if _dtl:
-        # `g_lam` / `lam_c`: the rollout-fitted amplitude gain and its log-normal re-centring, set by
-        # MX._search_drift_gain when dt_latent is the interval chain of the two-state design (absent
-        # -> 1 / 0, bit-identical to every archived dt_latent arm).
-        s_lam = float(_dtl["lam"]) * float(_dtl.get("g_lam", 1.0)); s_phi = float(_dtl["phi"])
-        s_lam_c = float(_dtl.get("lam_c", 0.0))
-        s_rng = rng.spawn(1)[0]
-        s_state = float(s_rng.normal())          # stationary N(0,1), matching tauchen's prior
-    # DRIFT. The same AR(1) machinery as dt_latent, but loading on ALL FOUR channels -- turn logit,
-    # distance location, interval location, and the containment-bias scale. The last one is why this
-    # exists: every previous individuality mechanism is static per trajectory and therefore cannot
-    # move the across-window autocorrelation at all (real radial +0.377, generated -0.035). Drawn
-    # from a SPAWNED stream, same contract as rad_indiv/rad_gate/dt_latent, so a control arm without
-    # the key consumes identical main-stream variates and stays CRN-paired.
+    # DRIFT. A slow AR(1) state s_t = phi s_{t-1} + sqrt(1 - phi^2) eps loading on the turn logit, the distance location
+    # and the interval location. Drawn from a SPAWNED stream, so a model without it consumes identical main-stream
+    # variates and stays CRN-paired.
     _dr = cfg_feat.get("drift")
-    d_turn = d_dist = d_dt = d_bord = 0.0
+    d_turn = d_dist = d_dt = 0.0
     d_dist_c = d_dt_c = 0.0
     d_phi = 0.0
     d_state = 0.0
     d_rng = None
     if _dr:
-        if _dtl and abs(float(_dr.get("dt", 0.0))) > 1e-12:
-            raise ValueError("drift and dt_latent both set: two AR(1) states competing for the "
-                             "same variance. drift already loads on the interval head. (The "
-                             "two-state design sets drift['dt_off'], so its dt loading is 0.)")
         # `gain` scales the LIKELIHOOD-FITTED loadings so the rollout search can put each channel's
         # across-window acf on target; `dist_c`/`dt_c` are the matching re-centring constants.
         # THE RE-CENTRING IS NOT OPTIONAL, for exactly the reason apply_loading_gain documents: the
@@ -1692,7 +1592,6 @@ def generate_mix_joint_loop(model, rec, cfg_feat, rng, closed_loop=True, guardra
         d_turn = float(_dr.get("turn", 0.0))
         d_dist = float(_dr.get("dist", 0.0)) * float(_dr.get("g_dist", 1.0))
         d_dt = float(_dr.get("dt", 0.0)) * float(_dr.get("g_dt", 1.0))
-        d_bord = float(_dr.get("bord", 0.0))
         d_dist_c = float(_dr.get("dist_c", 0.0)); d_dt_c = float(_dr.get("dt_c", 0.0))
         d_phi = float(_dr["phi"])
         d_rng = rng.spawn(1)[0]
@@ -1716,19 +1615,12 @@ def generate_mix_joint_loop(model, rec, cfg_feat, rng, closed_loop=True, guardra
     wall_stats = {}
     Xrec = (np.zeros((n, int(model.body[0].in_features)), dtype=np.float32)
             if keep_features else None)
-    # POLICY-GRADIENT HANDLES (keep_features only; pure recording, no RNG consumed, so the default
-    # path stays bit-identical). A rollout-aware objective must differentiate the log-density of the
-    # value the emission ACTUALLY drew, and that is NOT what the sample dict reports: ``dtheta`` is
-    # post-containment-bias, ``distance_px`` is post-vigor, ``dt_s`` is post-vigor AND post-dt_snap.
-    # Scoring those evaluates the mixture at a point it never sampled -- a silently wrong score
-    # function, which is one of the defects that made rollout_finetune.py unusable.
-    # See scripts/rollout_aware.py.
+    # POLICY-GRADIENT HANDLES (keep_features only; pure recording, no RNG consumed): the drawn values and the drift
+    # state, for the profile correction's score function (twin/profile_finetune.py).
     dth_base = np.zeros(n) if keep_features else None
     dist_base = np.zeros(n) if keep_features else None
     dt_base = np.zeros(n) if keep_features else None
-    s_rec = np.zeros(n) if keep_features else None
     d_rec = np.zeros(n) if keep_features else None
-    cb_cfg = cfg_feat.get("centre_bias", 0.0)
     # SHALLOW-BORDER REJECTION (key absent => rd0 is None => the loop below is byte-identical to
     # every archived arm, which is the only bit-identity guarantee offered: rejection consumes a
     # VARIABLE number of variates, so a reject arm can never be CRN-paired bout-for-bout against
@@ -1756,33 +1648,6 @@ def generate_mix_joint_loop(model, rec, cfg_feat, rng, closed_loop=True, guardra
             # _ray_to_wall returns 0 and the trajectory freezes in place for the whole rollout.
             x = cx + (x - cx) / _u0 * (1.0 - 1e-9)
             y = cy + (y - cy) / _u0 * (1.0 - 1e-9)
-    # HOME RADIUS (Model 22). A per-trajectory preferred radius r/R that the shallow-border rejection
-    # ALSO serves: a rim-accepted bout that lands farther from the home radius than the fish is now,
-    # and outside a tolerance band around it, is redrawn with probability `pull`. The rim ramp is
-    # unchanged and tested first, so the wall band this rule sits inside is exactly rej's. Keys live
-    # INSIDE wall_reject so every consumer that merges the rej band (model_figures.fold_models, the
-    # harness's cfg_override) carries them: home_mu / home_sd = the real population of per-fish
-    # median r/R (one draw per trajectory -- a NEW fish's home), home_band = the no-pull zone,
-    # home_tau (bouts) drifts the home as an AR(1) so the fish lingers in an annulus and then moves
-    # (None = static home). Built because occupancy is set by the rejection band once rej is on, so
-    # every lever on the wall response inside the turn law (rad_indiv, rad_gate, re_bgain) was inert.
-    # Spawned stream, key-presence gated: a config without `pull` consumes identical main-stream
-    # variates and is bit-identical to rej; pull = 0.0 draws no extra variate either.
-    hm_pull = 0.0; hm_mu = 0.0; hm_sd = 0.0; hm_band = 0.0; hm_phi = 1.0
-    hm_state = 0.0; hm_rng = None
-    if _wr and _wr.get("pull") is not None:
-        hm_pull = float(_wr["pull"])
-        hm_mu = float(_wr.get("home_mu", 0.45)); hm_sd = float(_wr.get("home_sd", 0.0))
-        hm_band = float(_wr.get("home_band", 0.10))
-        hm_rng = rng.spawn(1)[0]
-        hm_state = hm_mu + hm_sd * float(hm_rng.normal())
-        _htau = _wr.get("home_tau")
-        hm_phi = float(np.exp(-1.0 / float(_htau))) if _htau else 1.0
-    # KIN_FEEDBACK: shrink the kinematic history ON READ. The block is z-scored (mean 0), so a
-    # factor < 1 pulls every lag toward the population mean, which rescales the effective AR
-    # coefficient of the free-running loop and damps the exposure-bias over-persistence.
-    # NOTE this model differs from the kin family: those columns feed the SHARED body, so the
-    # shrinkage reaches the turn head too. Watch the turn panel metrics, not just the kinematic ones.
     # LAG-VALIDITY and BLOCK-CLOCK columns, appended by MB.build_feature_matrix AFTER the kin
     # block. Both are pure functions of the bout index and the clock -- not of the generated
     # behaviour -- so they are precomputed here rather than rebuilt per bout.
@@ -1809,31 +1674,6 @@ def generate_mix_joint_loop(model, rec, cfg_feat, rng, closed_loop=True, guardra
     # STATIC-dot bearing block (MB._static_block / M.static_channels), same two paths as align.
     _st_on = bool(cfg_feat.get("stim_static"))
     _st_rec = MB._static_block(rec, cfg_feat) if _st_on else None
-    # static block x the slowest block clock (MB._static_clock_block): the clock value comes from
-    # `_clock_of` on this bout, so the product is exact on both stimulus paths.
-    _sc_on = bool(cfg_feat.get("stim_static_clock"))
-    if _sc_on and (not _st_on or _clk_mode not in ("linear", "exp")):
-        raise ValueError("stim_static_clock needs stim_static and a block clock")
-    # static block x the MID-BLOCK BUMP (MB._static_bump_block): the bump reads the block time the
-    # clock closure computes for this bout (`_clk_state['tb']`, 0 on no-dot bouts).
-    _sb_taus = cfg_feat.get("stim_static_bump")
-    _sb_on = bool(_sb_taus)
-    if _sb_on and (not _st_on or _clk_mode not in ("linear", "exp")):
-        raise ValueError("stim_static_bump needs stim_static and a block clock")
-    # ONSET x BEARING (MB._onset_block, Model 25): the first clock column of THIS bout (from the
-    # clock closure, so it is exact on both stimulus paths) x [sin, cos] of the bearing -- the
-    # generated bearing on the closed-loop path, the record's on the teacher-forced one.
-    _on_on = bool(cfg_feat.get("stim_onset"))
-    if _on_on and _clk_mode not in ("linear", "exp"):
-        raise ValueError("stim_onset needs a block clock (clock_mode)")
-    # SHORT-TERM STIMULUS LAGS (MB.stim_lag_rows, Model 38): the centroid each earlier bout was SHOWN (the provider's
-    # re-anchored dots on the evaluation path, the record's on the replay path), seen from the CURRENT pose; segments
-    # break at condition changes (a rollout is one run, so no run breaks). Teacher-forced path: the record's block.
-    _sl_K = int(cfg_feat.get("stim_lags") or 0)
-    _sl_rec = (MB._stimlag_block(rec, cfg_feat) if (_sl_K and not recompute_stim) else None)
-    if _sl_K:
-        _sl_dx = np.full(n, np.nan); _sl_dy = np.full(n, np.nan); _sl_seg = np.full(n, -1, dtype=np.int64)
-        _sl_state = {"cond": None, "seg": -1}
     # DOT-JUMP PHASE (MB._jump_block, Model 41): a function of the programme frame the bout's stimulus is read on (the
     # clock source below, as the block clock) and of its condition; the teacher-forced path reads the record's block.
     _jp_on = bool(cfg_feat.get("stim_jump"))
@@ -1844,10 +1684,6 @@ def generate_mix_joint_loop(model, rec, cfg_feat, rng, closed_loop=True, guardra
     _dm_on = bool(cfg_feat.get("stim_dmove"))
     _dm_rec = MB._dmove_block(rec, cfg_feat) if (_dm_on and not recompute_stim) else None
     _dm_state = {"cond": None, "prev": (np.nan, np.nan)}
-    _phi_rec = None
-    if _on_on:
-        _phi_rec = getattr(rec, "stim_angle_travel", None) if cfg_feat.get("phi_ref", "ori") == "travel" else None
-        _phi_rec = np.asarray(_phi_rec if _phi_rec is not None else rec.stim_angle, float)
 
     # WHICH CLOCK. The block phase must come from the same clock the STIMULUS comes from, or the
     # net is told "a stimulus just started" at moments unrelated to when it actually started.
@@ -1904,45 +1740,11 @@ def generate_mix_joint_loop(model, rec, cfg_feat, rng, closed_loop=True, guardra
         _clk_state["cond"] = cond
         _w = 1 if _clk_mode == "linear" else len(_clk_taus)
         if not nd_ > 0.0:                                    # gate: 0 on every no-dot bout
-            _clk_state["tb"] = 0.0
             return np.zeros((_w,), dtype=np.float32)
         tb = max(float(t_s) - _clk_state["t0"], 0.0) if tb_ext is None else max(float(tb_ext), 0.0)
-        _clk_state["tb"] = tb                                # read by the static bump block
         if _clk_mode == "linear":
             return np.array([min(tb / MB.CLOCK_BLOCK_S, 1.0)], dtype=np.float32)
         return np.array([np.exp(-tb / tau) for tau in _clk_taus], dtype=np.float32)
-    _kfb = cfg_feat.get("kin_feedback", 1.0)
-    kfb_d, kfb_t = ((float(_kfb["dist"]), float(_kfb["dt"])) if isinstance(_kfb, dict)
-                    else (float(_kfb), float(_kfb)))
-    # VIGOR: per-trajectory log-modulation of the emitted step / interval. u = a fixed intercept
-    # (individuality), d = a slow stationary AR(1) (tempo drift). Applied OUTSIDE the loop -- the
-    # history keeps the unmodulated value, or the mean-reverting body would push back against z
-    # and it would compound. -var/2 keeps E[exp(z)] = 1 so the population mean is unchanged.
-    # INDIV: per-trajectory individuality for the two channels vigor does not cover.
-    # u_fw tilts the FORWARD mixture weight -- changing how OFTEN the fish turns, not how hard,
-    # which is the axis real fish actually vary on (forward fraction spans 4.5x across the 15,
-    # median |dtheta| only 2x) and which leaves the pooled turn marginal alone.
-    # u_rad SCALES the containment bias. An additive offset was tried and is wrong twice over:
-    # centre_bias steers by adding cb*sin(psi) to dtheta so an offset leaks into the turn
-    # marginal, and a negative draw flips a fish OUTWARD and triples the wall fraction.
-    _iv = cfg_feat.get("indiv"); u_fw = u_rad = 0.0
-    if _iv:
-        u_fw = float(rng.normal(0.0, float(_iv.get("fw", 0.0))))
-        u_rad = float(rng.normal(0.0, float(_iv.get("rad", 0.0))))
-    # INNOV_COMP: widen the innovation about THIS bout's conditional mean, restoring the spread
-    # kin_feedback removes. For a linear AR, scaling the innovation multiplies the stationary
-    # variance while leaving acf(k)=phi^k untouched -- so lambda sets the acf and c the spread.
-    # NOT kin_var_comp, which rescaled about the fixed TRAINING log-mean with the history left
-    # unscaled: a pure output transform that widened the marginal without restoring the loop.
-    _kin = cfg_feat.get("kin_innov")
-    ci_d = float(_kin.get("dist", 1.0)) if _kin else 1.0
-    ci_t = float(_kin.get("dt", 1.0)) if _kin else 1.0
-    vg = cfg_feat.get("vigor"); z_di = z_dt = 0.0
-    if vg:
-        su_di, sd_di, ph_di, var_di = vg["dist"]; su_dt, sd_dt, ph_dt, var_dt = vg["dt"]
-        c_di = float(np.sqrt(1.0 - ph_di * ph_di)); c_dt = float(np.sqrt(1.0 - ph_dt * ph_dt))
-        u_di = rng.normal(0.0, su_di); u_dt = rng.normal(0.0, su_dt)
-        d_di = rng.normal(0.0, sd_di); d_dt = rng.normal(0.0, sd_dt)
 
     # EMISSION ORDER. Read off the net, so a checkpoint generates in the order it was trained in
     # and an old one (no attribute) keeps the archived chain. When the angle head is first it takes
@@ -1957,11 +1759,8 @@ def generate_mix_joint_loop(model, rec, cfg_feat, rng, closed_loop=True, guardra
                            "numpy predictor only exposes the unconditional one")
 
     def _adj_w(w):
-        """The mixture weights after the two forward-weight tilts. Both multiply the FIRST weight
-        and renormalise, which is exactly the torch path's `out[:, :1] + shift` then softmax --
-        doing it on the weights keeps the numpy predictor's single forward pass intact."""
-        if u_fw:
-            w = np.array([w[0] * float(np.exp(u_fw)), w[1], w[2], w[3], w[4]]); w = w / w.sum()
+        """The mixture weights after the drift's forward-weight tilt (multiplies the FIRST weight and renormalises,
+        exactly the torch path's `out[:, :1] + shift` then softmax) and the group repulsion term."""
         if d_turn:
             w = np.array([w[0] * float(np.exp(d_turn * d_state)), w[1], w[2], w[3], w[4]])
             w = w / w.sum()
@@ -1975,15 +1774,13 @@ def generate_mix_joint_loop(model, rec, cfg_feat, rng, closed_loop=True, guardra
     _mg = multi_rule is not None
     _groups = ()
     if _mg:
-        if multi_rule not in MULTI_RULES and heading_kappa(multi_rule) is None:
-            raise ValueError(f"multi_rule {multi_rule!r} not in {MULTI_RULES} (or 'heading<kappa>')")
+        if multi_rule not in MULTI_RULES:
+            raise ValueError(f"multi_rule {multi_rule!r} not in {MULTI_RULES}")
         if stim_provider is None or not callable(getattr(stim_provider, "groups", None)) or not recompute_stim:
             raise ValueError("multi_rule needs the online stimulus path and a provider with groups()")
-        if (_pop or tf_shist.shape[1] or _sl_K or _on_on or _sc_on or _sb_on or _ra is not None or keep_features
-                or _force_P or body_angle.raw["st_step"]):
-            raise NotImplementedError("multi_rule: centroid code (+ align / static blocks) only -- no per-dot code, "
-                                      "stimulus memory or lags, onset / static-clock / bump blocks, re-anchoring, "
-                                      "feature recording, forced starts or a step-lever profile term")
+        if _ra is not None or keep_features or _force_P or body_angle.raw["st_step"]:
+            raise NotImplementedError("multi_rule: no re-anchoring, feature recording, forced starts or a step-lever "
+                                      "profile term")
         _MG_MAX = 4
         grp_cx = np.full((n, _MG_MAX), np.nan); grp_cy = np.full((n, _MG_MAX), np.nan)
         grp_phi = np.full((n, _MG_MAX), np.nan); grp_n = np.zeros(n, dtype=np.int8)
@@ -2038,42 +1835,8 @@ def generate_mix_joint_loop(model, rec, cfg_feat, rng, closed_loop=True, guardra
             dcx_used[t] = dcx; dcy_used[t] = dcy
             if np.isfinite(dcx):
                 phi_gen[t] = MB._wrap_pi(np.arctan2(dcy - y, dcx - x) - h)
-            if _pop:
-                _grp = None                  # group labels ('_lab' modes): None = one group
-                if stim_provider is not None:
-                    _xs, _ys, _on, _mvk, _ = stim_provider.dots(t, t_now, x, y, h)
-                    _ts = float(getattr(stim_provider, "last_time_s", t_now))
-                    _grp = getattr(stim_provider, "last_groups", None)
-                else:
-                    _xs, _ys = _dxs[t], _dys[t]
-                    _on = np.isfinite(_xs) & np.isfinite(_ys); _mvk = np.full(len(_xs), mv_t)
-                    _ts = float(_fo_rec[t]) / MB._FPS if _fo_rec is not None else float(t_now)
-                    _dg = getattr(rec, "dot_group", None)
-                    _grp = None if _dg is None else np.asarray(_dg)[t]
-                _vt = None
-                if _pop_drift:
-                    _xa = np.where(_on, np.asarray(_xs, float), np.nan)
-                    _ya = np.where(_on, np.asarray(_ys, float), np.nan)
-                    if _prev_dots is not None and len(_prev_dots[0]) == len(_xa):
-                        _vt = M.dot_tangential(_prev_dots[0], _prev_dots[1], _xa, _ya, x, y,
-                                               _ts - _prev_dots[2])[0]
-                    else:
-                        _vt = np.full(len(_xa), np.nan)
-                    _prev_dots = (_xa, _ya, _ts)
-                stim_t = M.pop_row(_xs, _ys, _on, _mvk, x, y, h, vt_k=_vt,
-                                   **(dict(_pop_kw, grp_k=_grp) if _pop_kw.get("by_label") else _pop_kw))
-            else:
-                stim_t = MX._dot_stim_row(cfg_feat["stim_mode"], dcx, dcy,
-                                          x, y, h, mv_t, nd_t, dish=(cx, cy, R))
-            if _rep:
-                if stim_provider is not None:
-                    _rx, _ry, _ron, _, _ = stim_provider.dots(t, t_now, x, y, h)
-                    _rx = np.where(np.asarray(_ron, bool), np.asarray(_rx, float), np.nan)
-                    _ry = np.where(np.asarray(_ron, bool), np.asarray(_ry, float), np.nan)
-                else:
-                    _rx, _ry = _rdx[t], _rdy[t]
-                _s, _u = repulsion_shifts(_rx, _ry, x, y, h, _rep)
-                _rep_cur[0], _rep_cur[1] = float(_s[0]), float(_u[0])
+            stim_t = MX._dot_stim_row(cfg_feat["stim_mode"], dcx, dcy,
+                                      x, y, h, mv_t, nd_t, dish=(cx, cy, R))
             if _grp_rep:
                 if _mg:
                     _near = ([(q_[0], q_[1], g_[3], g_[2]) for q_, g_ in zip(stim_provider.group_nearest(), _groups)]
@@ -2114,26 +1877,12 @@ def generate_mix_joint_loop(model, rec, cfg_feat, rng, closed_loop=True, guardra
                     if _gi < _MG_MAX:
                         grp_cx[t, _gi] = _gx; grp_cy[t, _gi] = _gy; grp_phi[t, _gi] = _gphi
                 grp_n[t] = len(_groups)
-            if _sl_K:
-                _c = float(np.nan_to_num(nd_t)) * 10.0 + float(np.nan_to_num(mv_t))
-                if _sl_state["cond"] is None or _c != _sl_state["cond"]:
-                    _sl_state["seg"] += 1
-                _sl_state["cond"] = _c
-                _sl_dx[t] = dcx; _sl_dy[t] = dcy; _sl_seg[t] = _sl_state["seg"]
-                _ks = np.arange(t - 1, t - 1 - _sl_K, -1)                  # bouts t-1 .. t-K
-                _okk = _ks >= 0
-                _sl_t = MB.stim_lag_rows(np.where(_okk, _sl_dx[np.maximum(_ks, 0)], np.nan)[None],
-                                         np.where(_okk, _sl_dy[np.maximum(_ks, 0)], np.nan)[None],
-                                         np.where(_okk, _sl_seg[np.maximum(_ks, 0)], -1)[None],
-                                         [x], [y], [h], [_sl_state["seg"]])[0]
         else:
             stim_t = stim[t]
             if _al_on:
                 _al_t = float(_al_rec[t]) if t < len(_al_rec) else 0.0
             if _st_on:
                 _st_t = _st_rec[t] if t < len(_st_rec) else np.zeros(8, dtype=np.float32)
-            if _sl_K:
-                _sl_t = _sl_rec[t] if t < len(_sl_rec) else np.zeros(3 * _sl_K, dtype=np.float32)
             if _dm_on:
                 _dm_t = _dm_rec[t] if t < len(_dm_rec) else np.zeros(2, dtype=np.float32)
         hist = np.zeros(K)
@@ -2143,13 +1892,13 @@ def generate_mix_joint_loop(model, rec, cfg_feat, rng, closed_loop=True, guardra
         kin = np.zeros(2 * Kk if _kin_dt else Kk)
         for k in range(1, Kk + 1):
             if t - k >= 0:
-                kin[k - 1] = kfb_d * (ld_hist[t - k] - dm) / ds
+                kin[k - 1] = (ld_hist[t - k] - dm) / ds
                 if _kin_dt_c:
-                    kin[Kk + k - 1] = kfb_t * (lt_hist[t - k] - _kdt_lev) / ts
+                    kin[Kk + k - 1] = (lt_hist[t - k] - _kdt_lev) / ts
                 elif _kin_dt:
-                    kin[Kk + k - 1] = kfb_t * (lt_hist[t - k] - tm) / ts
+                    kin[Kk + k - 1] = (lt_hist[t - k] - tm) / ts
         # block order MUST match MB.build_feature_matrix:
-        #   history, stim, stimhist, border, kin, lag_valid, clock, run_clock, align
+        #   history, stim, border, kin, lag_valid, clock, run_clock, align, static, jump, dmove
         _tail = [kin]
         if _lagv_a is not None:
             _tail.append(_lagv_a[t])
@@ -2167,16 +1916,6 @@ def generate_mix_joint_loop(model, rec, cfg_feat, rng, closed_loop=True, guardra
             _tail.append(np.array([_al_t], dtype=np.float32))
         if _st_on:
             _tail.append(_st_t)
-        if _sc_on:
-            _tail.append((_st_t * np.float32(_ck[-1])).astype(np.float32))
-        if _sb_on:
-            _tail.append((_st_t * np.float32(MB.static_bump(_clk_state.get("tb", 0.0), _sb_taus))).astype(np.float32))
-        if _on_on:
-            _phi_t = phi_gen[t] if recompute_stim else (_phi_rec[t] if t < len(_phi_rec) else np.nan)
-            _nd_t = nd_t if recompute_stim else _nd_all[t]
-            _tail.append(MB.onset_channels(_ck[0], _phi_t, _nd_t)[0].astype(np.float32))
-        if _sl_K:
-            _tail.append(np.asarray(_sl_t, dtype=np.float32))              # as the record builder
         if _jp_on:                                                          # LAST, as the record builder
             if _mg and _groups:
                 raise NotImplementedError("stim_jump: one dot group only (no multi-group rules)")
@@ -2190,14 +1929,13 @@ def generate_mix_joint_loop(model, rec, cfg_feat, rng, closed_loop=True, guardra
             if _mg and _groups:
                 raise NotImplementedError("stim_dmove: one dot group only (no multi-group rules)")
             _tail.append(np.asarray(_dm_t, dtype=np.float32))
-        row = np.concatenate([hist / dth_scale, stim_t, tf_shist[t] if tf_shist.shape[1] else _EMPTY,
-                              border_t] + _tail).astype(np.float32)
+        row = np.concatenate([hist / dth_scale, stim_t, border_t] + _tail).astype(np.float32)
         assert row.shape[0] == int(model.body[0].in_features), "joint row width != net input dim"
         if keep_features:
             Xrec[t] = row
         if _mg and _groups:
             def _mrow(sv, alv, stv, ckv):            # the standard row's block order with these stimulus parts
-                parts = [hist / dth_scale, sv, _EMPTY, border_t, kin]
+                parts = [hist / dth_scale, sv, border_t, kin]
                 if _lagv_a is not None:
                     parts.append(_lagv_a[t])
                 if ckv is not None:
@@ -2211,18 +1949,13 @@ def generate_mix_joint_loop(model, rec, cfg_feat, rng, closed_loop=True, guardra
                 return np.concatenate(parts).astype(np.float32)
 
             _grows = [_mrow(sv_, al_, st_, _ck) for sv_, al_, st_, _ in _gp]
-            if multi_rule == "effects" or heading_kappa(multi_rule) is not None:   # + the no-dots row (clock 0)
+            if multi_rule == "effects":                                            # + the no-dots row (clock 0)
                 _b0 = _mrow(MX._dot_stim_row(cfg_feat["stim_mode"], np.nan, np.nan, x, y, h, 0.0, 0.0,
                                              dish=(cx, cy, R)), 0.0,
                             (M.static_channels([np.nan], [np.nan], [0.0], [0.0])[0].astype(np.float32)
                              if _st_on else None),
                             None if _ck is None else np.zeros_like(_ck))
-                if multi_rule == "effects":
-                    b = multi_bout(_raw, "effects", _grows, base_row=_b0)
-                else:                                # heading rule: weights from each group's bearing off the heading
-                    _ph = [MB._wrap_pi(np.arctan2(g_[1] - y, g_[0] - x) - h) for g_ in _groups]
-                    b = multi_bout(_raw, multi_rule, _grows, base_row=_b0,
-                                   weights=heading_weights(_ph, heading_kappa(multi_rule)))
+                b = multi_bout(_raw, "effects", _grows, base_row=_b0)
             elif multi_rule == "nearest":
                 _rg = np.array([g_[3] for g_ in _gp], float)
                 b = multi_bout(_raw, "nearest", _grows,
@@ -2248,7 +1981,7 @@ def generate_mix_joint_loop(model, rec, cfg_feat, rng, closed_loop=True, guardra
         _w0 = _adj_w(ang[0]) if _a_first else None
 
         def _draw_a(prev):
-            """dtheta | x, (whatever was emitted before it). Returns (post-bias, mixture draw)."""
+            """dtheta | x, (whatever was emitted before it). Returns (emitted, mixture draw): the same value."""
             if _a_first:
                 w = _w0
                 sF, aL1, tL1, aL2, tL2, aR1, tR1, aR2, tR2 = ang[1:]
@@ -2268,70 +2001,20 @@ def generate_mix_joint_loop(model, rec, cfg_feat, rng, closed_loop=True, guardra
             else:
                 v = +rng.gamma(aR2, tR2)
             dth_t = float(np.clip(v, -180.0, 180.0))
-            # The MIXTURE draw, before the deterministic containment shift below. This is the
-            # value ``MX.mix_logdens`` is the density of; the shift is a function of the state,
-            # not of the sample, so it carries no score-function term.
-            dth_raw = dth_t
-            cb = cb_cfg
-            if isinstance(cb, dict):                      # shell-gated containment bias
-                _u = np.hypot(x - cx, y - cy) / R
-                _u0 = float(cb.get("u0", 0.75))
-                if u_gate:
-                    # clip keeps a personal gate physically sane: never inside r/R 0.20 (a bias
-                    # acting over the whole dish) and never beyond 0.90 (no containment at all).
-                    _u0 = float(np.clip(_u0 + u_gate, 0.20, 0.90))
-                cb = (float(cb.get("bulk", 0.0))
-                      + float(cb.get("shell", 0.0)) * max(0.0, (_u - _u0) / max(1.0 - _u0, 1e-6)))
-            if u_rad:
-                cb = float(cb) * float(np.exp(u_rad))
-            if u_rad_re:
-                cb = float(cb) * float(np.exp(u_rad_re))
-            if d_bord:
-                # THE LOAD-BEARING SHIFT: a slowly wandering radial SET POINT, so the fish's
-                # preferred radius moves over minutes instead of being pinned. Real radial window
-                # means autocorrelate at +0.377, generated at -0.035, and nothing static can change
-                # that.
-                #
-                # ADDITIVE, NOT MULTIPLICATIVE, and that is measured rather than stylistic. The
-                # multiplicative form (`cb * exp(d_bord * s)`, which is what u_rad/u_rad_re do) is
-                # exactly INERT here: the rej family calibrates to bulk = 0 and shell = 0, carrying
-                # its containment entirely in the rejection sampler, so scaling the bias scales
-                # zero. Measured on rej with the multiplicative form -- radial acf1 went 0.117 ->
-                # 0.036, i.e. it did nothing but add noise. Same trap already documented for
-                # rad_indiv ("inert on graded bulk=0 biases").
-                #
-                # An additive zero-mean term is also the right shape for this job: it cancels in the
-                # POOLED turn marginal (E[s] = 0) while leaving the WINDOW-level statistics moved,
-                # which is precisely the split this mechanism needs. Negative values push outward;
-                # the rejection sampler still enforces the physical boundary, so that is safe.
-                cb = float(cb) + d_bord * d_state
-            if cb:
-                psi_c = MB._wrap_pi(np.arctan2(cy - y, cx - x) - h)
-                dth_t = float(np.clip(dth_t + cb * np.sin(psi_c), -180.0, 180.0))
-            return dth_t, dth_raw
+            return dth_t, dth_t
 
         def _draw_d(prev):
             """distance | x, (whatever was emitted before it)."""
             dw, dmu, dsig = dist_params(b, *prev)
             j = rng.choice(len(dw), p=dw)
-            # clip the 'average fish' step FIRST, then scale by the vigor -- otherwise a genuinely
-            # long-stepping trajectory is squashed back into the pooled q99.9 cap and loses exactly
-            # the large steps that make it long-stepping.
             _ld = rng.normal(dmu[j] + d_dist * d_state - d_dist_c + _rep_cur[1], dsig[j])
-            if ci_d != 1.0:
-                # Re-centre on the conditional mean INCLUDING the drift shift, for the same reason
-                # the interval channel does below: innov_comp widens about THIS bout's mean, and
-                # with the drift on, that mean has moved.
-                _m = float(np.dot(dw, dmu)) + d_dist * d_state - d_dist_c + _rep_cur[1]
-                _ld = _m + ci_d * (_ld - _m)
             return float(np.clip(np.exp(_ld), 1e-3, dist_hi))
 
         def _draw_t(prev):
             """dt | x, (whatever was emitted before it)."""
             tw, tmu, tsig = dt_params(b, *prev)
-            # The timing latent shifts the LOCATION of the whole interval mixture, exactly as it
-            # does in dt_level_logliks at train and score time.
-            _shift = s_lam * s_state - s_lam_c + d_dt * d_state - d_dt_c
+            # the drift shifts the LOCATION of the whole interval mixture, as at train and score time
+            _shift = d_dt * d_state - d_dt_c
             if _log_tr is None:
                 jt = rng.choice(len(tw), p=tw)
                 _lt = rng.normal(tmu[jt] + _shift, tsig[jt])
@@ -2342,11 +2025,6 @@ def generate_mix_joint_loop(model, rec, cfg_feat, rng, closed_loop=True, guardra
                 jt = rng.choice(len(_p), p=_p)
                 _lt = tmu[jt] + _shift + tsig[jt] * float(_ndtri(min(max(rng.random() * _F[jt], 1e-12),
                                                                        1.0 - 1e-12)))
-            if ci_t != 1.0:
-                # Re-centre on the conditional mean INCLUDING the latent shift -- innov_comp widens
-                # about this bout's mean, and with the latent on that mean has moved.
-                _m = float(np.dot(tw, tmu)) + _shift
-                _lt = _m + ci_t * (_lt - _m)
             return float(np.clip(np.exp(_lt), 1e-3, dt_hi))
 
         def _emit():
@@ -2359,10 +2037,8 @@ def generate_mix_joint_loop(model, rec, cfg_feat, rng, closed_loop=True, guardra
             the draw index, so calling it once reproduces the original code exactly, variate for
             variate.
 
-            The conditioners are the SAME quantities the trainer teacher-forces (``_cond_cols``):
-            |dtheta| after the containment shift, and the BASE distance / interval before vigor --
-            so distance individuality cannot leak into the interval channel (real between-fish corr
-            of the two levels ~ 0)."""
+            The conditioners are the SAME quantities the trainer teacher-forces (``_cond_cols``): |dtheta| and
+            the distance / interval."""
             got, prev = {}, []
             for _i, _ch in enumerate(_ORDER):
                 if _ch == "a":
@@ -2379,17 +2055,8 @@ def generate_mix_joint_loop(model, rec, cfg_feat, rng, closed_loop=True, guardra
                     prev.append(_c)
             return got["a"][0], got["d"], got["t"], got["a"][1]
 
-        def _vigor_step():
-            nonlocal d_di, d_dt, z_di, z_dt
-            d_di = ph_di * d_di + sd_di * c_di * rng.normal()
-            d_dt = ph_dt * d_dt + sd_dt * c_dt * rng.normal()
-            z_di = u_di + d_di - 0.5 * var_di
-            z_dt = u_dt + d_dt - 0.5 * var_dt
-
         if rd0 is None:
             dth_t, base_di, base_dt, dth_raw = _emit()
-            if vg:
-                _vigor_step()
         else:
             # SHALLOW-BORDER REJECTION. Redraw the whole triple (the heads are chained, so
             # keeping the turn and redrawing only the step would sample from a different law)
@@ -2402,30 +2069,15 @@ def generate_mix_joint_loop(model, rec, cfg_feat, rng, closed_loop=True, guardra
             # still available. There is no corner to be trapped in. The ramp is also inactive for
             # ~95% of bouts (only 0.07% of real bouts are inside 4 mm), so the expected cost is
             # ~1 draw. All of which is INSTRUMENTED below rather than assumed.
-            #
-            # The vigor AR state advances ONCE per bout, not once per draw -- otherwise a rejected
-            # bout would silently age the tempo latent.
-            if vg:
-                _vigor_step()
-            _exp_di = float(np.exp(z_di))
             _best = None; _best_u = np.inf
-            _best_ok = None                       # first rim-ACCEPTED draw the home rule turned down
-            _u_now = np.hypot(x - cx, y - cy) / R if hm_pull > 0.0 else 0.0
+            _best_ok = None                       # first rim-ACCEPTED draw the collision rule turned down
             for _k in range(rmax):
                 dth_t, base_di, base_dt, dth_raw = _emit()
                 _hh = h + np.radians(dth_t)
-                _dv = base_di * _exp_di
+                _dv = base_di
                 _ul = np.hypot(x + _dv * np.cos(_hh) - cx, y + _dv * np.sin(_hh) - cy) / R
                 _a = MB.accept_prob(_ul, rd0, rd1)
                 if _a >= 1.0 or rng.random() < _a:
-                    # HOME RADIUS: a rim-accepted bout that moves AWAY from the home radius and
-                    # lands outside its band is redrawn with probability `pull` (pull 0 -> no draw).
-                    if (hm_pull > 0.0 and abs(_ul - hm_state) > max(abs(_u_now - hm_state), hm_band)
-                            and rng.random() < hm_pull):
-                        if _best_ok is None:
-                            _best_ok = (dth_t, base_di, base_dt, dth_raw)
-                        wall_stats["n_home_reject"] = wall_stats.get("n_home_reject", 0) + 1
-                        continue
                     if _coll_px:                      # COLLISION: no landing within collision_mm of a neighbour
                         _nb = np.asarray(stim_provider.neighbours_xy(), float).reshape(-1, 2)
                         if len(_nb) and np.any(np.hypot(_nb[:, 0] - (x + _dv * np.cos(_hh)),
@@ -2444,8 +2096,8 @@ def generate_mix_joint_loop(model, rec, cfg_feat, rng, closed_loop=True, guardra
                 # 0.011 mm from the wall on a deliberately under-trained model. The hard floor is
                 # then still guaranteed by the guardrail, which runs at R_g (the forbidden-ring
                 # boundary) rather than the physical wall -- see below.
-                # With the home rule, a rim-accepted candidate it turned down beats the least-bad
-                # rim-rejected one: the home pull may never push a fish INTO the ring.
+                # With the collision rule, a rim-accepted candidate it turned down beats the least-bad
+                # rim-rejected one: the rule may never push a fish INTO the ring.
                 if _best_ok is not None:
                     dth_t, base_di, base_dt, dth_raw = _best_ok
                     wall_stats["n_home_fallback"] = wall_stats.get("n_home_fallback", 0) + 1
@@ -2457,35 +2109,20 @@ def generate_mix_joint_loop(model, rec, cfg_feat, rng, closed_loop=True, guardra
                 wall_stats["n_redraw_bouts"] = wall_stats.get("n_redraw_bouts", 0) + 1
         if t < _force_P:                          # BLOCK-START FORCING: replay the real bout
             dth_t = float(rec.dtheta[t]); dth_raw = dth_t
-            base_di = float(rec.distance_px[t]) / float(np.exp(z_di))
-            base_dt = float(rec.dt_s[t]) / float(np.exp(z_dt))
+            base_di = float(rec.distance_px[t])
+            base_dt = float(rec.dt_s[t])
         dth[t] = dth_t
         if keep_features:
-            # s_rec[t] is the state that shifted THIS bout's interval mixture, recorded before the
-            # AR step below advances it -- scoring against the advanced value would put every dt
-            # log-density one bout out of phase.
+            # d_rec[t] is the drift state that shifted THIS bout, recorded before the AR step below advances it
             dth_base[t] = dth_raw; dist_base[t] = base_di
-            dt_base[t] = base_dt; s_rec[t] = s_state; d_rec[t] = d_state
-        dval = base_di * float(np.exp(z_di)); tval = base_dt * float(np.exp(z_dt))
-        if cfg_feat.get("dt_snap"):
-            # EMITTED value only; ld_hist/lt_hist keep the continuous base below, so the loop
-            # dynamics, the RNG stream and every other channel stay byte-identical to the
-            # unsnapped control -- the contrast is attributable to the measurement operator alone.
-            tval = MB.snap_dt(tval)
+            dt_base[t] = base_dt; d_rec[t] = d_state
+        dval = base_di; tval = base_dt
         dist[t] = dval; dtg[t] = tval
         t_onset[t] = t_now; t_now += tval          # t_now is now bout t+1's onset time
-        # history keeps the BASE: the body must stay in average-fish world (see the vigor note above)
-        # -- note base_dt ALREADY carries the timing latent's shift, and that is deliberate. vigor
-        # was a post-hoc multiplier the body was never trained under, so its history had to stay
-        # unmodulated; lam*s is inside the fitted likelihood, i.e. the model explains the REAL
-        # interval as mu + lam*s, so the emitted interval is what _kin_history_block saw at train
-        # time. Stripping it here would train one object and roll out another.
         ld_hist[t] = np.log(max(base_di, 1e-6)); lt_hist[t] = np.log(max(base_dt, 1e-6))
         if _kin_dt_c:                             # level update AFTER the bout, as the builder's EMA
             _kdt_lev += _kdt_a * (lt_hist[t] - _kdt_lev)
-        if _dtl:                                  # advance ONCE per bout, never per reject-redraw
-            s_state = s_phi * s_state + np.sqrt(max(1.0 - s_phi * s_phi, 0.0)) * s_rng.normal()
-        if _dr:                                   # same contract: one step per BOUT, not per draw
+        if _dr:                                   # one step per BOUT, never per reject-redraw
             d_state = d_phi * d_state + np.sqrt(max(1.0 - d_phi * d_phi, 0.0)) * d_rng.normal()
         h = h + np.radians(dth[t])
         if guardrail:
@@ -2495,8 +2132,6 @@ def generate_mix_joint_loop(model, rec, cfg_feat, rng, closed_loop=True, guardra
             x = x + dval * np.cos(h); y = y + dval * np.sin(h)
         if t < _force_P and t + 1 < n:            # ... and put the fish on the real pose it had next
             x, y, h = float(rec.x_px[t + 1]), float(rec.y_px[t + 1]), float(_trv_f[t + 1])
-        if hm_rng is not None and hm_phi < 1.0:      # the home drifts ONCE per bout, never per draw
-            hm_state = hm_mu + hm_phi * (hm_state - hm_mu) + hm_sd * np.sqrt(max(1.0 - hm_phi * hm_phi, 0.0)) * float(hm_rng.normal())
         if stop_time_s is not None and t_now >= stop_time_s:
             # The test is on the NEXT onset, so the last kept bout is the last one starting
             # strictly inside the programme; the bout that would start past the end (and whose
@@ -2512,7 +2147,7 @@ def generate_mix_joint_loop(model, rec, cfg_feat, rng, closed_loop=True, guardra
         if keep_features:
             Xrec = Xrec[:n_done]
             dth_base = dth_base[:n_done]; dist_base = dist_base[:n_done]
-            dt_base = dt_base[:n_done]; s_rec = s_rec[:n_done]; d_rec = d_rec[:n_done]
+            dt_base = dt_base[:n_done]; d_rec = d_rec[:n_done]
         if _mg:
             grp_cx, grp_cy, grp_phi, grp_n = grp_cx[:n_done], grp_cy[:n_done], grp_phi[:n_done], grp_n[:n_done]
     out = dict(dtheta=dth, symbol=E.symbols_from_dtheta(dth), dt_s=dtg, distance_px=dist,
@@ -2524,9 +2159,6 @@ def generate_mix_joint_loop(model, rec, cfg_feat, rng, closed_loop=True, guardra
         out["n_draws"] = wall_stats.get("n_draws", 0)
         out["n_redraw_bouts"] = wall_stats.get("n_redraw_bouts", 0)
         out["n_reject_fallback"] = wall_stats.get("n_reject_fallback", 0)
-        if hm_rng is not None:
-            out["n_home_reject"] = wall_stats.get("n_home_reject", 0)
-            out["n_home_fallback"] = wall_stats.get("n_home_fallback", 0)
         if _coll_px:
             out["n_collide"] = wall_stats.get("n_collide", 0)
             out["n_home_fallback"] = wall_stats.get("n_home_fallback", 0)
@@ -2544,11 +2176,10 @@ def generate_mix_joint_loop(model, rec, cfg_feat, rng, closed_loop=True, guardra
         out.update(grp_cx=grp_cx, grp_cy=grp_cy, grp_phi=grp_phi, grp_n=grp_n)
     if keep_features:
         out["X"] = Xrec
-        out["dth_base"] = dth_base            # the mixture draw, pre-containment-bias
-        out["dist_base"] = dist_base          # pre-vigor
-        out["dt_base"] = dt_base              # pre-vigor, pre-dt_snap
-        out["s_state"] = s_rec                # timing-latent value that shifted each dt mixture
-        out["d_state"] = d_rec                # drift value that shifted all four channels
+        out["dth_base"] = dth_base            # the mixture draw
+        out["dist_base"] = dist_base
+        out["dt_base"] = dt_base
+        out["d_state"] = d_rec                # drift value that shifted each bout
         # THE LATENT THAT ACTED. joint_forward_re(..., z) has to be evaluated here, not at z=0:
         # the old fine-tuner scored at z=0 and therefore computed a valid-looking gradient for a
         # DIFFERENT policy than the one that produced the actions.
@@ -2693,50 +2324,6 @@ class MLPMixJointDensity(MX.MLPMixLoopDensity):
             batch_size=self.batch_size, seed=self.seed, n_dist=self.n_dist, n_dt=self.n_dt,
             order=self.head_order, weights=weights, dt_trunc=self.dt_trunc,
             **_noise_kwargs(self, train_records))
-        # SAME ORDER as MLPMixKinDensity.fit, so the treatments are comparable to the lineage:
-        # vigor -> drift rescale -> kin_feedback -> containment. (The known ordering quirk that the
-        # drift is sized before the shrinkage is preserved deliberately; its impact here is small
-        # because these models have almost no window-level drift of their own to subtract.)
-        if self.vigor:
-            vg = MX._calibrate_vigor(train_records)
-            vg["apply_turn"] = False                     # turn individuality is a separate mechanism
-            self._cfg_feat["vigor"] = vg
-            if self.vigor_drift_calib:
-                MX.MLPMixKinDensity._rescale_vigor_drift(self, train_records)
-        if self.kin_fb_calib:
-            tg, vtg = MX._kin_acf_targets(train_records)
-            kfb, _kvs = MX._search_kin_feedback(
-                self._model, train_records, self._cfg_feat, tg, vtg,
-                closed_loop=self.closed_loop, guardrail=self.guardrail, eps=self.eps,
-                stim_loop=self.stim_loop, seed=self.seed)
-            self._cfg_feat["kin_feedback"] = kfb
-        if self.contain:
-            self._cfg_feat["wall_mode"] = "reflect"
-            self._cfg_feat.update(MX._search_wall(
-                self._model, train_records, self._cfg_feat, mode=self.contain_mode,
-                closed_loop=self.closed_loop, guardrail=self.guardrail, eps=self.eps,
-                stim_loop=self.stim_loop, seed=self.seed,
-                max_fish=self.contain_fish, w_occ=self.contain_w_occ))
-        # innov BEFORE indiv: it changes the per-bout spread that the individuality search then
-        # measures on top of. Both AFTER contain, then contain is RE-FIT, because both widen the
-        # model and movement spread drives wall contact (corr +0.59) while rad_frac_wall is the
-        # top C2ST feature. Not re-fitting is how contain_vc lost.
-        if self.innov_comp:
-            self._cfg_feat["kin_innov"] = MX._search_innov_comp(
-                self._model, train_records, self._cfg_feat,
-                closed_loop=self.closed_loop, guardrail=self.guardrail, eps=self.eps,
-                stim_loop=self.stim_loop, seed=self.seed)
-        if self.indiv:
-            self._cfg_feat["indiv"] = MX._search_indiv(
-                self._model, train_records, self._cfg_feat, MX._indiv_targets(train_records),
-                closed_loop=self.closed_loop, guardrail=self.guardrail, eps=self.eps,
-                stim_loop=self.stim_loop, seed=self.seed)
-        if self.contain and (self.indiv or self.innov_comp):
-            self._cfg_feat.update(MX._search_wall(
-                self._model, train_records, self._cfg_feat, mode=self.contain_mode,
-                closed_loop=self.closed_loop, guardrail=self.guardrail, eps=self.eps,
-                stim_loop=self.stim_loop, seed=self.seed + 1,
-                max_fish=min(self.contain_fish, 8), w_occ=self.contain_w_occ))
         self.config = dict(mode="joint", hidden=self.hidden, n_features=X.shape[1], K=self.K,
                            K_kin=self.K_kin, stim_mode=self.stim_mode, use_border=self.use_border,
                            use_kin=True, n_dist=self.n_dist, n_dt=self.n_dt,

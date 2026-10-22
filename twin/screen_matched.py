@@ -28,7 +28,6 @@ from pathlib import Path
 
 import numpy as np
 
-HERE = Path(__file__).resolve().parent
 from twin import screen_eval as SE  # noqa: E402
 from twin import twin_test as TT  # noqa: E402
 
@@ -227,10 +226,9 @@ def run_block(tag, R, ids_all, idA, idB, units, workers, out, imp_units=()):
 
 
 if __name__ == "__main__":
-    from twin import repulsion_fit as RF
     workers = int(sys.argv[1]) if len(sys.argv) > 1 else 10
     Rr = pickle.load(open(OUT / "screen_raw_real.pkl", "rb"))
-    halves = RF.clutch_split()
+    halves = TT.clutch_split()
     hA, hB = set(halves["fit"]), set(halves["test"])
     meta = json.loads((OUT / "screen_train_bouts.json").read_text())
     used = set(meta["clutch"].values())

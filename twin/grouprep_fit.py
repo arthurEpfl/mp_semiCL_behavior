@@ -19,9 +19,7 @@ VARIANTS (built as checkpoint copies of F with cfg_feat['grouprep'], Model/gr_s0
 
     python grouprep_fit.py check            # a = 0 is bit-identical to F; the term acts
     python grouprep_fit.py fit 14f|32b      # calibration -> Model/twin_test/grfit_<key>.json
-    python grouprep_fit.py build 14f|32b    # the variants' checkpoints
     python grouprep_fit.py test 14f|32b     # held-out screen test of every variant -> grtest_<key>.json
-    python grouprep_fit.py lik              # held-out likelihood on our recordings -> Model/grouprep/lik.csv
 """
 from __future__ import annotations
 
@@ -37,20 +35,17 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-HERE = Path(__file__).resolve().parent
+from twin import paths
 from twin import twin_test as TT  # noqa: E402
-from twin import repulsion_fit as RF  # noqa: E402
 
 OUT = TT.OUT
-GOUT = HERE.parent / "Model" / "grouprep"
+GOUT = paths.GROUPREP
 N_GRID, N_TEST, WORKERS = 100, 200, 12
 BINS_SEL = slice(0, 8)                           # 0-2 ... 15-20 mm
 GRID_A = (0.1, 0.2, 0.3, 0.45, 0.6, 0.9)
 GRID_RC = (4.0, 6.0, 8.0, 10.0, 12.0)
 GRID_SAMP = (-0.02, -0.035, -0.05, -0.08)
 GRID_SR = (8.0, 13.5)
-DEST = {"14f": "gr_s0", "32b": "gr_s101"}
-SEED_OF = {"14f": 0, "32b": 101}
 
 
 # --------------------------------------------------------------------------- #
@@ -87,7 +82,7 @@ def occ_shape(S):
 
 
 def all_curves(S):
-    tow, gain = RF.curves(S)
+    tow, gain = TT.curves(S)
     occ, shape = occ_shape(S)
     return tow, gain, occ, shape
 
@@ -95,15 +90,15 @@ def all_curves(S):
 def real_targets(half, nb=300):
     real = pickle.load(open(OUT / "real.pkl", "rb"))
     m, res = real["meta"], real["res"]
-    keep = set(RF.clutch_split()[half])
+    keep = set(TT.clutch_split()[half])
     groups = {}
     for fid, g, c in zip(m["fish_id"], m["group"], m["clutch"]):
         if g == "ref" and c in keep and fid in res:
             groups.setdefault(c, []).append(fid)
     gl = list(groups.values())
-    tow, gain, occ, shape = all_curves(RF.pool(res, [i for g in gl for i in g]))
+    tow, gain, occ, shape = all_curves(TT.pool(res, [i for g in gl for i in g]))
     rng = np.random.default_rng(0)
-    bs = [all_curves(RF.pool(res, [i for j in rng.integers(0, len(gl), len(gl)) for i in gl[j]])) for _ in range(nb)]
+    bs = [all_curves(TT.pool(res, [i for j in rng.integers(0, len(gl), len(gl)) for i in gl[j]])) for _ in range(nb)]
     sd = lambda k: np.nanstd([b[k] for b in bs], 0)
     return dict(tow=tow, gain=gain, occ=occ, shape=shape, se_tow=sd(0), se_gain=sd(1), se_occ=sd(2), se_shape=sd(3),
                 n_clutches=len(gl), n_fish=sum(len(g) for g in gl))
@@ -112,12 +107,12 @@ def real_targets(half, nb=300):
 def sim_se(res, nb=200):
     rng = np.random.default_rng(1)
     ids = list(res)
-    bs = [all_curves(RF.pool(res, [ids[j] for j in rng.integers(0, len(ids), len(ids))])) for _ in range(nb)]
+    bs = [all_curves(TT.pool(res, [ids[j] for j in rng.integers(0, len(ids), len(ids))])) for _ in range(nb)]
     return tuple(np.nanstd([b[k] for b in bs], 0) for k in range(4))
 
 
 def loss(res, tgt, se):
-    tow, gain, occ, shape = all_curves(RF.pool(res, list(res)))
+    tow, gain, occ, shape = all_curves(TT.pool(res, list(res)))
     z1 = (tow - tgt["tow"]) / np.sqrt(tgt["se_tow"] ** 2 + se[0] ** 2)
     z2 = (gain - tgt["gain"]) / np.sqrt(tgt["se_gain"] ** 2 + se[1] ** 2)
     z3 = (shape - tgt["shape"]) / np.sqrt(tgt["se_shape"] ** 2 + se[3] ** 2)
@@ -203,36 +198,6 @@ def variants(key):
             "grTb1": (dict(t, beta=1.0), {}), "grTC": (t, {"collision_mm": 2.0})}
 
 
-def build(key):
-    import torch
-    from twin import report_eval as RM
-    from twin import profile_finetune as PF
-    u = RM._unit(key)
-    src = TT.ROOT / "Model" / u["src"]
-    for name, (gp, extra) in variants(key).items():
-        arm = f"{u['arm']}_{name}"
-        dst = TT.ROOT / "Model" / DEST[key] / arm
-        if dst.exists():
-            shutil.rmtree(dst)
-        dst.mkdir(parents=True)
-        for f in sorted(src.glob(f"{u['arm']}_fold[0-9].pt")):
-            blob = torch.load(f, map_location="cpu", weights_only=False)
-            cf = dict(blob["cfg_feat"])
-            cf.pop("repulsion", None)
-            cf["grouprep"] = dict(gp)
-            cf.update(extra)
-            blob["cfg_feat"] = cf
-            blob["grouprep_fit"] = dict(variant=name, key=key, grouprep=gp, extra=extra,
-                                        data="schizscreen_twin_v1, fit half (twin_test/clutch_split.json)")
-            torch.save(blob, dst / f.name.replace(u["arm"], arm))
-        man = json.loads((src / "manifest_model1.json").read_text())
-        man = [dict(e, file=e["file"].replace(u["arm"], arm), arm=arm) for e in man if e.get("arm") == u["arm"]]
-        (dst / "manifest_model1.json").write_text(json.dumps(man, indent=1))
-        with contextlib.redirect_stdout(io.StringIO()):
-            PF.write_likA(dst, arm)              # the pipeline's table (torch path: WITHOUT the term -- see lik())
-        print(f"built {dst} with {gp} {extra}", flush=True)
-
-
 # --------------------------------------------------------------------------- #
 # Held-out screen test
 # --------------------------------------------------------------------------- #
@@ -272,91 +237,6 @@ def test(key, workers=WORKERS):
 # --------------------------------------------------------------------------- #
 # Held-out likelihood on our own recordings (the torch paths do not see the term)
 # --------------------------------------------------------------------------- #
-def _base_params(model, rec):
-    import torch
-    from twin import fit_MLP_border as MB
-    from twin import fit_MLP_joint as JT
-    cf = model._cfg_feat
-    X = MB.build_feature_matrix(rec, cf)
-    az, lc, lt = JT._cond_cols(rec.dtheta, rec.distance_px, cf["dth_scale"], cf["kin_scales"], y_dt=rec.dt_s)
-    with torch.no_grad():
-        ang, dpar, _ = model._model.joint_forward(torch.tensor(X), torch.tensor(az), torch.tensor(lc), torch.tensor(lt))
-    return ang, dpar
-
-
-def _rec_shifts(rec, gp):
-    from twin import fit_MLP_border as MB
-    from twin import fit_MLP_joint as JT
-    h = np.asarray(MB._travel_ref(rec), float)
-    dx, dy = np.asarray(rec.dot_xs, float), np.asarray(rec.dot_ys, float)
-    s = np.zeros(len(h)); u = np.zeros(len(h)); dmin = np.full(len(h), np.inf)
-    for t in range(len(h)):
-        q = JT.nearest_dot(dx[t], dy[t], None, rec.x_px[t], rec.y_px[t])
-        if q is None or not np.isfinite(h[t]):
-            continue
-        dmin[t] = np.hypot(q[0] - rec.x_px[t], q[1] - rec.y_px[t]) / JT.REP_PX_PER_MM
-        s[t], u[t] = JT.grouprep_shifts([(q[0], q[1], rec.n_dots[t], rec.moving[t])], rec.x_px[t], rec.y_px[t], h[t], gp)
-    return s, u, dmin
-
-
-def lik(keys=("14f", "32b"), n_boot=2000):
-    import torch
-    from twin import fit_MLP_mix as MX
-    from twin import model_figures as MF
-    from twin import report_eval as RM
-    GOUT.mkdir(parents=True, exist_ok=True)
-    rows = []
-    recs = MF.records()
-    for key in keys:
-        u = RM._unit(key)
-        with contextlib.redirect_stdout(io.StringIO()):
-            models, held = MF.fold_models(u["src"], u["arm"])
-        vs = {k: v for k, v in variants(key).items() if k != "grTC"}
-        for f, ck in sorted(held.items()):
-            m, rec = models[ck], recs[f]
-            ang, dpar = _base_params(m, rec)
-            dth = torch.tensor(np.asarray(rec.dtheta, np.float64), dtype=ang[0].dtype)
-            dist = torch.clamp(torch.tensor(np.asarray(rec.distance_px, np.float64), dtype=ang[0].dtype), min=1e-6)
-            ll = {}
-            for name, (gp, _) in [("F", (dict(a=0.0), {}))] + list(vs.items()):
-                s, uu, dmin = _rec_shifts(rec, gp)
-                st = torch.tensor(s, dtype=ang[0].dtype); z = torch.zeros_like(st)
-                lw = torch.log_softmax(ang[0] + torch.stack([z, -st, -st, st, st], dim=1), dim=1)
-                la = MX.mix_logdens(dth, (lw,) + tuple(ang[1:])).numpy()
-                ld = MX._lnk_logpdf(dist, dpar[0], dpar[1] + torch.tensor(uu, dtype=ang[0].dtype).reshape(-1, 1),
-                                    dpar[2]).numpy()
-                ll[name] = (la, ld)
-            nd = np.asarray(rec.n_dots, float); mv = np.asarray(rec.moving, float)
-            for name in ll:
-                rows.append(pd.DataFrame(dict(seed=SEED_OF[key], fish=f, variant=name, dmin=dmin, n_dots=nd, moving=mv,
-                                              ll_turn=ll[name][0], ll_step=ll[name][1])))
-    D = pd.concat(rows, ignore_index=True)
-    D.to_pickle(GOUT / "lik_bouts.pkl")
-    out = []
-    rng = np.random.default_rng(0)
-    for (sd, var), g in D.groupby(["seed", "variant"]):
-        if var == "F":
-            continue
-        F = D[(D.seed == sd) & (D.variant == "F")]
-        for lab, sel in (("all bouts", lambda d: d.dmin > -1), ("moving, nearest dot < 10 mm",
-                                                                lambda d: (d.moving > 0) & (d.dmin < 10)),
-                         ("moving 1 dot < 10 mm", lambda d: (d.moving > 0) & (d.n_dots == 1) & (d.dmin < 10)),
-                         ("moving 2-8 dots < 10 mm", lambda d: (d.moving > 0) & (d.n_dots >= 2) & (d.dmin < 10))):
-            a, b = g[sel(g)], F[sel(F)]
-            for head in ("turn", "step"):
-                diff = (a.groupby("fish")[f"ll_{head}"].sum() - b.groupby("fish")[f"ll_{head}"].sum()) / np.log(2)
-                n = a.groupby("fish").size()
-                est = diff.sum() / n.sum()
-                fish = diff.index.to_numpy()
-                bs = [diff.loc[k].sum() / n.loc[k].sum() for k in (rng.choice(fish, len(fish)) for _ in range(n_boot))]
-                lo, hi = np.percentile(bs, [2.5, 97.5])
-                out.append(dict(seed=sd, variant=var, bouts=lab, head=head, n=int(n.sum()), bits_vs_F=est, lo=lo, hi=hi))
-    T = pd.DataFrame(out)
-    T.to_csv(GOUT / "lik.csv", index=False)
-    print(T.round(4).to_string(index=False))
-    return T
-
-
 # --------------------------------------------------------------------------- #
 # Checks
 # --------------------------------------------------------------------------- #
@@ -379,4 +259,4 @@ if __name__ == "__main__":
         check()
     else:
         for k in sys.argv[2:]:
-            {"fit": fit, "build": build, "test": test}[cmd](k)
+            {"fit": fit, "test": test}[cmd](k)

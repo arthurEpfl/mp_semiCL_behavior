@@ -19,8 +19,9 @@ data/
   schizscreen_twin_v1.zip
 ```
 
-The two bout tables and the repaired-frame list are rebuilt by `notebooks/01_bout_discretisation.ipynb` from
-`frames/` (written if absent, else compared with what is there).
+`notebooks/01_bout_discretisation.ipynb` rebuilds everything below `raw/`: the 30 fps tables from the three rig files
+(`twin/frames.py`; written to `frames/` if that folder is empty, else compared with what is there), then the two bout
+tables and the repaired-frame list from `frames/`.
 
 ## The experiment
 
@@ -47,8 +48,11 @@ and 2 on the right, speed 3.5 cm/s on each side; `none` between blocks.
 
 Per fish, one row per frame: `frame`, `stimulus` (the block label, `inter_stim_pause` between blocks), the fish's
 `f<N>_x, f<N>_y, f<N>_ori`, and every dot's absolute position and label `d<k>_x, d<k>_y, d<k>_stim` (k = 0-7),
-i.e. the tracking and the programme combined in the same camera coordinates. They were made from the three rig files
-by the earlier frame-level pipeline of the project (Nayan Adani, 2025).
+i.e. the tracking and the programme combined in the same camera coordinates. A dot's offset is placed in the dish from
+the fish's pose at the first frame of its block; during a pause the dots hold the positions of the block that follows;
+y is flipped and angles are counter-clockwise. The tables were first made by the project's earlier frame-level
+pipeline (Nayan Adani, 2025); `twin/frames.py` reproduces it exactly, and the stored tables to the last bit of floating
+point (positions within 1e-13 px).
 
 ## The training table (`bouts_clean.csv`)
 

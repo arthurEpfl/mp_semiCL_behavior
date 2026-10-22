@@ -1734,23 +1734,6 @@ CHANNEL_LEVEL = (("turn", 2), ("dist", 0), ("dt", 1))
 LEVEL_NAME = ("mean log travel", "mean log interval", "forward fraction")
 
 
-def _level_se(dth, dist, dt):
-    """WITHIN-trajectory standard error of each level -- the noise floor under the between-fish sd.
-
-    Each level is a mean over bouts, so a finite rollout estimates it with error, and that error
-    adds IN QUADRATURE to the between-fish spread being fitted. At full length it is negligible;
-    with ``n_cap`` set it is not, and the forward fraction is the channel that suffers first (it is
-    a proportion, so its SE falls only as 1/sqrt(n) with no variance reduction from averaging a
-    tight quantity). Reporting it is what stops a short rollout from being read as real spread --
-    the trap the record already names for the 3-fish per-fish estimates.
-    """
-    ld = np.log(np.clip(np.asarray(dist, float), 1e-6, None)); ld = ld[np.isfinite(ld)]
-    lt = np.log(np.clip(np.asarray(dt, float), 1e-6, None)); lt = lt[np.isfinite(lt)]
-    a = np.abs(np.asarray(dth, float)); a = a[np.isfinite(a)]
-    p = float((a < M.DTHETA0).mean()) if len(a) else np.nan
-    return (float(ld.std(ddof=1) / np.sqrt(len(ld))) if len(ld) > 1 else np.nan,
-            float(lt.std(ddof=1) / np.sqrt(len(lt))) if len(lt) > 1 else np.nan,
-            float(np.sqrt(max(p * (1.0 - p), 0.0) / len(a))) if len(a) else np.nan)
 
 
 def state_rollout_many(net, records, cfg_feat, n_draws, rng, n_cap=None, static=None):
@@ -1816,195 +1799,6 @@ def state_rollout_many(net, records, cfg_feat, n_draws, rng, n_cap=None, static=
 TAIL_GAIN_GRID = (0.25, 0.5, 1.0, 2.0, 4.0)
 
 
-def _fish_dt_spread(dt, W=60, runs=None):
-    """Per-fish mean, over 60-bout windows, of the window SD of the interval (s) -- the C2ST's
-    `dt_std` feature. With ``runs`` only windows inside one run count (the real side)."""
-    dt = np.asarray(dt, float)
-    n = len(dt)
-    if runs is None:
-        starts = range(0, max(1, n - W + 1), W)
-    else:
-        r = np.asarray(runs)
-        starts = [a for a in range(0, max(1, n - W + 1), W) if a + W <= n and r[a] == r[a + W - 1]]
-    vals = [np.nanstd(dt[a:a + W]) for a in starts if a + W <= n]
-    return float(np.mean(vals)) if vals else np.nan
-
-
-def search_tail_gain(net, records, cfg_feat, *, grid=TAIL_GAIN_GRID, seed=0, max_fish=8, n_draws=2,
-                     **gen_kw):
-    """The ONE gain of the tail loading (re_tail), matched to the between-fish spread of the window
-    interval spread (sd over fish of `_fish_dt_spread`, real 0.216 s over the 15 fish) -- the
-    moment the loading exists to produce, and NOT the mean-interval spread the interval gain is
-    matched to (sharing that gain is how the dispersion loading of Model 12 widened every fish).
-    Same rollout stream as the level search ([seed, fish, draw]) so the z draws are common across
-    grid points and the curve is monotone up to rollout noise; picked by ``MX._pick_gain``
-    (monotone smoothing, log-interpolation, plateau stop). Returns (gain, report)."""
-    records = list(records)[:max_fish]
-    if int(cfg_feat.get("state", 0)):
-        raise NotImplementedError("search_tail_gain: recurrent path not implemented")
-    tgt = float(np.nanstd([_fish_dt_spread(r.dt_s, runs=getattr(r, "run_id", None)) for r in records], ddof=1))
-    base = net.z_dt_w.weight.detach().clone()
-    gen_fn = MX._gen_for(cfg_feat)
-    curve = []
-    for x in grid:
-        with torch.no_grad():
-            net.z_dt_w.weight.copy_(base * float(x))
-        gs = [gen_fn(net, r, cfg_feat, np.random.default_rng([seed, int(r.fish_id), d]), **gen_kw)
-              for r in records for d in range(int(n_draws))]
-        curve.append(float(np.nanstd([_fish_dt_spread(o["dt_s"]) for o in gs], ddof=1)))
-    with torch.no_grad():
-        net.z_dt_w.weight.copy_(base)
-    g, status, sm = MX._pick_gain(grid, curve, tgt, plateau_tol=0.05 * max(tgt, 1e-9))
-    return float(g), dict(grid=list(grid), curve=curve, smoothed=[float(v) for v in sm],
-                          target=tgt, gain=float(g), status=status)
-
-
-def search_loading_gain_per_channel(net, records, cfg_feat, *, grid=GAIN_GRID, seed=0, max_fish=8,
-                                    n_draws=2, sweeps=2, n_cap=None, verbose=True, **gen_kw):
-    """Fit THREE gains -- one per head -- each matched to its own between-fish moment.
-
-    WHY ONE SCALAR IS NOT ENOUGH. ``search_loading_gain`` multiplies all three core loadings by a
-    single number, on the implicit assumption that joint-MAP shrinkage is uniform across channels.
-    Measured on ``psib_gruz`` it is not, and not by a little: travel spread came out 3.13x too WIDE
-    while forward-fraction spread was ~4x too NARROW (gen 0.0129 vs real 0.0537). The two want the
-    gain to move in OPPOSITE directions, so a single knob cannot express the correction -- and
-    because the objective sums |log sd-ratio| over the three levels, the blown-up travel term
-    dominated, drove the gain to its grid FLOOR on 4 of 5 folds, still failed to fix travel, and
-    crushed the turn loading that needed to grow. This is that diagnosis turned into a measurement.
-
-    COORDINATE DESCENT, NOT THREE INDEPENDENT SEARCHES. The heads are chained (turn -> distance |
-    turn -> dt | turn, distance), so ``z_turn`` moves ``a_z``, which feeds both downstream heads.
-    Sweeping in chain order with the others held at their CURRENT value -- not at zero -- is what
-    accounts for that coupling; holding them at zero would measure each channel in a model that is
-    not the one being shipped.
-
-    THE GAIN = 0 ROW IS THE POINT, not a formality. It switches the latent off entirely and reports
-    what the model produces on its OWN. For a recurrent model that is the direct test of whether the
-    GRU is already generating between-fish spread from its own sampled history -- in which case z is
-    redundant and the two are double-counting, which is precisely what a single global gain can
-    never reveal because it can scale all three together but never test zero.
-
-    Returns ``({'turn': g, 'dist': g, 'dt': g}, report)``. The gains are RAW scalings; the caller
-    folds them in with ``apply_loading_gain``, which adds the per-channel re-centring.
-    """
-    records = list(records)[:max_fish]
-    real = np.array([_fish_level_stats(r.dtheta, r.distance_px, r.dt_s) for r in records])
-    tgt = np.nanstd(real, axis=0, ddof=1)
-    base = {n_: p.detach().clone() for n_, p in net.named_parameters() if n_.startswith("z_")}
-    if not base:
-        raise ValueError("net has no z_* loadings -- this is not a fish_re model")
-    _state = int(cfg_feat.get("state", 0))
-    gen_fn = None if _state else MX._gen_for(cfg_feat)
-    # HOISTED: depends only on (records, cfg), so building it per grid point was ~30 rebuilds of
-    # 12 records' worth of stimulus arrays for nothing.
-    _static = None
-    if _state:
-        from twin import rollout_torch as _RT
-        _static = _RT.build_static(records, cfg_feat, torch.device("cpu"))
-    cache = {}
-
-    def _levels(g):
-        """(sd over fish of the 3 levels, mean over fish) at gains ``g``, cached on the triple."""
-        key = tuple(round(float(g[k]), 6) for k, _ in CHANNEL_LEVEL)
-        if key in cache:
-            return cache[key]
-        with torch.no_grad():                       # RAW scaling; re-centring shifts a level, not
-            for n_, p in net.named_parameters():    # a spread, so it cannot change what is measured
-                if n_ in base:
-                    p.copy_(base[n_] * float(g[_owner(n_)]))
-        if _state:
-            # ONE batched call for every (record, draw) -- the rollout is dispatch-bound, so the
-            # fish loop is what costs, not the batch width. See state_rollout_many.
-            gs = state_rollout_many(net, records, cfg_feat, int(n_draws),
-                                    np.random.default_rng([seed, 0]), n_cap=n_cap, static=_static)
-        else:
-            gs = [gen_fn(net, r, cfg_feat, np.random.default_rng([seed, int(r.fish_id), d]),
-                         **gen_kw) for r in records for d in range(int(n_draws))]
-        stats, ses = [], []
-        for o in gs:
-            stats.append(_fish_level_stats(o["dtheta"], o["distance_px"], o["dt_s"]))
-            ses.append(_level_se(o["dtheta"], o["distance_px"], o["dt_s"]))
-        arr = np.array(stats)
-        # every trajectory draws its OWN latent, so these ARE independent simulated fish and the
-        # pooled sd is the population quantity -- the same pooling `search_loading_gain` documents.
-        out = (np.nanstd(arr, axis=0, ddof=1), np.nanmean(arr, axis=0),
-               np.sqrt(np.nanmean(np.asarray(ses, float) ** 2, axis=0)))
-        cache[key] = out
-        return out
-
-    def _owner(pname):
-        """Which gain scales this parameter. z_body has no moment of its own, so it follows the
-        turn channel -- the one the objective pins directly (it is zero unless re_body is on)."""
-        for k, _ in CHANNEL_LEVEL:
-            if pname.startswith("z_" + k):
-                return k
-        return "turn"
-
-    g = {k: 1.0 for k, _ in CHANNEL_LEVEL}
-    trace = []
-    for s in range(int(sweeps)):
-        # CHAIN ORDER: turn first, so each downstream sweep sees a settled upstream.
-        for key, li in CHANNEL_LEVEL:
-            def _err(x, key=key, li=li):
-                gg = dict(g, **{key: float(x)})
-                sd = _levels(gg)[0][li]
-                return abs(np.log(max(float(sd), 1e-9) / max(float(tgt[li]), 1e-9)))
-            # INTERPOLATED pick (Model 13). The raw grid argmin could only land within a factor
-            # 1.34 of the target on GAIN_GRID_PC (spacing 1.8x): Model 12's g3 went from 1.5x over
-            # to 0.77x under on the step spread. The spread curve is monotone in the gain up to
-            # rollout noise, so the same rule the drift gain uses applies: PAV-smooth it,
-            # interpolate in log-gain to the target, stop at the plateau if it is unreachable.
-            curve = [float(_levels(dict(g, **{key: float(x)}))[0][li]) for x in grid]
-            g[key], _st, _ = MX._pick_gain(grid, curve, float(tgt[li]),
-                                           plateau_tol=0.05 * max(float(tgt[li]), 1e-9))
-            trace.append((s, key, g[key], _err(g[key]), _st))
-            if verbose:
-                sd, mu, se = _levels(g)
-                # flush: this loop is minutes long and stdout is block-buffered off a tty,
-                # so without it a Colab cell shows nothing at all until the very end.
-                print(f"    sweep {s} {key:>4}: gain {g[key]:>5}  "
-                      f"sd({LEVEL_NAME[li]}) {sd[li]:.4f} vs real {tgt[li]:.4f}"
-                      + ("   <- GRID EDGE" if g[key] in (grid[0], grid[-1]) else ""), flush=True)
-    sd_fit, mu_fit, se_fit = _levels(g)
-    sd_one, _, _ = _levels({k: 1.0 for k, _ in CHANNEL_LEVEL})    # the un-gained fit, for contrast
-    sd_off, _, se_off = _levels({k: 0.0 for k, _ in CHANNEL_LEVEL})   # THE DOUBLE-COUNTING READ
-    # REACHABLE SPAN per channel: the spread at each end of the grid, others held at their fitted
-    # values. Mostly cached from the last sweep. This is what separates "the grid is too narrow"
-    # from "this loading cannot produce that spread at ANY gain", and those need opposite actions.
-    span = {k: (float(_levels(dict(g, **{k: grid[0]}))[0][li]),
-                float(_levels(dict(g, **{k: grid[-1]}))[0][li])) for k, li in CHANNEL_LEVEL}
-    with torch.no_grad():                                         # restore; the caller applies
-        for n_, p in net.named_parameters():
-            if n_ in base:
-                p.copy_(base[n_])
-    # WARN ON THE RESULT, NOT ON GRID POSITION -- the lesson `_search_wall_reject` already records
-    # ("~83% of fits warned by chance and the warning carried no information"). A channel sitting on
-    # an endpoint whose fitted ratio is 1.08 is MATCHED; one at 0.30 is not, wherever it sits.
-    edge = [k for k, li in CHANNEL_LEVEL
-            if abs(np.log(max(float(sd_fit[li]), 1e-9) / max(float(tgt[li]), 1e-9))) > 0.22]
-    at_edge = [k for k, _ in CHANNEL_LEVEL if g[k] in (grid[0], grid[-1])]
-    # SATURATED: even the largest gain in the grid cannot reach the target. Widening the grid is
-    # then the WRONG advice -- the loading has no more spread to give.
-    sat = [k for k, li in CHANNEL_LEVEL if max(span[k]) < 0.6 * float(tgt[li])]
-    if verbose:
-        for k, li in CHANNEL_LEVEL:
-            if k in sat:
-                print(f"    ** {k}: SATURATED. Over the whole grid its level spread only spans "
-                      f"{span[k][0]:.4f}-{span[k][1]:.4f} against a real {tgt[li]:.4f}. No gain "
-                      f"reaches that, so this is not a calibration problem -- widening the grid "
-                      f"will not help and the loading needs replacing. **")
-            elif k in edge:
-                print(f"    WARNING: {k} missed its target ({sd_fit[li]:.4f} vs {tgt[li]:.4f})"
-                      + (" at a grid edge -- widen the grid" if k in at_edge else ""))
-    return g, dict(target_sd=tgt, target_mean=np.nanmean(real, axis=0), got_sd=sd_fit,
-                   got_mean=mu_fit, sd_gain1=sd_one, sd_latent_off=sd_off, gains=dict(g),
-                   grid_edge=edge, at_grid_edge=at_edge, saturated=sat, span=span,
-                   trace=trace, level_names=LEVEL_NAME,
-                   # the within-trajectory noise floor under every sd above; `sampling_floor` is
-                   # the one that matters for the latent-OFF row, since that is where a spurious
-                   # "the model already has spread" reading would come from.
-                   noise_floor=se_fit, noise_floor_off=se_off, n_cap=n_cap,
-                   n_units=int(len(records) * int(n_draws)))
 
 
 # Geometric, spanning 22x, and it goes DOWN as well as up on purpose. Up is the expected need --
@@ -2017,74 +1811,6 @@ def search_loading_gain_per_channel(net, records, cfg_feat, *, grid=GAIN_GRID, s
 SPATIAL_GAIN_GRID = (0.4, 0.8, 1.5, 2.8, 5.0, 9.0)
 
 
-def real_radial_sd(records):
-    """Across-fish SD of mean r/R on the REAL data -- the moment the spatial block is matched to.
-
-    This is the one statistic `search_loading_gain`'s objective does not contain, which is exactly
-    why a block-structured latent needs its own gain: the three existing moments (mean log travel,
-    mean log interval, forward fraction) say nothing about where in the dish a fish prefers to sit,
-    so a single global gain would scale the spatial dimension by whatever makes turn and tempo
-    spread right. Measured on all 15 fish: 0.0779, against a generated 0.025-0.043."""
-    u = [float(np.mean(np.hypot(np.asarray(r.x_px, float) - r.dish_cx,
-                                np.asarray(r.y_px, float) - r.dish_cy) / r.dish_R))
-         for r in records]
-    return float(np.std(u, ddof=1))
-
-
-def search_spatial_gain(net, records, cfg_feat, *, grid=SPATIAL_GAIN_GRID, seed=0, max_fish=8,
-                        n_draws=2, verbose=False, **gen_kw):
-    """Method-of-moments gain for the SPATIAL block, matched to the across-fish SD of mean r/R.
-
-    Same shape and same justification as ``search_loading_gain`` -- the loading scale cannot be
-    fitted by in-sample likelihood (it is monotone in the gain, because joint MAP has already put
-    each z_i where that fish's data wants it), so one population hyperparameter is set by moments
-    while everything else stays maximum likelihood.
-
-    Runs AFTER the core gain has been applied, so the trajectories it measures are the ones that
-    will actually be scored. 8 fish x 2 draws = 16 trajectories, matching the core search: the
-    project's standing lesson is that per-fish spread estimates need many units (at 4 fish the
-    objective is flat within its own noise), and a radial SD is no exception.
-
-    Reports clamp saturation. ``z_bord`` feeds ``g = exp(clamp(., +-1.5))``, so past some gain the
-    extra scale does nothing but push fish against the bound -- at which point the CLAMP is the
-    binding constraint and the right conclusion is 'widen the clamp', not 'the mechanism is dead'.
-    """
-    records = list(records)[:max_fish]
-    tgt = real_radial_sd(records)
-    base = net.z_bord.weight.detach().clone()
-    gen_fn = MX._gen_for(cfg_feat)
-    curve = []
-    for g in grid:
-        with torch.no_grad():
-            net.z_bord.weight.copy_(base * float(g))
-        mus, sat = [], []
-        for d in range(int(n_draws)):
-            for r in records:
-                out = gen_fn(net, r, cfg_feat,
-                             np.random.default_rng([seed, int(r.fish_id), d]), **gen_kw)
-                u = np.hypot(np.asarray(out["x_px"], float) - r.dish_cx,
-                             np.asarray(out["y_px"], float) - r.dish_cy) / r.dish_R
-                mus.append(float(np.mean(u)))
-        # fraction of the PRIOR that the clamp bites on, at this gain
-        w = float(torch.linalg.vector_norm(net.z_bord.weight).item())
-        sat = float(2.0 * (1.0 - 0.5 * (1.0 + math.erf(1.5 / max(w, 1e-9) / np.sqrt(2.0)))))
-        sd = float(np.std(mus, ddof=1))
-        curve.append((float(g), abs(np.log(max(sd, 1e-9) / max(tgt, 1e-9))), sd, sat))
-        if verbose:
-            print(f"    spatial gain {g:>4}: gen sd(mean r/R) {sd:.4f} vs real {tgt:.4f}  "
-                  f"clamped {100 * sat:.1f}%")
-    with torch.no_grad():
-        net.z_bord.weight.copy_(base)
-    # INTERPOLATED pick (Model 19), the same rule the core and drift gains use since Models 8 / 13:
-    # the radial spread is monotone in the gain up to rollout noise, so PAV-smooth the curve and
-    # interpolate in log-gain to the target instead of taking the nearest of six grid points
-    # (2x apart). The raw argmin is what pinned this search at its floor on the old m=3 arm.
-    g_pick, status, sm = MX._pick_gain([c[0] for c in curve], [c[2] for c in curve], tgt,
-                                       plateau_tol=0.05 * max(tgt, 1e-9))
-    j = int(np.argmin([abs(np.log(c[0] / max(g_pick, 1e-9))) for c in curve]))   # nearest grid point, for the report
-    return float(g_pick), dict(target_sd=tgt, got_sd=curve[j][2], clamp_frac=curve[j][3], status=status,
-                               smoothed=[float(v) for v in sm],
-                               curve=[(c[0], c[1], c[2], c[3]) for c in curve])
 
 
 def apply_loading_gain(net, gain, which="all"):
@@ -2492,30 +2218,6 @@ class MLPMixJointREDensity(JT.MLPMixJointDensity):
             weight_heads=(self.regime_w or {}).get("heads"), weights_per_head=weights_per_head,
             skip_slices=skip_slices, depth=self.depth, tsize=self.re_tsize,
             **JT._noise_kwargs(self, train_records))
-        if self.turn_skip:
-            with torch.no_grad():
-                print(f"    [{self.name}] turn-head skip path on columns {skip_slices}: "
-                      f"|W| per output {np.round(self._model.skip.weight.norm(dim=1).numpy(), 3)}")
-        if self.re_tail:
-            with torch.no_grad():
-                print(f"    [{self.name}] tail loading per component "
-                      + str(np.round(self._model.z_dt_w.weight.norm(dim=1).numpy(), 3)))
-        if self.re_disp or self.re_lag:
-            with torch.no_grad():
-                msg = []
-                if self.re_disp:
-                    msg.append("dispersion loading per component "
-                               + str(np.round(self._model.z_dt_sig.weight.norm(dim=1).numpy(), 3)))
-                if self.re_lag:
-                    msg.append(f"lag-slope loading per lag (cols {lag_slice}) "
-                               + str(np.round(self._model.z_lag.weight.norm(dim=1).numpy(), 3)))
-            print(f"    [{self.name}] " + "; ".join(msg))
-        if self.state:
-            # The GRU is the generator's state, so generation MUST go through the torch rollout --
-            # the numpy generator has no way to carry it. Recorded in cfg_feat so `sample` and
-            # every calibrator dispatch on the same flag.
-            self._cfg_feat["state"] = int(self.state)
-            self._cfg_feat["h0_dim"] = int(self.h0_dim)
         if self.drift:
             # Publish the FITTED loadings into cfg_feat BEFORE the calibrators, which all roll out.
             # Same discipline dt_latent and fish_re follow, and for the same reason: the generator
@@ -2528,18 +2230,6 @@ class MLPMixJointREDensity(JT.MLPMixJointDensity):
             d = self._cfg_feat["drift"]
             print(f"    [{self.name}] drift: tau {d['tau']:.0f} bouts (phi {d['phi']:.4f}, PINNED)  "
                   f"loadings turn {d['turn']:+.4f}  dist {d['dist']:+.4f}  dt {d['dt']:+.4f}")
-        if self.dt_latent:
-            # Publish the FITTED (lam, phi) into cfg_feat so the generator and every calibrator
-            # that rolls out see the same object the likelihood was fitted with. Doing this here --
-            # before Stage B and the calibrators, all of which roll out -- is the same discipline
-            # `fish_re` follows just below, and for the same reason.
-            with torch.no_grad():
-                _phi = float(self._model.s_phi()); _lam = float(self._model.s_lam)
-            self._cfg_feat["dt_latent"] = dict(self.dt_latent, lam=_lam, phi=_phi)
-            print(f"    [{self.name}] timing latent: lam {_lam:+.4f}  phi {_phi:.4f}  "
-                  f"(tau {-1.0 / np.log(max(_phi, 1e-9)):.1f} bouts, "
-                  f"{self.dt_latent['n_levels']} levels)")
-
         # ---- Stage B --------------------------------------------------------------------- #
         # The prior is N(0, I) throughout; `re_sd` exists only so the generator and the quadrature
         # grid read the same object, and is zeroed for the pinned control.
@@ -2566,119 +2256,20 @@ class MLPMixJointREDensity(JT.MLPMixJointDensity):
             _grid = gain_grid_for(self.re_gain_grid)
             _gen_kw = dict(closed_loop=self.closed_loop, guardrail=self.guardrail, eps=self.eps,
                            stim_loop=self.stim_loop)
-            if self.re_gain_mode == "per_channel":
-                if self.re_block:
-                    raise NotImplementedError("re_gain_mode='per_channel' with re_block: the "
-                                              "spatial block has no per-channel path")
-                # THREE gains by coordinate descent in chain order (turn -> step -> interval), each
-                # matched to its own between-fish moment; ~3x the rollouts of the single search.
-                self.re_gain, self.re_gain_report = search_loading_gain_per_channel(
-                    self._model, train_records, self._cfg_feat, grid=GAIN_GRID_PC, seed=self.seed,
-                    max_fish=min(self.contain_fish, 8), n_draws=2, sweeps=2, **_gen_kw)
-                apply_loading_gain(self._model, dict(self.re_gain), which="all")
-                _r = self.re_gain_report
-                print(f"    [{self.name}] loading gains per head "
-                      f"{ {k: round(v, 3) for k, v in self.re_gain.items()} } (grid {GAIN_GRID_PC}, "
-                      f"2 sweeps); spread gen/real: "
-                      + "  ".join(f"{LEVEL_NAME[li]} {_r['got_sd'][li] / max(_r['target_sd'][li], 1e-9):.2f}"
-                                  for _, li in CHANNEL_LEVEL))
-            else:
-                self.re_gain, self.re_gain_report = search_loading_gain(
-                    self._model, train_records, self._cfg_feat, grid=_grid, seed=self.seed,
-                    max_fish=min(self.contain_fish, 8), **_gen_kw,
-                    hold_zero=(("z_bord",) if self.re_block else ()))
-                apply_loading_gain(self._model, self.re_gain,
-                                   which=("core" if self.re_block else "all"))
-                # ALWAYS print the fitted gain. Until now only the pinned case was visible, so a fold
-                # that landed at an interior-but-implausible value left no trace anywhere -- the
-                # results CSV has no column for it and the per-fold report is discarded.
-                print(f"    [{self.name}] loading gain {self.re_gain} "
-                      f"(grid {self.re_gain_grid}, {len(_grid)} pts)")
+            self.re_gain, self.re_gain_report = search_loading_gain(
+                self._model, train_records, self._cfg_feat, grid=_grid, seed=self.seed,
+                max_fish=min(self.contain_fish, 8), **_gen_kw)
+            apply_loading_gain(self._model, self.re_gain, which="all")
+            print(f"    [{self.name}] loading gain {self.re_gain} (grid {self.re_gain_grid}, {len(_grid)} pts)")
             self.tail_gain, self.tail_gain_report = 1.0, None
-            if self.re_tail:
-                # The tail loading's OWN gain, searched after the core gains are folded so it
-                # measures the model that will be scored; matched to the between-fish spread of the
-                # window interval spread (see search_tail_gain), never to the mean-interval spread.
-                self.tail_gain, self.tail_gain_report = search_tail_gain(
-                    self._model, train_records, self._cfg_feat, grid=TAIL_GAIN_GRID, seed=self.seed,
-                    max_fish=min(self.contain_fish, 8), n_draws=2, **_gen_kw)
-                apply_loading_gain(self._model, {"tail": self.tail_gain}, which="all")
-                _r = self.tail_gain_report
-                print(f"    [{self.name}] tail gain {self.tail_gain:.3f} ({_r['status']}; grid "
-                      f"{TAIL_GAIN_GRID}): sd over fish of window dt_std "
-                      + " ".join(f"{v:.3f}" for v in _r["curve"]) + f" vs real {_r['target']:.3f}")
-            if self.re_block:
-                # SECOND, SEPARATE gain for the spatial block.NOT optional -- the core objective (mean log
-                # travel, mean log interval, forward fraction) contains no radial statistic, so a
-                # single gain would scale the spatial dimension by moments it has nothing to do
-                # with. Runs after the core gain is applied so it measures the model that will
-                # actually be scored.
-                self.spatial_gain, self.spatial_gain_report = search_spatial_gain(
-                    self._model, train_records, self._cfg_feat, seed=self.seed,
-                    max_fish=min(self.contain_fish, 8), closed_loop=self.closed_loop,
-                    guardrail=self.guardrail, eps=self.eps, stim_loop=self.stim_loop)
-                apply_loading_gain(self._model, self.spatial_gain, which="spatial")
-                _r = self.spatial_gain_report
-                print(f"    [{self.name}] spatial gain {self.spatial_gain}  "
-                      f"sd(mean r/R) {_r['got_sd']:.4f} vs real {_r['target_sd']:.4f}  "
-                      f"clamped {100 * _r['clamp_frac']:.1f}%")
-                if self.spatial_gain in (SPATIAL_GAIN_GRID[0], SPATIAL_GAIN_GRID[-1]):
-                    print(f"    WARNING [{self.name}]: spatial gain pinned at a grid edge "
-                          f"({self.spatial_gain})")
-                if _r["clamp_frac"] > 0.25:
-                    print(f"    WARNING [{self.name}]: the +-1.5 border-gain clamp bites on "
-                          f"{100 * _r['clamp_frac']:.0f}% of the prior -- the CLAMP is the binding "
-                          "constraint here, not the mechanism")
-            if self.re_gain_mode == "global" and self.re_gain in (_grid[0], _grid[-1]):
+            if self.re_gain in (_grid[0], _grid[-1]):
                 print(f"    WARNING [{self.name}]: loading gain pinned at the grid edge "
                       f"({self.re_gain}); the between-fish spread could not be matched, so widen "
                       f"the grid (re_gain_grid='wide') before trusting this arm"
                       + ("  (expected for the label-shuffled control)" if self.re_shuffle else ""))
         self._re_nodes, self._re_log_pi = _ghq(self.re_m, self.re_sd, k=self.re_ghq_k)
 
-        # ---- the inherited calibration pipeline, unchanged and in the same order ----------- #
-        if not _skip_cal and self.vigor:
-            vg = MX._calibrate_vigor(train_records)
-            vg["apply_turn"] = False
-            self._cfg_feat["vigor"] = vg
-            if self.vigor_drift_calib:
-                MX.MLPMixKinDensity._rescale_vigor_drift(self, train_records)
-        if not _skip_cal and self.kin_fb_calib:
-            tg, vtg = MX._kin_acf_targets(train_records)
-            kfb, _kvs = MX._search_kin_feedback(
-                self._model, train_records, self._cfg_feat, tg, vtg,
-                closed_loop=self.closed_loop, guardrail=self.guardrail, eps=self.eps,
-                stim_loop=self.stim_loop, seed=self.seed)
-            self._cfg_feat["kin_feedback"] = kfb
-        if not _skip_cal and self.contain:
-            self._cfg_feat["wall_mode"] = "reflect"
-            self._cfg_feat.update(MX._search_wall(
-                self._model, train_records, self._cfg_feat, mode=self.contain_mode,
-                closed_loop=self.closed_loop, guardrail=self.guardrail, eps=self.eps,
-                stim_loop=self.stim_loop, seed=self.seed,
-                max_fish=self.contain_fish, w_occ=self.contain_w_occ,
-                decouple=self.contain_decouple, graded=self.contain_graded))
-        if not _skip_cal and self.innov_comp:
-            self._cfg_feat["kin_innov"] = MX._search_innov_comp(
-                self._model, train_records, self._cfg_feat,
-                closed_loop=self.closed_loop, guardrail=self.guardrail, eps=self.eps,
-                stim_loop=self.stim_loop, seed=self.seed)
-        if not _skip_cal and self.indiv:
-            self._cfg_feat["indiv"] = MX._search_indiv(
-                self._model, train_records, self._cfg_feat, MX._indiv_targets(train_records),
-                closed_loop=self.closed_loop, guardrail=self.guardrail, eps=self.eps,
-                stim_loop=self.stim_loop, seed=self.seed)
-        if self.rad_indiv:
-            # AFTER indiv/innov (it widens on top of whatever they left) and BEFORE the contain
-            # re-fit below -- widening mechanisms drive wall contact, so containment must be
-            # re-fit with the widening active or the occupancy calibration is against the wrong
-            # model (the contain_vc lesson).
-            self._rad_indiv_report = MX._search_rad_indiv(
-                self._model, train_records, self._cfg_feat,
-                MX._indiv_targets(train_records)[1],
-                closed_loop=self.closed_loop, guardrail=self.guardrail, eps=self.eps,
-                stim_loop=self.stim_loop, seed=self.seed)
-            self._cfg_feat["fish_re"]["rad_sd"] = self._rad_indiv_report["rad_sd"]
+        # ---- the drift's generation gains, searched by rollout ---------------------------- #
         if not _skip_cal and self.drift and self.drift_gain_search:
             # AFTER containment (bord SCALES centre_bias, so there must be a fitted bias to scale)
             # and BEFORE the re-fit below -- a wandering containment strength changes wall contact,
@@ -2689,16 +2280,6 @@ class MLPMixJointREDensity(JT.MLPMixJointDensity):
                 closed_loop=self.closed_loop, guardrail=self.guardrail, eps=self.eps,
                 stim_loop=self.stim_loop, seed=self.seed)
             apply_drift_gains(self, _gd, _gt, self.drift_report)
-        _rad_widened = bool(self.rad_indiv
-                            and self._cfg_feat.get("fish_re", {}).get("rad_sd", 0.0) > 0)
-        if not _skip_cal and self.contain and (self.indiv or self.innov_comp or _rad_widened
-                             or (self.drift and self.drift_gain_search)):
-            self._cfg_feat.update(MX._search_wall(
-                self._model, train_records, self._cfg_feat, mode=self.contain_mode,
-                closed_loop=self.closed_loop, guardrail=self.guardrail, eps=self.eps,
-                stim_loop=self.stim_loop, seed=self.seed + 1,
-                max_fish=min(self.contain_fish, 8), w_occ=self.contain_w_occ,
-                decouple=self.contain_decouple, graded=self.contain_graded))
         self.config = dict(mode="joint_re", hidden=self.hidden, n_features=X.shape[1], K=self.K,
                            K_kin=self.K_kin, stim_mode=self.stim_mode, use_border=self.use_border,
                            use_kin=True, n_dist=self.n_dist, n_dt=self.n_dt,

@@ -4,7 +4,7 @@ models in Final_report_screendatatest.ipynb.
 UNPUBLISHED DATA (Larsch lab): code only; the bout table and checkpoints stay in git-ignored folders.
 
 1. TABLE (`build`). 100 sighted reference siblings, one per clutch (twin_test/screen_train_fish.json), segmented with the
-   training data's own `segment_bouts.segment_fish` (repulsion_lik._segment_plate), 60-130 min in the dish. Kept: bouts
+   training data's own `segment_bouts.segment_fish` (twin_test._segment_plate), 60-130 min in the dish. Kept: bouts
    with onset in a BOUT-LIKE dot episode, active-only like training (dt <= 10 s; the bout after a > 10 s rest dropped,
    its turn spans the rest). A new run at every tracking-segment break, rest and episode change, so no lag reaches
    across the continuous episodes that were dropped. Positions in model px (mm x 3.60) around the training dish centre,
@@ -58,7 +58,7 @@ ARMS = {"M6": "S4xlo_adt_z2_cdt_tr_rc_al_w3ft", "D4": "S4lo_adt_z2_drift_cdt_tr_
         "M6dm": "S4xlo_adt_z2_cdt_tr_rc_al_w3ft_dm",     # + the dot motion direction input (Model 51)
         "D4dm": "S4lo_adt_z2_drift_cdt_tr_rc_al_w3ft_st_dm"}
 SEEDS = (0, 101)
-CX, CY = 180.0, 174.0                         # the training dish centre (model px), as repulsion_lik
+CX, CY = 180.0, 174.0                         # the training dish centre (model px), as twin_test
 R_PX = TT.R_MM * TT.PX
 LATE_S = 60.0
 SKEYS = {f"s{m}_s{s}": (m, s) for m in ARMS for s in SEEDS}       # sM6_s0, sM6_s101, sD4_s0, sD4_s101
@@ -137,7 +137,6 @@ def _table(fid_new, b):
 
 
 def build(workers=10):
-    from twin import repulsion_lik as RL
     ids = json.loads(FISH_JSON.read_text())
     ids = ids["fish"] if isinstance(ids, dict) else ids
     f = TT.fish_table().set_index("fish_id", drop=False).loc[[int(i) for i in ids]]
@@ -145,7 +144,7 @@ def build(workers=10):
             for p, g in f.groupby("plate")]
     bouts = {}
     with ProcessPoolExecutor(max_workers=workers) as ex:
-        for r in ex.map(RL._segment_plate, jobs):
+        for r in ex.map(TT._segment_plate, jobs):
             bouts.update(r)
     rows, idmap = [], {}
     for new, fid in enumerate(int(i) for i in ids):            # model ids 0..99 in the json's (random) order
@@ -307,7 +306,6 @@ def _mfr(args):
 
 def analyse(workers=10, reps=None):
     import pickle
-    from twin import repulsion_fit as RF
     from twin import screen_eval as SE
     reps = reps or SE.REPS
     meta = json.loads(TABLE_META.read_text())
@@ -317,7 +315,7 @@ def analyse(workers=10, reps=None):
     print(f"real pool: {len(pool)} fish from clutches not used in training ({len(used)} used)", flush=True)
     wr = SE.windows_of(pool, workers)
     ids = np.array(sorted(wr))
-    halves = RF.clutch_split()
+    halves = TT.clutch_split()
     idA = np.array([i for i in ids if R["clutch"][int(i)] in set(halves["fit"])])
     idB = np.array([i for i in ids if R["clutch"][int(i)] in set(halves["test"])])
     units = {}

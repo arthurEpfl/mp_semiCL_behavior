@@ -7,8 +7,9 @@ at each bout onset it reads where the OTHER fish are and turns them into dot gro
 COUPLING. One thread per fish around the unchanged generator. The generator asks its provider for the stimulus exactly
 once per bout, at the bout's onset, with the pre-bout pose. The provider blocks until it is that fish's turn: the fish
 with the smallest (pending onset, index) goes next, so every fish sees each other fish where it is after that fish's
-bouts with onset < t (or = t with a lower index). Bouts are instantaneous; collisions are ignored (dots overlap freely
-in training too). Deterministic: the result does not depend on thread timing.
+bouts with onset < t (or = t with a lower index). Bouts are instantaneous, so fish may overlap (dots overlap freely in
+training too) unless the collision rule is on (``collision_mm``). Deterministic: the result does not depend on thread
+timing.
 
 PERCEPTION. A fish sees every other fish within RADIUS_PX = 280 px = 78 mm at any bearing, always as MOVING dots. Beyond
 280 px the log-range input is saturated, so the model's pull would stay the same at any larger range (it does not fade:
@@ -29,12 +30,12 @@ onset. Through the provider hook ``block_time_s`` (the generator's own rule woul
 neighbours regroup). F's correction term is count-gated and acts only in the first 20 s of a block, so under 'late' it
 is inactive; F's network weights are unchanged by the correction (checked: 16/16 tensors identical to its base).
 
-    python multi_fish.py --checks            # correctness checks (hook, parity, determinism, rule scenes)
-    python multi_fish.py --run [COND ...]    # simulate the conditions (all by default), Model/multi_fish/<cond>.pkl
-    python multi_fish.py --analyse           # readouts -> Model/multi_fish/summary.json
-    python multi_fish.py --run-shoal         # Final_report_shoaling conditions (5 fish, 5x dish, F / F+turn / F+turn+step)
-    python multi_fish.py --analyse-shoal     # their readouts + close contacts -> Model/multi_fish/summary_shoal.json
-    python multi_fish.py --videos            # mp4s of shoal formation, if the readouts show shoaling
+    python -m twin.multi_fish --checks            # correctness checks (hook, parity, determinism, rule scenes)
+    python -m twin.multi_fish --run-grid          # the shoal grid: 2 dishes x 2 / 5 / 10 fish x F and its variants x 2 seeds
+    python -m twin.multi_fish --analyse-grid      # -> output/multi_fish/summary_grid.json
+    python -m twin.multi_fish --run-pairdm        # pairs of the screen-trained D4, with and without the dot's direction
+    python -m twin.multi_fish --analyse-pairdm    # -> output/multi_fish/summary_pairdm.json
+    python -m twin.multi_fish --render NPZ MP4    # one video
 """
 from __future__ import annotations
 
@@ -64,42 +65,16 @@ SHOAL_MM = 25.0                    # 'together' = within 25 mm, single linkage (
 SHIFTS_S = tuple(60.0 * k for k in range(1, 11))   # Larsch / Kappel: 10 time shifts
 CHUNK_S = 300.0                                     # Larsch / Kappel: 5-min chunks
 
-MODELS = {   # tag: (checkpoint dir under Model/, arm). F = 14f (seed 0) / 32b (seed 101)
-    "14f": ("report8_pf_last/S4_adt_z2_drift_cdt_tr_rc_al_w3ft_st_pf5Bcr_last",
-            "S4_adt_z2_drift_cdt_tr_rc_al_w3ft_st_pf5Bcr_last"),
-    "32b": ("report13_pf_last/S4_adt_z2_drift_cdt_tr_rc_al_w3ft_st_pf5Bcr_last",
-            "S4_adt_z2_drift_cdt_tr_rc_al_w3ft_st_pf5Bcr_last"),
-    "26e": ("simp18a_ladder_checkpoints", "S4x_adt_z2_cdt_tr_rc_al_w3ft"),        # M6, seed 0
-    "30d": ("simp18a_seed101_ckpts", "S4x_adt_z2_cdt_tr_rc_al_w3ft"),             # M6, seed 101
-    # F + the repulsion term fitted to the Larsch screen data (report Model 43a / 43b): every neighbour within reach adds
-    # its own turn-away (fit_MLP_joint.repulsion_shifts via FishView.dots); attraction still comes through the groups
-    "14f_rep": ("rep43_s0/S4_adt_z2_drift_cdt_tr_rc_al_w3ft_st_pf5Bcr_last_repT",
-                "S4_adt_z2_drift_cdt_tr_rc_al_w3ft_st_pf5Bcr_last_repT"),
-    "32b_rep": ("rep43_s101/S4_adt_z2_drift_cdt_tr_rc_al_w3ft_st_pf5Bcr_last_repT",
-                "S4_adt_z2_drift_cdt_tr_rc_al_w3ft_st_pf5Bcr_last_repT"),
-    # F + turn + the likelihood-fitted step term (report Model 50a / 50b): shorter steps near any neighbour
-    "14f_reps": ("rep50_s0/S4_adt_z2_drift_cdt_tr_rc_al_w3ft_st_pf5Bcr_last_repTS",
-                 "S4_adt_z2_drift_cdt_tr_rc_al_w3ft_st_pf5Bcr_last_repTS"),
-    "32b_reps": ("rep50_s101/S4_adt_z2_drift_cdt_tr_rc_al_w3ft_st_pf5Bcr_last_repTS",
-                 "S4_adt_z2_drift_cdt_tr_rc_al_w3ft_st_pf5Bcr_last_repTS"),
-}
-# D4 TRAINED ON THE SCREEN (scripts/screen_train.py), without and with the dot's direction of motion as an input
-# (`stim_dmove`, Model 51). They saw one dot, always moving, never a dish without one: run ONLY in PAIRS (pairdm_*,
-# single-partner mode), read against PSEUDO-PAIRS, never blind (blind they swim abnormally).
-for _sd in (0, 101):
-    MODELS[f"sD4_s{_sd}"] = (f"screen_trained_s{_sd}_ckpts", "S4lo_adt_z2_drift_cdt_tr_rc_al_w3ft_st")
-    MODELS[f"sD4dm_s{_sd}"] = (f"screen_trained_s{_sd}_ckpts", "S4lo_adt_z2_drift_cdt_tr_rc_al_w3ft_st_dm")
-# A blind fish sees no neighbour, so the repulsion term never acts and F + repulsion blind IS F blind (same weights,
-# same random streams): the repulsion conditions share F's blind pools (checked: check_rep_blind).
-BLIND_TAG = {"14f_rep": "14f", "32b_rep": "32b", "14f_reps": "14f", "32b_reps": "32b"}
-# F + the GROUP repulsion term (scripts/grouprep_fit.py; one representation: each group's term from its nearest member,
-# groups added by the effects rule): calibrated turn, + step, strength x2 / x4 / x8, x group count, + collision rule
-GR_VARIANTS = ("grT", "grTS", "grT2", "grT4", "grT8", "grTb1", "grTC")
-_F_ARM = "S4_adt_z2_drift_cdt_tr_rc_al_w3ft_st_pf5Bcr_last"
-for _st, _dir in (("14f", "gr_s0"), ("32b", "gr_s101")):
-    for _v in GR_VARIANTS:
-        MODELS[f"{_st}_{_v}"] = (f"{_dir}/{_F_ARM}_{_v}", f"{_F_ARM}_{_v}")
-        BLIND_TAG[f"{_st}_{_v}"] = _st
+# tag -> (registry key of the checkpoints, group-repulsion variant or None): F = 14f (seed 0) / 32b (seed 101); "<F>_<v>"
+# = F with the group repulsion term of variant v (twin/grouprep_fit.py, ``variants``): calibrated turn (grT), strength
+# x2 / x4 / x8, + collision rule (grTC). The screen-trained D4 without / with the dot's direction of motion (sD4, sD4dm)
+# saw one dot, always moving, never a dish without one: run ONLY in PAIRS (single-partner mode), never blind.
+GRID_VARS = ("F", "grT", "grT2", "grT4", "grT8", "grTC")
+MODELS = {"14f": ("14f", None), "32b": ("32b", None)}
+for _st in ("14f", "32b"):
+    for _v in GRID_VARS[1:]:
+        MODELS[f"{_st}_{_v}"] = (_st, _v)
+SCREEN_ARMS = {"sD4": "S4lo_adt_z2_drift_cdt_tr_rc_al_w3ft_st", "sD4dm": "S4lo_adt_z2_drift_cdt_tr_rc_al_w3ft_st_dm"}
 
 
 def _cond(tag, N, G, arena, T, rule=None, blind=False, scramble=False, t0=None, clock="late", start="free"):
@@ -108,163 +83,43 @@ def _cond(tag, N, G, arena, T, rule=None, blind=False, scramble=False, t0=None, 
                 start=start)
 
 
-# Fish (group g, index i) has the same start pose, random stream, latent and fold model (g % 5) in every condition of a
-# seed, so conditions pair by group: a pair g is fish 0-1 of group g, a group of 5 its fish 0-4.
-CONDS = {
-    "A1_blind": _cond("14f", 10, 50, 1, 1800, blind=True),
-    "A1_pairs": _cond("14f", 2, 50, 1, 1800),
-    "A1_N5_effects": _cond("14f", 5, 20, 1, 1800, "effects"),
-    "A1_N5_nearest": _cond("14f", 5, 20, 1, 1800, "nearest"),
-    "A1_N10_effects": _cond("14f", 10, 20, 1, 1800, "effects"),
-    "A1_N10_nearest": _cond("14f", 10, 20, 1, 1800, "nearest"),
-    "A1_N10_effects_scrambled": _cond("14f", 10, 20, 1, 1800, "effects", scramble=True),
-    "A5_blind": _cond("14f", 10, 20, 5, 3600, blind=True),
-    "A5_N10_effects": _cond("14f", 10, 20, 5, 3600, "effects"),
-    "A5_N10_nearest": _cond("14f", 10, 20, 5, 3600, "nearest"),
-    "s101_A1_blind": _cond("32b", 10, 50, 1, 1800, blind=True),
-    "s101_A1_pairs": _cond("32b", 2, 50, 1, 1800),
-    "s101_A1_N10_effects": _cond("32b", 10, 20, 1, 1800, "effects"),
-    # Final_report_missingPieces (sections 4 and 9): replication on M6 itself and on F seed 101; the 5x dish's controls
-    "m6_A1_blind": _cond("26e", 10, 50, 1, 1800, blind=True),
-    "m6_A1_pairs": _cond("26e", 2, 50, 1, 1800),
-    "m6_A1_N10_effects": _cond("26e", 10, 20, 1, 1800, "effects"),
-    "m6s101_A1_blind": _cond("30d", 10, 50, 1, 1800, blind=True),
-    "m6s101_A1_pairs": _cond("30d", 2, 50, 1, 1800),
-    "m6s101_A1_N10_effects": _cond("30d", 10, 20, 1, 1800, "effects"),
-    "s101_A1_N5_effects": _cond("32b", 5, 20, 1, 1800, "effects"),
-    "s101_A1_N10_effects_scrambled": _cond("32b", 10, 20, 1, 1800, "effects", scramble=True),
-    "s101_A5_blind": _cond("32b", 10, 20, 5, 3600, blind=True),
-    "s101_A5_N10_effects": _cond("32b", 10, 20, 5, 3600, "effects"),
-    "A5_N10_effects_scrambled": _cond("14f", 10, 20, 5, 3600, "effects", scramble=True),
-    "A5_N10_effects_entry": _cond("14f", 10, 20, 5, 3600, "effects", clock="entry"),
-    # F + repulsion (Final_report_extrapolations section 3): the same scenes as F, both seeds
-    "rep_A1_pairs": _cond("14f_rep", 2, 50, 1, 1800),
-    "rep_A1_N10_effects": _cond("14f_rep", 10, 20, 1, 1800, "effects"),
-    "rep_A5_N10_effects": _cond("14f_rep", 10, 20, 5, 3600, "effects"),
-    "rep_s101_A1_pairs": _cond("32b_rep", 2, 50, 1, 1800),
-    "rep_s101_A1_N10_effects": _cond("32b_rep", 10, 20, 1, 1800, "effects"),
-    "rep_s101_A5_N10_effects": _cond("32b_rep", 10, 20, 5, 3600, "effects"),
-    # F + turn + step, the same scenes
-    "reps_A1_pairs": _cond("14f_reps", 2, 50, 1, 1800),
-    "reps_A1_N10_effects": _cond("14f_reps", 10, 20, 1, 1800, "effects"),
-    "reps_A5_N10_effects": _cond("14f_reps", 10, 20, 5, 3600, "effects"),
-    "reps_s101_A1_pairs": _cond("32b_reps", 2, 50, 1, 1800),
-    "reps_s101_A1_N10_effects": _cond("32b_reps", 10, 20, 1, 1800, "effects"),
-    "reps_s101_A5_N10_effects": _cond("32b_reps", 10, 20, 5, 3600, "effects"),
-}
-REP_CONDS = ("rep_A1_pairs", "rep_A1_N10_effects", "rep_A5_N10_effects", "rep_s101_A1_pairs",
-             "rep_s101_A1_N10_effects", "rep_s101_A5_N10_effects")
-REP_BASE = {"rep_A1_pairs": "A1_pairs", "rep_A1_N10_effects": "A1_N10_effects", "rep_A5_N10_effects": "A5_N10_effects",
-            "rep_s101_A1_pairs": "s101_A1_pairs", "rep_s101_A1_N10_effects": "s101_A1_N10_effects",
-            "rep_s101_A5_N10_effects": "s101_A5_N10_effects"}
-REPS_CONDS = tuple("reps_" + c[len("rep_"):] for c in REP_CONDS)
-REPS_BASE = {"reps_" + c[len("rep_"):]: b for c, b in REP_BASE.items()}
-# Final_report_shoaling.ipynb (2026-10-18): 5 fish, 40 groups (200 fish), 5x dish, 60 min, readout from 10 min; F, F + turn,
-# F + turn + step at both seeds, and a blind pool of the same size per seed (fish (g, i) as in every other condition)
-SH_CONDS = {
-    "sh_A5_N5_blind": _cond("14f", 5, 40, 5, 3600, blind=True),
-    "sh_A5_N5_F": _cond("14f", 5, 40, 5, 3600, "effects"),
-    "sh_A5_N5_Fturn": _cond("14f_rep", 5, 40, 5, 3600, "effects"),
-    "sh_A5_N5_Fturnstep": _cond("14f_reps", 5, 40, 5, 3600, "effects"),
-    "sh_s101_A5_N5_blind": _cond("32b", 5, 40, 5, 3600, blind=True),
-    "sh_s101_A5_N5_F": _cond("32b", 5, 40, 5, 3600, "effects"),
-    "sh_s101_A5_N5_Fturn": _cond("32b_rep", 5, 40, 5, 3600, "effects"),
-    "sh_s101_A5_N5_Fturnstep": _cond("32b_reps", 5, 40, 5, 3600, "effects"),
-}
-CONDS.update(SH_CONDS)
-# Final_report_shoaling.ipynb, group repulsion (2026-10-18): 5 fish x 40 groups, F and every GR variant at both seeds, in
-# the 5x dish (60 min, readout from 10 min; F = sh_*_A5_N5_F above) and the training dish (30 min, readout from 5 min;
-# blind pools: A1_blind / s101_A1_blind, whose fish 0-4 of groups 0-39 are the same fish)
-GR_CONDS = {}
-for _st, _pre in (("14f", ""), ("32b", "s101_")):
-    GR_CONDS[f"g1_{_pre}F"] = _cond(_st, 5, 40, 1, 1800, "effects")
-    for _v in GR_VARIANTS:
-        GR_CONDS[f"g5_{_pre}{_v}"] = _cond(f"{_st}_{_v}", 5, 40, 5, 3600, "effects")
-        GR_CONDS[f"g1_{_pre}{_v}"] = _cond(f"{_st}_{_v}", 5, 40, 1, 1800, "effects")
-CONDS.update(GR_CONDS)
-GR_F5 = {"14f": "sh_A5_N5_F", "32b": "sh_s101_A5_N5_F"}       # F in the 5x dish (already run)
-# THE SHOAL GRID (2026-10-19, thesis Sec. 5.5): every dish x group size x variant x seed, read the same way
-# (``analyse_grid``). Training dish: 30 min, readout from 5 min, free starts (as before). 5x dish: 60 min, readout from
-# 10 min, NEAR starts (each group starts within 25 mm of its fish 0, so the fish can see each other; the question there
-# is whether a shoal stays together without walls), with blind pools started the same way. Groups of 5 in the training
-# dish are the g1_* conditions above (same spec), copied under the grid names.
-GRID_VARS = ("F", "grT", "grT2", "grT4", "grT8", "grTC")
+# THE SHOAL GRID (thesis "Multiple fish"): every dish x group size x variant x seed. Fish (group g, index i) has the same
+# start pose, random stream, latent and fold model (g % 5) in every condition of a seed, so conditions pair by group.
+# Training dish: 30 min, readout from 5 min, free starts. 5x dish: 60 min, readout from 10 min, NEAR starts (each group
+# starts within 25 mm of its fish 0, so the fish can see each other). Each dish has a blind pool of 10 fish per group.
 GRID_N = {2: 50, 5: 40, 10: 40}
 GRID_DISH = {"A1": dict(arena=1, T=1800, start="free"), "A5": dict(arena=5, T=3600, start="near")}
 NEAR_MM = 25.0
-GRID_CONDS, GRID_COPY = {}, {}
 
 
 def grid_name(dish_, N, var, seed):
     return f"grid_{dish_}_N{N}_{var}" + ("_s101" if seed == 101 else "")
 
 
+CONDS = {}
 for _seed, _st, _pre in ((0, "14f", ""), (101, "32b", "s101_")):
+    CONDS[f"{_pre}A1_blind"] = _cond(_st, 10, 50, 1, 1800, blind=True)
     for _d, _dd in GRID_DISH.items():
         for _N, _G in GRID_N.items():
             for _v in GRID_VARS:
-                _tag = _st if _v == "F" else f"{_st}_{_v}"
-                _nm = grid_name(_d, _N, _v, _seed)
-                if _d == "A1" and _N == 5:
-                    GRID_COPY[_nm] = f"g1_{_pre}{_v}"
-                GRID_CONDS[_nm] = _cond(_tag, _N, _G, _dd["arena"], _dd["T"], "effects", start=_dd["start"])
-    GRID_CONDS[f"grid_A5_blind" + ("_s101" if _seed == 101 else "")] = _cond(_st, 10, 50, 5, 3600, blind=True,
-                                                                              start="near")
-CONDS.update(GRID_CONDS)
-# PAIRS WITH THE DOT'S DIRECTION OF MOTION (2026-10-21, thesis "Adding alignment"): screen-trained D4 with and without
-# the input, both seeds, the grid's two dishes and starts, 50 pairs; the partner is one moving dot, always in view.
+                CONDS[grid_name(_d, _N, _v, _seed)] = _cond(_st if _v == "F" else f"{_st}_{_v}", _N, _G, _dd["arena"],
+                                                            _dd["T"], "effects", start=_dd["start"])
+    CONDS["grid_A5_blind" + ("_s101" if _seed == 101 else "")] = _cond(_st, 10, 50, 5, 3600, blind=True, start="near")
+GRID_CONDS = dict(CONDS)
+# PAIRS WITH THE DOT'S DIRECTION OF MOTION (thesis "Adding alignment"): screen-trained D4 with and without the input, both
+# seeds, the grid's two dishes and starts, 50 pairs; the partner is one moving dot, always in view.
 PAIRDM_CONDS = {}
 for _tag in ("sD4_s0", "sD4_s101", "sD4dm_s0", "sD4dm_s101"):
     for _d, _dd in GRID_DISH.items():
         PAIRDM_CONDS[f"pairdm_{_d}_{_tag}"] = dict(_cond(_tag, 2, 50, _dd["arena"], _dd["T"], start=_dd["start"]),
                                                    single=True)
 CONDS.update(PAIRDM_CONDS)
-NEW_CONDS = ("m6_A1_blind", "m6_A1_pairs", "m6_A1_N10_effects", "m6s101_A1_blind", "m6s101_A1_pairs",
-             "m6s101_A1_N10_effects", "s101_A1_N5_effects", "s101_A1_N10_effects_scrambled", "s101_A5_blind",
-             "s101_A5_N10_effects", "A5_N10_effects_scrambled", "A5_N10_effects_entry")
-LABEL = {
-    "sh_A5_N5_blind": "blind fish, 5 per group (5x dish)", "sh_A5_N5_F": "F, 5 fish (5x dish)",
-    "sh_A5_N5_Fturn": "F + turn, 5 fish (5x dish)", "sh_A5_N5_Fturnstep": "F + turn + step, 5 fish (5x dish)",
-    "sh_s101_A5_N5_blind": "blind fish, 5 per group (5x dish, seed 101)", "sh_s101_A5_N5_F": "F, 5 fish (5x dish, seed 101)",
-    "sh_s101_A5_N5_Fturn": "F + turn, 5 fish (5x dish, seed 101)",
-    "sh_s101_A5_N5_Fturnstep": "F + turn + step, 5 fish (5x dish, seed 101)",
-    "A1_blind": "blind fish (training dish)", "A1_pairs": "pairs", "A1_N5_effects": "5 fish, effects",
-    "A1_N5_nearest": "5 fish, nearest", "A1_N10_effects": "10 fish, effects", "A1_N10_nearest": "10 fish, nearest",
-    "A1_N10_effects_scrambled": "10 fish, effects, random directions", "A5_blind": "blind fish (5x dish)",
-    "A5_N10_effects": "10 fish, effects (5x dish)", "A5_N10_nearest": "10 fish, nearest (5x dish)",
-    "s101_A1_blind": "blind fish (seed 101)", "s101_A1_pairs": "pairs (seed 101)",
-    "s101_A1_N10_effects": "10 fish, effects (seed 101)",
-    "m6_A1_blind": "M6: blind fish", "m6_A1_pairs": "M6: pairs", "m6_A1_N10_effects": "M6: 10 fish, effects",
-    "m6s101_A1_blind": "M6 seed 101: blind fish", "m6s101_A1_pairs": "M6 seed 101: pairs",
-    "m6s101_A1_N10_effects": "M6 seed 101: 10 fish, effects", "s101_A1_N5_effects": "5 fish, effects (seed 101)",
-    "s101_A1_N10_effects_scrambled": "10 fish, effects, random directions (seed 101)",
-    "s101_A5_blind": "blind fish (5x dish, seed 101)", "s101_A5_N10_effects": "10 fish, effects (5x dish, seed 101)",
-    "A5_N10_effects_scrambled": "10 fish, effects, random directions (5x dish)",
-    "A5_N10_effects_entry": "10 fish, effects, onset clock on entry (5x dish)",
-    "rep_A1_pairs": "F + repulsion: pairs", "rep_A1_N10_effects": "F + repulsion: 10 fish, effects",
-    "rep_A5_N10_effects": "F + repulsion: 10 fish, effects (5x dish)",
-    "rep_s101_A1_pairs": "F + repulsion: pairs (seed 101)",
-    "rep_s101_A1_N10_effects": "F + repulsion: 10 fish, effects (seed 101)",
-    "rep_s101_A5_N10_effects": "F + repulsion: 10 fish, effects (5x dish, seed 101)",
-    "reps_A1_pairs": "F + turn + step: pairs", "reps_A1_N10_effects": "F + turn + step: 10 fish, effects",
-    "reps_A5_N10_effects": "F + turn + step: 10 fish, effects (5x dish)",
-    "reps_s101_A1_pairs": "F + turn + step: pairs (seed 101)",
-    "reps_s101_A1_N10_effects": "F + turn + step: 10 fish, effects (seed 101)",
-    "reps_s101_A5_N10_effects": "F + turn + step: 10 fish, effects (5x dish, seed 101)",
-}
-_GR_LAB = {"F": "F", "grT": "F + group repulsion", "grTS": "F + group repulsion + step", "grT2": "F + group repulsion x2",
-           "grT4": "F + group repulsion x4", "grT8": "F + group repulsion x8", "grTb1": "F + group repulsion x n",
-           "grTC": "F + group repulsion + collision"}
-for _c, _sp in GR_CONDS.items():
-    _v = _c.split("_")[-1]
-    LABEL[_c] = (f"{_GR_LAB[_v]}, 5 fish ({'5x' if _sp['arena'] == 5 else 'training'} dish"
-                 + (", seed 101)" if "s101" in _c else ")"))
 
 
 def blind_of(cond):
     """The blind pool a condition pairs with: the blind condition of the same model and dish."""
     c = CONDS[cond]
-    tag = BLIND_TAG.get(c["tag"], c["tag"])
+    tag = c["tag"].split("_")[0]                         # a variant's blind fish are F's (the term needs neighbours)
     for k, b in CONDS.items():
         if (b["blind"] and b["tag"] == tag and b["arena"] == c["arena"] and b["G"] >= c["G"] and b["N"] >= c["N"]
                 and b.get("start", "free") == c.get("start", "free")):
@@ -287,12 +142,28 @@ def _imports():
 
 
 def models(tag):
+    """The five fold models of a tag (the rej band merged in, as every rollout)."""
     key = ("models", tag)
     if key not in _CACHE:
         MF, _ = _imports()
-        d, arm = MODELS[tag]
+        from twin import registry
+        if tag.startswith("sD4"):
+            name, seed = tag.split("_s")
+            d, arm, var = paths.CKPTS / f"screen_s{seed}", SCREEN_ARMS[name], None
+        else:
+            k, var = MODELS[tag]
+            d, arm = registry.ckpt_dir(k), registry.arm(k)
         with contextlib.redirect_stdout(io.StringIO()):
-            ms, _ = MF.fold_models(d, arm)                     # the rej band merged in, as every rollout
+            ms, _ = MF.fold_models(d, arm)
+        if var:
+            from twin import grouprep_fit as GF
+            gp, extra = GF.variants(MODELS[tag][0])[var]
+            for m in ms.values():
+                cf = dict(m._cfg_feat)
+                cf.pop("repulsion", None)
+                cf["grouprep"] = dict(gp)
+                cf.update(extra)
+                m._cfg_feat = cf
         _CACHE[key] = [ms[f] for f in sorted(ms)]
     return _CACHE[key]
 
@@ -688,32 +559,6 @@ def _nn1(P):
     return D.min(1).mean(0)
 
 
-def _iid(P):
-    D = np.linalg.norm(P[:, None] - P[None, :], axis=-1)
-    n = len(P)
-    return D.sum((0, 1)) / (n * (n - 1))
-
-
-def _largest(P, thr=SHOAL_MM):
-    """(frames,) size of the largest single-linkage cluster at ``thr`` mm."""
-    n, F = P.shape[0], P.shape[1]
-    D = np.linalg.norm(P[:, None] - P[None, :], axis=-1) <= thr            # (n, n, F)
-    out = np.zeros(F, int)
-    for f in range(F):
-        A = D[:, :, f]
-        seen, best = np.zeros(n, bool), 0
-        for s in range(n):
-            if seen[s]:
-                continue
-            stack, size = [s], 0
-            seen[s] = True
-            while stack:
-                u = stack.pop(); size += 1
-                for v in np.flatnonzero(A[u] & ~seen):
-                    seen[v] = True; stack.append(v)
-            best = max(best, size)
-        out[f] = best
-    return out
 
 
 def _shuffled(T, n, n_pseudo=200, seed=0, mode="harpaz", folds=None, sep_s=600):
@@ -746,15 +591,6 @@ def _shuffled(T, n, n_pseudo=200, seed=0, mode="harpaz", folds=None, sep_s=600):
     return np.array(out)
 
 
-def _pseudo_fold(n_pseudo, folds):
-    labs = np.unique(folds)
-    return labs[np.arange(n_pseudo) % len(labs)]
-
-
-def _d_fold(nn_g, nn_s, folds, pf):
-    """Per-group D against the pseudo-groups of its own fold (the 'fold' null)."""
-    den = {f: nn_s[pf == f].mean() for f in np.unique(pf)}
-    return np.log(nn_g / np.array([den[f] for f in folds]))
 
 
 def _boot_D(nn_g, T, n, n_boot=300, n_pseudo=25, seed=0):
@@ -800,207 +636,11 @@ def pair_ai(A, B, taus, t0, T):
     return float(np.mean(ais)), float(np.median(iad)), float(np.median(sh))
 
 
-def pairs_readout(cond):
-    """Per-pair attraction index, median pair distance and its time-shifted null, for a pair condition and for the same
-    pairs blind (fish 0-1 of the blind pool)."""
-    out = {}
-    for lab, c, n in (("coupled", cond, 2), ("blind", blind_of(cond), 2)):
-        blob = load(c)
-        T, taus = tracks(blob, n)
-        G = CONDS[cond]["G"]
-        rows = [pair_ai(T[g, 0], T[g, 1], taus, blob["spec"]["t_read"], blob["spec"]["T"]) for g in range(G)]
-        out[lab] = dict(ai=[r[0] for r in rows], iad_med=[r[1] for r in rows], iad_shift_med=[r[2] for r in rows],
-                        dist=np.linalg.norm(T[:G, 0] - T[:G, 1], axis=-1))
-    return out
-
-
-def groups_readout(cond, n_pseudo=200):
-    """Per-group nearest-neighbour distance, its Harpaz shuffled null and the blind groups of the same size."""
-    spec = CONDS[cond]
-    N, G = spec["N"], spec["G"]
-    blob = load(cond)
-    T, taus = tracks(blob)
-    bl = load(blind_of(cond))
-    TB, _ = tracks(bl, N)
-    TB = TB[:G]
-    nn = np.array([_nn1(T[g]) for g in range(G)])                      # (G, frames)
-    nn_b = np.array([_nn1(TB[g]) for g in range(G)])
-    S = _shuffled(T, N, n_pseudo)                                        # primary null (Harpaz)
-    nn_s = np.array([_nn1(p) for p in S])
-    SB = _shuffled(TB, N, n_pseudo, seed=1)
-    nn_bs = np.array([_nn1(p) for p in SB])
-    folds = np.arange(G) % 5                                             # sensitivity: fold-matched null
-    pf = _pseudo_fold(n_pseudo, folds)
-    nn_sf = np.array([_nn1(p) for p in _shuffled(T, N, n_pseudo, seed=2, mode="fold")])
-    # within-group time-shift null: fish k shifted by k x 60 s (circular on the readout grid)
-    nn_t = np.array([_nn1(np.stack([np.roll(T[g, k], -60 * k, axis=0) for k in range(N)])) for g in range(G)])
-    iid = np.array([_iid(T[g]).mean() for g in range(G)])
-    iid_s = np.array([_iid(p).mean() for p in S])
-    big = np.array([_largest(T[g]) for g in range(G)])
-    big_s = np.array([_largest(p) for p in S[:50]])
-    big_b = np.array([_largest(TB[g]) for g in range(G)])
-    # alignment: |mean unit travel heading| per frame, against the same kind of pseudo-groups
-    H = np.array([[heading_at(f, taus) for f in grp] for grp in blob["groups"]])
-    pol = np.abs(np.exp(1j * H).mean(1)).mean(1)
-    rng = np.random.default_rng(3)
-    Hs = np.array([[H[g, rng.integers(N)] for g in rng.choice(G, N, replace=False)] for _ in range(n_pseudo)])
-    pol_s = np.abs(np.exp(1j * Hs).mean(1)).mean(1)
-    return dict(taus=taus, nn=nn, nn_blind=nn_b, nn_shuf=nn_s, nn_blind_shuf=nn_bs, nn_tshift=nn_t,
-                D=np.log(nn.mean(1) / nn_s.mean()), D_ci=_boot_D(nn.mean(1), T, N),
-                D_fold=_d_fold(nn.mean(1), nn_sf.mean(1), folds, pf), D_tshift=np.log(nn.mean(1) / nn_t.mean(1)),
-                D_blind=np.log(nn_b.mean(1) / nn_bs.mean()), occupancy=float(np.log(nn_s.mean() / nn_bs.mean())),
-                iid_ratio=iid / iid_s.mean(), big=big, big_shuf=big_s, big_blind=big_b, pol=pol, pol_shuf=pol_s, G=G)
-
-
-
-
-def cotravel(cond, thr=SHOAL_MM, n_pseudo=100):
-    """Co-travel: for every pair of fish, the episodes (1 Hz) during which they stay within ``thr`` mm; the distance
-    their midpoint travels during each episode (mm). Coupled groups vs time-aligned pairs of fish from different groups
-    (chance) vs the blind groups."""
-    def episodes(A, B):
-        close = np.linalg.norm(A - B, axis=1) <= thr
-        mid = (A + B) / 2
-        step = np.r_[0.0, np.linalg.norm(np.diff(mid, axis=0), axis=1)]
-        out, run = [], 0.0
-        for k in range(len(close)):
-            if close[k]:
-                run += step[k] if k and close[k - 1] else 0.0
-            elif run > 0 or (k and close[k - 1]):
-                out.append(run); run = 0.0
-        if close[-1]:
-            out.append(run)
-        return out
-
-    spec = CONDS[cond]
-    N, G = spec["N"], spec["G"]
-    T, taus = tracks(load(cond))
-    TB, _ = tracks(load(blind_of(cond)), N)
-    hours = len(taus) / 3600.0
-    res = {}
-    for lab, X in (("coupled", T), ("blind", TB[:G])):
-        ep = [e for g in range(G) for i in range(N) for j in range(i + 1, N) for e in episodes(X[g, i], X[g, j])]
-        res[lab] = dict(eps=np.array(ep), per_pair_hour=float(np.sum(ep)) / (G * N * (N - 1) / 2 * hours))
-    rng = np.random.default_rng(5)
-    ep = []
-    n_pseudo = G * N * (N - 1) // 2                     # as many pairs as within the groups (fair counts and maxima)
-    for _ in range(n_pseudo):
-        g1, g2 = rng.choice(G, 2, replace=False)
-        ep += episodes(T[g1, rng.integers(N)], T[g2, rng.integers(N)])
-    res["chance"] = dict(eps=np.array(ep), per_pair_hour=float(np.sum(ep)) / (n_pseudo * hours))
-    for v in res.values():
-        v["eps_per_pair_hour"] = len(v["eps"]) / (n_pseudo * hours)
-    return res
-
-
-def kinematics(cond):
-    """Per fish: bout rate, median step, mean |turn|, share of near-straight bouts over the readout window, coupled and
-    the same fish blind; ratios / differences per fish."""
-    spec = CONDS[cond]
-    N, G = spec["N"], spec["G"]
-
-    def per_fish(blob, n):
-        rows = []
-        for grp in blob["groups"][:G]:
-            for f in grp[:n]:
-                s = (f["t"] >= spec["t_read"]) & (f["t"] < spec["T"])
-                rows.append((s.sum() / (spec["T"] - spec["t_read"]), np.median(f["d"][s]) / PX_MM,
-                             np.mean(np.abs(f["dth"][s])), np.mean(np.abs(f["dth"][s]) < 3.0)))
-        return np.array(rows)
-
-    a, b = per_fish(load(cond), N), per_fish(load(blind_of(cond)), N)
-    return dict(rate=a[:, 0] / b[:, 0], step=a[:, 1] / b[:, 1], turn=a[:, 2] - b[:, 2], straight=a[:, 3] - b[:, 3],
-                abs=dict(rate=a[:, 0], step=a[:, 1], turn=a[:, 2], straight=a[:, 3]),
-                abs_blind=dict(rate=b[:, 0], step=b[:, 1], turn=b[:, 2], straight=b[:, 3]))
-
-
-def ood(cond):
-    """Provider log over the readout window: how often neighbours are visible, groups per bout, pooled sizes, range."""
-    spec = CONDS[cond]
-    L = np.concatenate([f["log"] for grp in load(cond)["groups"] for f in grp])
-    L = L[(L[:, 0] >= spec["t_read"]) & (L[:, 0] < spec["T"])]
-    vis = L[:, 1] > 0
-    Lv = L[vis]
-    return dict(share_visible=float(vis.mean()), n_vis=float(Lv[:, 1].mean()) if vis.any() else 0.0,
-                G_mean=float(Lv[:, 2].mean()) if vis.any() else 0.0,
-                share_G_gt2=float((Lv[:, 2] > 2).mean()) if vis.any() else 0.0,
-                share_pool_gt8=float((Lv[:, 3] > N_CAP).mean()) if vis.any() else 0.0,
-                share_pooled=float((Lv[:, 3] > 1).mean()) if vis.any() else 0.0,
-                r_near_med_mm=float(np.nanmedian(Lv[:, 5]) / PX_MM) if vis.any() else np.nan,
-                share_r_near_gt44mm=float(np.mean(Lv[:, 5] / PX_MM > 44.0)) if vis.any() else np.nan,
-                share_group_outside_dish=float((Lv[:, 6] > 0).mean()) if vis.any() else 0.0)
 
 
 def per_fold(values, G):
     v = np.asarray(values, float)
     return [float(np.nanmean(v[np.arange(G) % 5 == k])) for k in range(5)]
-
-
-def analyse(save=True, conds=None, out=None):
-    """Every readout of every finished condition -> summary dict (and Model/multi_fish/summary.json). ``conds`` = a
-    subset of conditions (with their blind pools), ``out`` = another summary file (the missing-pieces notebook writes
-    its own, so the extrapolations notebook's summary.json is left as it was)."""
-    have = {c for c in CONDS if (OUT / f"{c}.pkl").exists()}
-    if conds is None:                     # default = the extrapolations notebook's original set (summary.json unchanged)
-        conds = [c for c in CONDS if c not in NEW_CONDS and c not in SH_CONDS and c not in GR_CONDS]
-    have &= set(conds) | {blind_of(c) for c in conds}
-    S = dict(made=time.strftime("%Y-%m-%d %H:%M"), conds={}, pairs={}, groups={}, cotravel={}, kin={}, ood={})
-    for c in CONDS:
-        if c not in have:
-            continue
-        b = load(c)
-        S["conds"][c] = dict(label=LABEL[c], cpu_h=round(b["cpu_s"] / 3600, 3), made=b["made"],
-                             n_bouts=int(sum(len(f["t"]) for grp in b["groups"] for f in grp)),
-                             **{k: v for k, v in b["spec"].items()})
-    for c in [k for k in CONDS if CONDS[k]["N"] == 2 and not CONDS[k]["blind"]]:
-        if c in have and blind_of(c) in have:
-            r = pairs_readout(c)
-            S["pairs"][c] = {lab: dict(ai_mean=float(np.mean(v["ai"])), ai_ci=_boot(v["ai"]),
-                                       ai=[float(a) for a in v["ai"]],
-                                       ai_folds=per_fold(v["ai"], CONDS[c]["G"]),
-                                       iad_med=float(np.median(v["iad_med"])),
-                                       iad_shift_med=float(np.median(v["iad_shift_med"])),
-                                       share_within_10mm=float(np.mean(v["dist"] <= 10.0)),
-                                       share_within_25mm=float(np.mean(v["dist"] <= 25.0)))
-                             for lab, v in r.items()}
-            d = np.array(r["coupled"]["ai"]) - np.array(r["blind"]["ai"])
-            S["pairs"][c]["paired_diff"] = dict(mean=float(d.mean()), ci=_boot(d))
-    for c in CONDS:
-        if CONDS[c]["N"] < 5 or CONDS[c]["blind"] or c not in have or blind_of(c) not in have:
-            continue
-        r = groups_readout(c)
-        G, N = CONDS[c]["G"], CONDS[c]["N"]
-        S["groups"][c] = dict(
-            D_mean=float(r["D"].mean()), D_sd=float(r["D"].std(ddof=1)), D_ci=r["D_ci"], D=r["D"].tolist(),
-            D_folds=per_fold(r["D"], G), D_tshift_mean=float(r["D_tshift"].mean()), D_tshift_ci=_boot(r["D_tshift"]),
-            D_fold_mean=float(r["D_fold"].mean()), D_fold_ci=_boot(r["D_fold"]),
-            D_blind_mean=float(r["D_blind"].mean()), D_blind_ci=_boot(r["D_blind"]), occupancy=r["occupancy"],
-            nn_mm=float(r["nn"].mean()), nn_shuf_mm=float(r["nn_shuf"].mean()), nn_blind_mm=float(r["nn_blind"].mean()),
-            iid_ratio=float(r["iid_ratio"].mean()), iid_ratio_ci=_boot(r["iid_ratio"]),
-            big_mean=float(r["big"].mean()), big_shuf=float(r["big_shuf"].mean()), big_blind=float(r["big_blind"].mean()),
-            share_half_together=float(np.mean(r["big"] >= N / 2)),
-            share_half_together_shuf=float(np.mean(r["big_shuf"] >= N / 2)),
-            share_half_together_blind=float(np.mean(r["big_blind"] >= N / 2)),
-            pol=float(r["pol"].mean()), pol_shuf=float(r["pol_shuf"].mean()),
-            nn_t=_minute_curve(r["taus"], r["nn"]), nn_shuf_t=_minute_curve(r["taus"], r["nn_shuf"][:G]),
-            nn_blind_t=_minute_curve(r["taus"], r["nn_blind"]))
-        if CONDS[c]["arena"] == 5:
-            ct = cotravel(c)
-            S["cotravel"][c] = {k: dict(per_pair_hour=v["per_pair_hour"], n_eps=int(len(v["eps"])),
-                                        eps_per_pair_hour=v["eps_per_pair_hour"],
-                                        longest=float(v["eps"].max()) if len(v["eps"]) else 0.0,
-                                        p95=float(np.percentile(v["eps"], 95)) if len(v["eps"]) else 0.0)
-                                for k, v in ct.items()}
-    for c in CONDS:
-        if CONDS[c]["blind"] or c not in have or blind_of(c) not in have:
-            continue
-        k = kinematics(c)
-        S["kin"][c] = {q: dict(median=float(np.median(k[q])), p10=float(np.percentile(k[q], 10)),
-                               p90=float(np.percentile(k[q], 90))) for q in ("rate", "step", "turn", "straight")}
-        S["ood"][c] = ood(c)
-    if save:
-        Path(out or (OUT / "summary.json")).write_text(json.dumps(S, indent=1, default=_json_default), encoding="utf-8")
-    return S
 
 
 
@@ -1069,11 +709,6 @@ def grid_readout(cond, n_pseudo=200, nb=500):
 
 
 def run_grid(workers=16, log=print):
-    import shutil
-    for nm, src in GRID_COPY.items():                   # identical specs, already simulated
-        if not (OUT / f"{nm}.pkl").exists() and (OUT / f"{src}.pkl").exists():
-            shutil.copyfile(OUT / f"{src}.pkl", OUT / f"{nm}.pkl")
-            log(f"copied {src}.pkl -> {nm}.pkl")
     todo = [c for c in GRID_CONDS if not (OUT / f"{c}.pkl").exists()]
     log(f"grid: {len(todo)} conditions to run")
     if todo:
@@ -1150,17 +785,6 @@ def analyse_grid(out=None, workers=8):
 
 
 
-def _minute_curve(taus, X):
-    """(minutes, mean, lo, hi) of rows of X (replicates x frames) in 1-min bins; CI = 2.5/97.5 % bootstrap over rows."""
-    X = np.atleast_2d(X)
-    mins = np.floor(taus / 60.0).astype(int)
-    out = []
-    rng = np.random.default_rng(0)
-    for m in np.unique(mins):
-        v = X[:, mins == m].mean(1)
-        bs = rng.choice(v, size=(500, len(v))).mean(1)
-        out.append((int(m), float(v.mean()), float(np.percentile(bs, 2.5)), float(np.percentile(bs, 97.5))))
-    return out
 
 
 def _json_default(o):
@@ -1186,10 +810,16 @@ def check_hook(tag="14f", T=600.0):
     """The provider hook ``block_time_s`` reproduces the generator's own clock bit for bit when it returns what the
     generator would compute (the recorded programme as a one-group scene)."""
     MF, SR = _imports()
-    from twin import multi_stim as MS
     prog, dsh, ref = MF._programme()
 
-    class Mirror(MS.ProgramGroupsProvider):
+    class ProgramGroups(SR.ProgramStimProvider):
+        """The recorded programme as a one-group scene: [the dots' centroid] in a stimulus block, [] in a pause."""
+
+        def groups(self, t, time_s, x, y, h):
+            cx, cy, mv, nd = self(t, time_s, x, y, h)
+            return [] if not np.isfinite(cx) else [(cx, cy, mv, nd)]
+
+    class Mirror(ProgramGroups):
         """Same scene, plus the hook replaying the generator's rule: restart when (moving, n) changes."""
         _c, _t0, _last = None, 0.0, ()
 
@@ -1211,7 +841,7 @@ def check_hook(tag="14f", T=600.0):
         rng_seed = [11, k]
         pose = ref.sample_start_pose(np.random.default_rng(rng_seed), dsh)
         res = []
-        for P in (MS.ProgramGroupsProvider, Mirror):
+        for P in (ProgramGroups, Mirror):
             rec = SR.make_synthetic_record(int(T / 0.05) + 100, pose, dsh, fish_id=k)
             res.append(m.sample(rec, np.random.default_rng(rng_seed), stim_provider=P(prog), stop_time_s=T,
                                 multi_rule="effects"))
@@ -1445,19 +1075,6 @@ def render_npz(npz, out_mp4, trail_s=4.0, dpi=110):
 # Notebook helpers: tables and figures from summary.json / checks.json / the pickles
 # --------------------------------------------------------------------------- #
 VIDEO_DIR = OUT / "videos"
-LIT_HARPAZ = {"7 dpf": (0.075, 0.067), "14 dpf": (-0.097, 0.083), "21 dpf": (-0.55, 0.24), "7 dpf, dark": (0.01, 0.068)}
-COLORS = {"coupled": "#1f77b4", "shuffled": "#ff7f0e", "blind": "#7f7f7f", "time-shifted": "#ff7f0e",
-          "chance": "#ff7f0e"}
-
-
-
-
-def shoaling(S, c, d_max=-0.1):
-    """The criterion for making a video: D's CI below 0 and D below ``d_max`` (about Harpaz's 14-dpf level)."""
-    d = S["groups"].get(c)
-    return bool(d and d["D_ci"][1] < 0 and d["D_mean"] < d_max)
-
-
 
 
 VIDEO_BODY_MM = 2.0   # Final_report_shoaling videos: each fish a dot 2 mm across (the collision distance), in dish units
