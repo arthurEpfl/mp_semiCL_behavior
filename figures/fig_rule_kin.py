@@ -4,8 +4,8 @@ the dots appeared at the same matched geometry (moving dots, |bearing| 45-135 de
 bin reweighted to one common cell mix). Real fish: the observed bout (geometric mean over a fish's bouts, mean over
 fish, 95 % bootstrap band over fish). M6 and F (both seeds): the teacher-forced expectation on the same held-out bouts
 (population latent; model_figures.conditional_kin for step and interval, given the real turn and step), mean over
-fish with a 95 % bootstrap interval over fish -- narrower than the real band by construction (an expectation, no
-single-bout scatter). Writes figures/out/fig_rule_3panel.pdf.
+fish; its 95 % interval over fish is built as the real one, on single bouts drawn from the model's predicted
+distributions (mean of N_DRAW draws). Writes figures/out/fig_rule_3panel.pdf.
 
     uv run python -m figures.fig_rule_kin            # build the kinematics cache if missing, draw
 """
@@ -34,7 +34,7 @@ def _kin_draws(MF, model, rec, rng, n_draw):
     cf = model._cfg_feat
     X = MF.MB.build_feature_matrix(rec, cf)
     az, lc, lt = MF.JT._cond_cols(rec.dtheta, rec.distance_px, cf["dth_scale"], cf["kin_scales"], y_dt=rec.dt_s)
-    with torch.no_grad(), MF.JT.repulsion_side(model, rec):
+    with torch.no_grad():
         _, dpar, tpar = model._model.joint_forward(torch.tensor(X), torch.tensor(az), torch.tensor(lc), torch.tensor(lt))
 
     def draw(par, hi):
