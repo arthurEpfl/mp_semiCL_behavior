@@ -50,7 +50,6 @@ Usage
         --output data/bouts_GsizeMotionSingle.csv
 """
 
-import argparse
 import re
 from pathlib import Path
 

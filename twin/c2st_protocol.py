@@ -19,7 +19,6 @@ Nothing here changes the harness; it measures what the harness's numbers contain
 from __future__ import annotations
 
 import json
-import sys
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 

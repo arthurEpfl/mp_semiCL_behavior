@@ -49,11 +49,8 @@ Usage
         --restarts 5 --min-len 10
 """
 
-import argparse
-from pathlib import Path
 
 import numpy as np
-from scipy.special import digamma, gammaln, polygamma
 
 # --------------------------- constants / conventions ------------------------ #
 STATE_NAMES = ["forward", "left", "right"]   # 0=F, 1=L (dtheta<0), 2=R (dtheta>0)

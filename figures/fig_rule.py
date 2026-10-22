@@ -21,63 +21,32 @@ Run:  uv run python -m figures.fig_rule                # build the head-gap cach
       uv run python -m figures.fig_rule --rebuild      # recompute the head gaps (14 jobs, <= 8 workers)
       (also writes $RF/figs/fig_rule_numbers.json)
 """
-import sys
-from pathlib import Path
 
 from figures.style import *  # noqa: F401,F403,E402
 
-import argparse  # noqa: E402
-import contextlib  # noqa: E402
-import io  # noqa: E402
-import json  # noqa: E402
-import os  # noqa: E402
-import pickle  # noqa: E402
-from concurrent.futures import ProcessPoolExecutor  # noqa: E402
 
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
-from matplotlib.colors import LinearSegmentedColormap, to_rgb  # noqa: E402
-from matplotlib.lines import Line2D  # noqa: E402
-from scipy import stats  # noqa: E402
 
 from twin import missing_pieces as P  # noqa: E402
 
-N_MAP = (2, 4, 6, 8)               # moving-dot counts pooled in the maps
 MIN_BOUTS, MIN_FISH = 5, 10        # a fish counts in a cell with >= MIN_BOUTS bouts; cell shown with >= MIN_FISH fish
-VMAX = 30.0
 RFROOT = REPORT_FINAL_DIR
 RF = RFROOT / "figs"
 CACHE = RFROOT / "cache"
-HG_CACHE = CACHE / "fig_rule_headgaps.pkl"
 
-# public name -> (seed 0 key, seed 101 key); CONTEXT.md
-GAP_UNITS = [("M1", "1", "34a"), ("M3", "3", "34c"), ("M4", "20f", "30a"), ("M5", "25d", "30b"),
-             ("M6", "26e", "30d"), ("D4", "11e", "32a"), ("F", "14f", "32b")]
-# summary key, head_gaps cell (cond, phase, qty), column label of (e); report_models._summary defines the keys
-GAPS = [("gap_onset_N8", ("d8s3.5", "0-4 s", "toward"), "turn toward\n8 dots, 0–4 s"),
-        ("gap_ahead_N8", ("d8s3.5", "20-60 s", "ahead"), "|Δθ|, 8 dots\nfar ahead, 20–60 s"),
-        ("gap_toward_N2", ("d2s3.5", "20-60 s", "toward"), "turn toward\n2 dots, 20–60 s")]
 SOURCES = [("real", "real fish", REAL_C, 0), ("M6 s0", "M6", MODEL_C["M6"], 0),
            ("M6 s101", "M6", MODEL_C["M6"], 101), ("F s0", "F", MODEL_C["F"], 0),
            ("F s101", "F", MODEL_C["F"], 101)]
-LAWS = [("onset_gain", "onset\n0–4 s"), ("steady_gain", "steady\n≥ 10 s"),
-        ("count_step", "count step\n2–8 vs 1 dot"), ("static_gain", "static\n≥ 10 s")]
-OTHER_C = "#8a8a8a"                # main-line / drift-branch units other than M6 and F in (e)
 UNIT_C = {"M6": MODEL_C["M6"], "F": MODEL_C["F"]}
-WHITE = "#ffffff"
-LABEL_DARK = "#000000"            # in-cell labels: black or white, whichever contrasts more (>= 4.58:1)
 
 
 
 
-STEPS = [("M1", "M3"), ("M3", "M4"), ("M4", "M5"), ("M5", "M6"), ("M3", "M6"), ("D4", "F"), ("M6", "F")]
 
 
 
 
-# --------------------------------------------------------------------------- drawing
-# sequential, one hue light -> dark (ColorBrewer Purples, its near-white end trimmed); purple is not a model colour
-CMAP = LinearSegmentedColormap.from_list("seqpurple", plt.get_cmap("Purples")(np.linspace(0.04, 0.95, 256)))
 
 
 

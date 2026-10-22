@@ -68,31 +68,19 @@ CLI
                                 --output runs/hmm_stim/comparison.mp4 --n 4
 """
 
-import argparse
-import sys
-from pathlib import Path
 
 import numpy as np
-from scipy.optimize import minimize
-from scipy.special import logsumexp
 
 from twin import fit_hmm as H                                   # emission / Gamma-MLE helpers
-from twin.segment_bouts import (parse_stimulus, wrap_pi, STIM_NONE, fish_prefix, FPS,
-                           PX_PER_MM)
+from twin.segment_bouts import wrap_pi, STIM_NONE, fish_prefix, FPS, PX_PER_MM
 
 STATE_NAMES = ["forward", "turn-", "turn+"]           # 0=F, 1=dtheta<0, 2=dtheta>0
-TURN_SIGN = np.array([0.0, -1.0, 1.0])                # c_j in the transition logit
 EPS = H.EPS
 # PIXEL-NATIVE: bout distances/positions are pixels. Rich stimulus features that
 # need a length scale use a SINGLE global nominal mm-per-px (matches how the dots
 # were placed, MM_TO_PX=3.67), not a per-fish scale.
 S_F = 1.0 / PX_PER_MM                                 # = 0.27248 mm/px (global)
 
-# Dish drawn by scripts/visualize.py (its argparse defaults == configs/default.toml).
-# The synthetic fish are CLAMPED to this same circle so they stay inside the drawn
-# dish -- exactly like the NN sampler (src/sampling.py). abs_dict fish coordinates
-# already live in this frame (all real fish stay within ~178 px of the centre).
-DISH_X, DISH_Y, DISH_RADIUS = 180.0, 174.0, 183.5
 
 
 # =========================================================================== #
@@ -112,7 +100,6 @@ def bias_from_phi(phi, present):
 # input-bias bins: the transition GLM M-step sums xi into ~40 bins of b in [-1,1]
 # so it optimises over (n_bins,3,3) instead of the full (N_transitions,3,3).
 _B_EDGES = np.linspace(-1.0, 1.0, 42)
-_B_CENTERS = 0.5 * (_B_EDGES[:-1] + _B_EDGES[1:])
 
 
 
@@ -132,35 +119,6 @@ def _stim01_frame(row, n_stimuli=8):
 
 
 
-# =========================================================================== #
-#  RICH / MULTI-COVARIATE STIMULUS MODEL
-# ---------------------------------------------------------------------------
-#  Instead of the single scalar b = sin(phi) (which collapses the whole dot
-#  group to its centroid bearing), the stimulus at each bout is described by a
-#  small feature vector that keeps group size, spatial spread, distance and
-#  speed. Per active dot k (at the bout onset), in the fish frame:
-#      r_k   = distance (mm),  phi_k = egocentric bearing,
-#      g(r)  = 1/(1 + r/R0)                      (retinal-size / proximity weight,
-#                                                 present even for static dots),
-#      vhat_k = dot speed / VREF                 (motion, 0 for static dots).
-#  Aggregated (NOT centroided) into two channels:
-#      presence:  L_prox = sum_k g_k sin phi_k ,  S_prox = sum_k g_k
-#      motion  :  L_mot  = sum_k g_k vhat_k sin phi_k ,  S_mot = sum_k g_k vhat_k
-#  (F_prox = sum_k g_k cos phi_k is a frontal/approach term, kept for optional
-#  step-size scaling in generation.) Static dots keep full PRESENCE weight, so a
-#  cluster of close non-moving dots is NOT zeroed out -- whether it matters is
-#  decided by the fitted presence gain, not assumed.
-#
-#  Transition GLM (respecting left/right symmetry), with sign pushes
-#  c=(0,-1,+1) (odd, which way) and e=(0,1,1) (even, whether to turn):
-#      steer_n = beta_odd . u_odd_n   (u_odd = [L_prox, L_mot])
-#      prop_n  = beta_even . u_even_n (u_even = [S_prox, S_mot])
-#      logit p(j|i) = logT0[i,j] + steer_n c_j + prop_n e_j
-#  so beta_odd steers toward near/fast/coherent groups and beta_even raises the
-#  turn propensity for salient groups. The forward emission drifts by g*steer_n.
-#  The simple model is the special case u_odd=[sin phi], u_even=[].
-# =========================================================================== #
-E_EVEN = np.array([0.0, 1.0, 1.0])           # even push (turn propensity)
 R0_MM = 20.0                                 # proximity softening (mm)
 VREF = 3.5                                   # speed normaliser (mm/s)
 

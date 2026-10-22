@@ -31,8 +31,6 @@ the archived panel to 1e-16), |dtheta| with the same win_acf1 (real within runs,
     uv run python -m figures.fig_slow
 """
 import glob
-import sys
-from pathlib import Path
 
 from figures.style import *  # noqa: F401,F403,E402
 

@@ -21,8 +21,6 @@ no-dot bouts, and the bearing products are 0 whenever the bearing is), which is 
 from __future__ import annotations
 
 import contextlib
-import sys
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -68,7 +66,6 @@ def zero_inputs(shoal_cols=(), align=False, static=False, stim_mode="shoal"):
         M.shoal_channels, M.static_channels, MB.align_feature = _shoal, _static, _align
 
 
-GNS = ("gns1", "gns2", "gns3", "gns4")
 
 
 def profile_variants(ckpt_dir, arm, variants, rej=None, r_per_model=10, progress=False):

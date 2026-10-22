@@ -50,8 +50,6 @@ Within this family it is fine.
 """
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 
 import numpy as np
 import torch
@@ -63,7 +61,6 @@ from twin import fit_MLP as M                     # noqa: E402
 from twin import fit_MLP_border as MB             # noqa: E402
 from twin import fit_MLP_mix as MX                # noqa: E402
 
-_EMPTY = np.zeros(0)                    # allocation-free stand-in for an absent feature block
 
 
 # =========================================================================== #
@@ -219,19 +216,6 @@ class MDNMixJoint(MX.MDNMix):
 _V3_LK_CLAMP = 3.0
 
 
-# V4 (Model 40): ONE SHIFT PER DOT COUNT in place of a + b (1 - exp(-(n - 1) / kappa)). The programme has only five
-# counts, so a table is as readable as the curve, and it removes the kappa-b trade-off Models 36/37 exposed (kappa ~1
-# with the log-kappa prior, 0.15-0.34 without it, at similar loss). It can also give 4-6 dots LESS than 2 dots, which a
-# saturating curve cannot -- needed because the base network already ramps with count (turn toward 11.9 -> 15.9 deg
-# from 2 to 8 dots), so v3's shared step over-attracted 4-6 dots (attraction 7.0 / 7.6 vs real 5.2 / 6.4).
-# Plus a LATE-BLOCK factor on the side shift: real fish relax back out after ~25 s, while a time-invariant turn term
-# can only deepen the dip by pulling harder all block (Model 36: plateau 16.3 vs real 17.3 mm). The side shift is
-# multiplied by 1 + tanh(gamma) (1 - exp(-t / 20 s)), t = time since the condition's first bout, read off the 4 s
-# block clock as exp(-t / 20) = clock ** (4 / 20); tanh keeps the factor in (0, 2), so the pull never flips sign.
-# Centroid (S4) layout only. Numbers: per bearing group (side, rear-side) b_1, b_2, b_4, b_6, b_8 and e (range);
-# group ahead h, k; late gamma -- 15, all zero at the start, so the term is exactly 0 (bit-identical to the base).
-V4_COUNTS = (1.0, 2.0, 4.0, 6.0, 8.0)
-V4_LATE_TAU_S = 20.0
 
 
 # V5 (report notebook, Model 11): COUNT-GATED terms -- every piece is multiplied by a count curve that is 0 at ONE
@@ -1077,6 +1061,10 @@ def generate_mix_joint_loop(model, rec, cfg_feat, rng, closed_loop=True, guardra
     if _re is not None:
         _sd_re = np.asarray(_re["sd"], float).reshape(-1)
         z_re = rng.spawn(1)[0].normal(size=_sd_re.shape[0]) * _sd_re
+        if _re.get("z_fixed") is not None:
+            # TWIN MODE (the profile correction's reference engine): a training fish's fitted embedding replaces
+            # the prior draw. The spawn above is still consumed, so every other stream is unchanged.
+            z_re = np.asarray(_re["z_fixed"], float).reshape(_sd_re.shape[0])
     # DRIFT. A slow AR(1) state s_t = phi s_{t-1} + sqrt(1 - phi^2) eps loading on the turn logit, the distance location
     # and the interval location. Drawn from a SPAWNED stream, so a model without it consumes identical main-stream
     # variates and stays CRN-paired.

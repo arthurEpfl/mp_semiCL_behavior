@@ -75,15 +75,11 @@ calibrate against a different law than the one evaluated.
 from __future__ import annotations
 
 import math
-import os
-import sys
-from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn as nn
 
-from twin import evaluate as E                    # noqa: E402
 from twin import fit_MLP as M                     # noqa: E402
 from twin import fit_MLP_border as MB             # noqa: E402
 from twin import fit_MLP_joint as JT              # noqa: E402
@@ -101,417 +97,67 @@ class MDNMixJointRE(JT.MDNMixJoint):
     fish. The random effect is reached through ``joint_forward_re``.
     """
 
-    def __init__(self, n_features, hidden, n_dist=2, n_dt=3, n_fish=1, m=2, sigma_init=0.5,
-                 use_body=False, border_gain=False, border_slice=None, dt_latent=None,
-                 block=False, drift=None, state=0, h0_dim=0, disp=False, lag_slice=None,
-                 tail=False, skip_slices=None, depth=1, tsize=False):
+    def __init__(self, n_features, hidden, n_dist=2, n_dt=3, n_fish=1, m=2, sigma_init=0.5, drift=None,
+                 skip_slices=None, depth=1, tsize=False):
         super().__init__(n_features, hidden, n_dist=n_dist, n_dt=n_dt, skip_slices=skip_slices,
                          depth=depth)
-        if skip_slices and int(state):
-            raise ValueError("the turn-head skip path is not implemented on the recurrent path")
-        # RECURRENT STATE. A GRU cell carried through the rollout, updated every bout, feeding all
-        # three heads. It replaces the whole hand-built latent zoo -- drift's pinned AR(1),
-        # fish_re's static z, kin_feedback's shrinkage -- with ONE object whose timescales are
-        # LEARNED. Under MLE those timescales were not identifiable (the likelihood put dt_latent's
-        # tau at 107-152 against a much shorter real value); under a rollout objective they are,
-        # because the statistic being scored IS the long-timescale one.
-        #
-        # The cell reads the feature row PLUS the previous emission, because in a free run the row
-        # already carries lagged turns and kinematics but not this bout's own outcome.
-        self.state_hidden = int(state)
-        # PER-FISH SEED FOR THE RECURRENT STATE (h0_dim > 0). Measured on gru1: with h_0 pinned at
-        # 0 the state produces excellent WITHIN-fish slow structure (var_ratio distance 0.63 ->
-        # 1.04, dt 0.44 -> 0.91) but essentially no BETWEEN-fish spread -- between_fish_share
-        # collapsed to 0.071 against a real 0.255, worse even than the MLP's 0.215. Individuality
-        # did not emerge endogenously from the sampled history, so it has to be given.
-        #
-        # A LOW-DIMENSIONAL latent projected into the state, not a free 64-d h_0, and that is what
-        # makes it affordable: Metric A must marginalise it out for a held-out fish, and a 2-d
-        # latent is a 49-node GHQ grid whose nodes BATCH through state_chain -- so the exact
-        # marginal costs about the same as a single pass, because the loop is dispatch-bound.
-        # Marginalising a full 64-d h_0 would be impossible; this is the same trick fish_re uses.
-        self.h0_dim = int(h0_dim) if self.state_hidden else 0
-        if self.h0_dim:
-            self.h0_map = nn.Linear(self.h0_dim, self.state_hidden, bias=False)
-            self.h0_emb = nn.Embedding(int(n_fish), self.h0_dim)
-            nn.init.normal_(self.h0_emb.weight, std=0.5)
-            nn.init.normal_(self.h0_map.weight, std=0.3)
-        if self.state_hidden:
-            self.state_cell = nn.GRUCell(n_features + 3, self.state_hidden)
-            w = hidden + self.state_hidden          # heads read [body(x), h]
-            self.head = nn.Linear(w, 14)
-            self.dist_head = nn.Linear(w + 1, 3 * int(n_dist))
-            self.dt_head = nn.Linear(w + 2, 3 * int(n_dt))
         # DRIFT: one AR(1) state loading on ALL THREE heads (see DRIFT_DEFAULT for the measurement
-        # that motivates it). Parameters exist only when enabled, so archived state_dicts load
-        # unchanged and `dt_latent` arms are untouched.
+        # that motivates it). Parameters exist only when enabled.
         self.drift = dict(DRIFT_DEFAULT, **drift) if drift else None
         if self.drift:
-            if dt_latent and not self.drift.get("dt_off"):
-                raise ValueError("drift and dt_latent are the same kind of object (an AR(1) state "
-                                 "on a head location) and would compete for the same variance; "
-                                 "drift already loads on dt. Enable one -- or set drift['dt_off'] "
-                                 "for the TWO-STATE design (slow chain on turn + step, dt_latent "
-                                 "as the faster interval chain).")
             # Same saddle argument as the fishre loadings: start SMALL BUT NONZERO. At lam = 0 every
             # level gives an identical likelihood, the posterior never leaves the prior, and the
             # state is silently inert for the whole fit.
             li = float(self.drift["lam_init"])
-            if self.drift.get("turn_off"):
-                # TURN LOADING OFF. Model 9: without the interval lags the state became a large
-                # "vigour" state (turn loading +-0.5-0.8) whose swings the step lags amplified into a
-                # 3x window-to-window step variance on the S3 arms; the real turn slow-acf is weak
-                # (+0.13). A buffer, exactly 0, so the state is kinematic only.
-                self.register_buffer("d_turn", torch.tensor(0.0))
-            else:
-                self.d_turn = nn.Parameter(torch.tensor(li))
+            self.d_turn = nn.Parameter(torch.tensor(li))
             self.d_dist = nn.Parameter(torch.tensor(li))
-            if self.drift.get("dt_off"):
-                # TWO-STATE DESIGN. The real window-acf profile decays slowly for step / radial
-                # (tau ~70+) and fast for the interval (tau ~20-40), so one shared timescale is right
-                # for the step and wrong for the interval: the dt loading of the shared state never
-                # settled (-0.04..+0.10 across folds) while the step loading did (+0.10..+0.14). Here
-                # the slow chain loads on turn + step only and the interval gets its own chain
-                # (dt_latent with a PINNED phi). A buffer, not a Parameter: no gradient, saved as
-                # exactly 0, and every consumer of d_dt (`_params_at`, the published cfg) is unchanged.
-                self.register_buffer("d_dt", torch.tensor(0.0))
-            else:
-                self.d_dt = nn.Parameter(torch.tensor(li))
-            # d_bord is NOT a Parameter and that is deliberate. It scales `centre_bias`, which is a
-            # GENERATION-TIME term applied inside the rollout -- it appears nowhere in the
-            # likelihood, so there is no gradient to fit it with and pretending otherwise would give
-            # a parameter that silently never moves. It is fitted by the rollout search
-            # (MX._search_drift_gain) against the measured radial acf, and carried as a plain float.
+            self.d_dt = nn.Parameter(torch.tensor(li))
+            # d_bord (the drift's loading on a containment bias, a generation-time term) is 0 in every model here
             self.d_bord = float(self.drift.get("bord", 0.0))
-        # SLOW TIMING STATE (see the tauchen section above). Scoped to the interval head's
-        # location; the parameters exist only when enabled, so archived state_dicts load unchanged.
-        self.dt_latent = dict(DT_LATENT_DEFAULT, **dt_latent) if dt_latent else None
-        if self.dt_latent:
-            # lam starts SMALL BUT NONZERO, not at 0. lam = 0 is not a saddle for lam itself (the
-            # gradient is E_j[s_j * d logpdf/d mu], generally nonzero), but it IS one for phi: with
-            # lam = 0 every level gives an identical likelihood, the posterior never leaves the
-            # prior, and d/dphi is exactly zero. Starting lam off zero gives the timescale gradient
-            # from the first step instead of making it wait for lam to drift.
-            self.s_lam = nn.Parameter(torch.tensor(float(self.dt_latent["lam_init"])))
-            # phi_fixed: PIN the timescale at an independently measured value and fit only the
-            # amplitude. Round 2a fitted phi freely and it settled at tau = 107-152 bouts against a
-            # measured real slow timescale of ~55 -- slow enough that on a 4700-bout record the
-            # state stops being a within-trajectory phenomenon and starts impersonating the
-            # per-fish latent, which is why it inflated EVERY head (dist 143%, dt 158%) and pushed
-            # between_fish_share to 0.304 against a real 0.255. Pinning removes that competition by
-            # construction rather than by a bound the optimiser can crawl toward, and it is the
-            # same discipline the loading gain follows: timescale measured, everything else ML.
-            # No s_phi_raw parameter is created at all, so it cannot drift and cannot be restored
-            # into a free state by a later refit.
-            if self.dt_latent.get("phi_fixed") is None:
-                p0 = float(np.clip(self.dt_latent["phi_init"], PHI_LO + 1e-4, PHI_HI - 1e-4))
-                u = (p0 - PHI_LO) / (PHI_HI - PHI_LO)
-                self.s_phi_raw = nn.Parameter(torch.tensor(float(np.log(u / (1.0 - u)))))
         self.m = int(m)
         self.n_fish = int(n_fish)
-        self.use_body = bool(use_body)
-        # LIKELIHOOD-VISIBLE spatial individuality (re_bgain): a per-fish GAIN on the border
-        # input columns, g = exp(clamp(b.z, -1.5, 1.5)) -- how strongly this fish responds to
-        # the wall covariate is itself a fitted trait. This is the CONSTRAINED entry point the
-        # body path was not: one scalar direction that can only amplify/attenuate the wall
-        # response, not reshape arbitrary conditionals. The parameter exists only when enabled,
-        # so archived state_dicts load unchanged. Use with re_m=3: at m=2 the two axes are
-        # already claimed (turn style, tempo) and a border gain through them would force spatial
-        # personality to be a linear combination of the other two, which the ICCs contradict.
-        self.border_gain = bool(border_gain)
-        self.border_slice = tuple(border_slice) if border_slice is not None else None
-        # BLOCK-STRUCTURED LATENT. Without it every loading reads every dimension, so "re_m=3 gives
-        # re_bgain a spatial axis" was a hope, not a constraint -- three free dimensions fed four
-        # loadings and the extra capacity went to noise, which is exactly what the m=3 arm measured
-        # (fitted gain 0.28-0.40, the pre-registered fitting-noise band). With block=True the first
-        # `n_core = m - 1` dimensions feed turn/dist/dt and the LAST one feeds the border gain and
-        # nothing else.
-        #
-        # Enforced by the WEIGHT SHAPES, not by slicing at call time: there is simply no parameter
-        # connecting the spatial dimension to the turn head, so leakage is impossible rather than
-        # merely absent. (A runtime slice with full-width Linears would leave the weights there,
-        # one refactor away from being read again.) Archived checkpoints are unaffected because
-        # block defaults False and the shapes stay (m, 1).
-        self.block = bool(block)
-        if self.block and not self.border_gain:
-            raise ValueError("block=True is meaningless without border_gain: there would be no "
-                             "second block for the reserved dimension to feed.")
-        if self.block and self.m < 2:
-            raise ValueError(f"block=True needs m >= 2 (got {self.m}): one dimension is reserved "
-                             "for the border gain, leaving none for turn/dist/dt.")
-        self.n_core = (self.m - 1) if self.block else self.m
-        n_sp = self.m - self.n_core if self.block else self.m
         self.emb = nn.Embedding(self.n_fish, self.m)
         self.z_body = nn.Linear(self.m, hidden, bias=False)
-        self.z_turn = nn.Linear(self.n_core, 1, bias=False)
-        self.z_dist = nn.Linear(self.n_core, 1, bias=False)
-        self.z_dt = nn.Linear(self.n_core, 1, bias=False)
-        if self.border_gain:
-            if self.border_slice is None:
-                raise ValueError("border_gain=True needs border_slice=(start, stop)")
-            self.z_bord = nn.Linear(n_sp, 1, bias=False)
+        self.z_turn = nn.Linear(self.m, 1, bias=False)
+        self.z_dist = nn.Linear(self.m, 1, bias=False)
+        self.z_dt = nn.Linear(self.m, 1, bias=False)
         # BOTH factors must start nonzero. z enters only as (loading x embedding), so zeroing both
         # -- the tempting "start exactly at the population model" init -- is an exact saddle: the
         # gradient w.r.t. the embedding is proportional to the loadings and vice versa, so both stay
-        # at zero forever and the mechanism is silently inert for the whole fit. (Measured: the MAP
-        # embedding spread came out exactly [0, 0].) The embedding is drawn from the prior, which is
-        # what an empirical-Bayes initialisation should be; the loadings get a small random init so
-        # the function still starts within noise of the population model.
+        # at zero forever and the mechanism is silently inert for the whole fit. The embedding is
+        # drawn from the prior, which is what an empirical-Bayes initialisation should be; the
+        # loadings get a small random init so the function still starts within noise of the
+        # population model.
         nn.init.normal_(self.emb.weight, std=float(sigma_init))
         for lin in (self.z_turn, self.z_dist, self.z_dt):
             nn.init.normal_(lin.weight, std=0.1 / max(float(sigma_init), 1e-6) / self.m ** 0.5)
-        if self.border_gain:
-            # same saddle-avoidance as the other loadings: zero-init would never leave zero
-            nn.init.normal_(self.z_bord.weight,
-                            std=0.1 / max(float(sigma_init), 1e-6) / self.m ** 0.5)
-
-        # DISPERSION AXIS (re_disp, Model 12). z also loads on the interval head's pre-softplus
-        # WIDTHS, one loading per mixture component. MEASURED need: the between-fish spread of the
-        # step is a level effect (SD/median 0.43-0.58 across the 15 fish) and the location loading
-        # reproduces it, but the interval's is not (SD/median 0.74-1.20; fish 0 has 3x the typical
-        # rate of > 5 s intervals on top of being the slowest), so the top fish on interval spread
-        # is unreachable by a location shift. Same saddle rule as the other loadings: small nonzero
-        # init. Applied identically in the numpy generator (JT._numpy_predictor_joint).
-        self.disp = bool(disp)
-        if self.disp:
-            self.z_dt_sig = nn.Linear(self.n_core, int(n_dt), bias=False)
-            nn.init.normal_(self.z_dt_sig.weight, std=0.1 / max(float(sigma_init), 1e-6) / self.m ** 0.5)
         # TURN SIZE (re_tsize, Model 38): z also loads, through ONE shared loading, on the pre-softplus SCALES of the
         # four turning Gamma components (turn-head outputs 7, 9, 11, 13), so how far a fish turns when it turns is a
-        # trait alongside how often it swims straight (the forward logit, z_turn). MEASURED (clean data): mean turn
-        # size of the turning bouts spans 42-64 deg across the 15 fish, split-half r = 0.95, and accounts for most of
-        # the between-fish spread of mean |dtheta|, which the forward logit alone cannot reach. Symmetric left/right,
-        # and linear in z, so its mean over N(0, I) is zero: no re-centring. Same saddle rule as the other loadings.
-        # Applied identically in the numpy generator (JT._numpy_predictor_joint).
+        # trait alongside how often it swims straight (the forward logit, z_turn). Symmetric left/right and linear
+        # in z, so its mean over N(0, I) is zero: no re-centring. Applied identically in the numpy generator.
         self.tsize = bool(tsize)
         if self.tsize:
             # the global RNG is restored afterwards, so every OTHER weight starts exactly as in the same model without
             # the loading (a paired comparison, not one confounded by an initialisation redraw)
             _rng_state = torch.get_rng_state()
-            self.z_tsize = nn.Linear(self.n_core, 1, bias=False)
+            self.z_tsize = nn.Linear(self.m, 1, bias=False)
             nn.init.normal_(self.z_tsize.weight, std=0.1 / max(float(sigma_init), 1e-6) / self.m ** 0.5)
             torch.set_rng_state(_rng_state)
-        # LAG SLOPE (re_lag, Model 12): a z x interval-lag interaction on the interval head's
-        # location -- mu_dt += sum_k (L z)_k * x[lag_k] over the interval-lag columns of the feature
-        # row (``lag_slice``), so how strongly one interval predicts the next is itself a fish trait
-        # (burstiness: fish 6's within-window lag-1 acf is 0.19 against 0.02-0.09 for the rest).
-        # Not on the recurrent path: the GRU trunk does not expose the feature row.
-        self.lag_slice = tuple(int(v) for v in lag_slice) if lag_slice else None
-        if self.lag_slice:
-            if self.state_hidden:
-                raise ValueError("re_lag is not implemented on the recurrent (state) path")
-            self.z_lag = nn.Linear(self.n_core, self.lag_slice[1] - self.lag_slice[0], bias=False)
-            nn.init.normal_(self.z_lag.weight, std=0.1 / max(float(sigma_init), 1e-6) / self.m ** 0.5)
-        # TAIL WEIGHT (re_tail, Model 13): z loads on the interval mixture's component LOGITS, so
-        # how OFTEN a fish produces long intervals is a trait, independent of its level. MEASURED
-        # (Model 11 S3 arm, teacher-forced at fish 0's own fitted z): the model puts 2.5-5.0 % of
-        # intervals above 5 s against the fish's real 6.2 % (population fish 2-3.6 %), and fish 6
-        # (real 0.9 %) comes out 1.1-2.6 % -- a location shift cannot express the tail rate; the
-        # dispersion loading (Model 12) widened every fish instead. Bounded by the softmax, so no
-        # re-centring; gets its OWN rollout gain (search_tail_gain, matched to the between-fish
-        # spread of the window interval spread), not the interval gain that is matched to the mean.
-        self.tail = bool(tail)
-        if self.tail:
-            self.z_dt_w = nn.Linear(self.n_core, int(n_dt), bias=False)
-            nn.init.normal_(self.z_dt_w.weight, std=0.1 / max(float(sigma_init), 1e-6) / self.m ** 0.5)
-
-        # z_body stays EXACTLY zero unless explicitly enabled, so it receives no gradient and the
-        # mechanism is genuinely level-only. See the class docstring for why this defaults off.
-        if self.use_body:
-            nn.init.normal_(self.z_body.weight,
-                            std=0.1 / max(float(sigma_init), 1e-6) / self.m ** 0.5)
-        else:
-            nn.init.zeros_(self.z_body.weight)
+        # z_body stays EXACTLY zero, so it receives no gradient and the latent is level-only (see
+        # joint_forward_re); kept because the checkpoints carry it.
+        nn.init.zeros_(self.z_body.weight)
 
     def _z_core(self, z):
-        """The dimensions that feed turn / distance / interval."""
-        return z[:, :self.n_core] if self.block else z
-
-    def _z_spatial(self, z):
-        """The dimensions that feed the border gain (all of them unless block-structured)."""
-        return z[:, self.n_core:] if self.block else z
-
-    def s_phi(self):
-        """Fitted AR(1) persistence, bounded into [0.50, 0.999].
-
-        The upper bound is not cosmetic: at phi = 1 the chain is a random walk, the stationary
-        variance the whole parameterisation assumes stops existing, and the free-run wanders --
-        the same near-unit-root failure the kin memory work measured at K = 32 (acf@50 +0.57
-        against a real +0.042) with no detector anywhere in the pipeline."""
-        pf = (self.dt_latent or {}).get("phi_fixed")
-        if pf is not None:
-            return torch.tensor(float(pf), dtype=torch.float32,
-                                device=self.s_lam.device)     # constant: no gradient, no drift
-        return PHI_LO + (PHI_HI - PHI_LO) * torch.sigmoid(self.s_phi_raw)
-
-    def h0_from(self, w):
-        """(B, state_hidden) initial GRU state from the per-fish latent ``w`` (B, h0_dim).
-
-        ``tanh`` because a GRU hidden unit lives in (-1, 1): an unbounded seed would start the
-        trajectory outside the range the cell's own dynamics can produce, and the first bouts would
-        be spent relaxing back rather than expressing the fish.
-        """
-        return torch.tanh(self.h0_map(w))
-
-    def state_chain(self, X, a_z, ld_c, u, ya, yd, yt, h0=None, z=None):
-        """(la, ld, lt, h_T): teacher-forced per-bout log-densities along B ordered sequences.
-
-        THE POINT OF TEACHER FORCING. With the targets observed the GRU is deterministic, so
-        ``log p(y_1..T | latent) = sum_t log p(y_t | y_<t, latent)`` is exact with no marginalisation
-        INSIDE the chain -- no forward recursion, no product grid over time. Any per-trajectory
-        latent is therefore STATIC given the sequence, and integrating it out is a plain reweighting
-        of B parallel chains (see ``score``). That is what keeps Metric A exact for a recurrent
-        model, and it is why a full 64-d random ``h_0`` is not offered: it could not be integrated
-        affordably, and putting the headline number behind an approximation is not worth it.
-
-        TWO LATENTS, TWO JOBS, AND THEY ARE NOT INTERCHANGEABLE.
-          * ``z`` (fish_re) shifts the three head LOCATIONS -- a static per-fish offset. This is
-            BETWEEN-fish identity, and it is the quantity gru1 measured at 0.071 against a real
-            0.255 with no latent at all.
-          * the GRU state ``h`` evolves bout to bout. This is WITHIN-fish slow structure, and it is
-            the quantity gru1 fixed (var_ratio distance 0.63 -> 1.04, dt 0.44 -> 0.91).
-        gru1 moved those two independently, which is the measurement saying they are ORTHOGONAL --
-        so the "three mechanisms competing for one variance" objection that kept fish_re off does
-        not apply to this pair. ``z`` is applied EXACTLY as ``joint_forward_re`` applies it, and
-        exactly as ``rollout_torch.rollout`` already did at generation time; before this the
-        recurrent path silently bypassed the latent on BOTH the train and score sides while the
-        generator was still applying it, which is the two-objects trap in its purest form.
-
-        Shapes: ``X`` (B, T, D); ``a_z`` / ``ld_c`` / ``ya`` / ``yd`` / ``yt`` (B, T); ``u`` (B, T, 3)
-        is the GRU's emission input and MUST be built the same way the rollout builds it
-        (``[dtheta/dth_scale, ld_c, (log dt - tm)/ts]``) -- if the two disagree, the state means one
-        thing at train time and another at generation time, which is this project's oldest trap.
-        ``z`` is (B, m), ONE latent per sequence, broadcast over T because it is static.
-        Returns the final state so a long record can be scored in chunks that carry it across.
-        """
-        B, T, _ = X.shape
-        h = torch.zeros((B, self.state_hidden), device=X.device) if h0 is None else h0
-        # None rather than a zero vector when the latent is off: `z_turn(0)` is numerically the same
-        # but not the same GRAPH, and the pinned-latent arm (gru1) has to stay bit-identical.
-        zc = None if z is None else self._z_core(z)
-        la, ld, lt = [], [], []
-        for t in range(T):
-            x = X[:, t]
-            trunk = torch.cat([self.body(x), h], dim=1)
-            out, do, to = self._state_heads(trunk, a_z[:, t:t + 1], ld_c[:, t:t + 1], zc)
-            ang, dpar, tpar = self._params_at(out, do, to)
-            la.append(MX.mix_logdens(ya[:, t], ang))
-            ld.append(MX._lnk_logpdf(torch.clamp(yd[:, t], min=1e-6), *dpar))
-            lt.append(MX._dt_logpdf(torch.clamp(yt[:, t], min=1e-6), *tpar, hi=self.dt_trunc))
-            h = self.state_cell(torch.cat([x, u[:, t]], dim=1), h)
-        return (torch.stack(la, 1), torch.stack(ld, 1), torch.stack(lt, 1), h)
-
-    def _state_heads(self, trunk, a_z_t, ld_c_t, zc):
-        """Raw head outputs ``(out, do, to)`` from a recurrent trunk ``[body(x), h]``.
-
-        Factored out ONLY so ``state_chain`` and ``state_chain_levels`` cannot drift apart: they must
-        apply the per-fish latent identically or the likelihood and its level-marginalised version
-        would describe different models. Returns the RAW outputs so ``_params_at`` -- shared with the
-        non-recurrent path -- owns the drift shift and the softplus/softmax, in one place.
-        """
-        k, kt = self.n_dist, self.n_dt
-        out = self.head(trunk)
-        do = self.dist_head(torch.cat([trunk, a_z_t], dim=1))
-        to = self.dt_head(torch.cat([trunk, a_z_t, ld_c_t], dim=1))
-        if zc is not None:
-            out = self._turn_with_z(torch.cat([out[:, :1] + self.z_turn(zc), out[:, 1:]], dim=1), zc)
-            do = torch.cat([do[:, :k], do[:, k:2 * k] + self.z_dist(zc), do[:, 2 * k:3 * k]], dim=1)
-            to = self._dt_with_z(to, zc)
-        return out, do, to
+        """The dimensions that feed turn / distance / interval (all of them)."""
+        return z
 
     def _dt_with_z(self, to, zc, x=None):
-        """The interval head's raw outputs with EVERY z loading applied, in one place so the
-        non-recurrent and recurrent paths cannot drift apart: the location shift (z_dt), the
-        dispersion loading on the pre-softplus widths (re_disp) and the lag-slope term (re_lag:
-        z x the interval-lag columns of ``x``, on the location)."""
+        """The interval head's raw outputs with the latent's location shift (z_dt)."""
         kt = self.n_dt
         lg = to[:, :kt]
         mu = to[:, kt:2 * kt] + self.z_dt(zc)
         sig = to[:, 2 * kt:3 * kt]
-        if getattr(self, "tail", False):
-            lg = lg + self.z_dt_w(zc)
-        if getattr(self, "disp", False):
-            sig = sig + self.z_dt_sig(zc)
-        if getattr(self, "lag_slice", None) is not None:
-            if x is None:
-                raise ValueError("re_lag needs the feature row on this path")
-            s0, s1 = self.lag_slice
-            mu = mu + (self.z_lag(zc) * x[:, s0:s1]).sum(dim=1, keepdim=True)
         return torch.cat([lg, mu, sig], dim=1)
-
-    def state_trunks(self, X, u, h0=None):
-        """(B, T, hidden + state_hidden): the recurrent trunk ``[body(x_t), h_t]`` at every bout.
-
-        THE COST ARGUMENT, and the reason a product grid is affordable on a recurrent model at all.
-        The GRU reads only the feature row and the OBSERVED previous emission -- it sees neither the
-        per-fish latent ``z`` nor the drift level ``s``. So the recurrent pass is computed ONCE per
-        record and every one of the Q x L (z-node, drift-level) combinations reuses it; the grid then
-        costs three small head evaluations per combination, not a re-run of the state.
-
-        That is what turns 49 x 9 = 441 states per bout into the same order of cost the `dt_latent`
-        arm already paid, rather than another 3969-state refusal.
-        """
-        B, T, _ = X.shape
-        h = torch.zeros((B, self.state_hidden), device=X.device) if h0 is None else h0
-        tr = []
-        for t in range(T):
-            x = X[:, t]
-            tr.append(torch.cat([self.body(x), h], dim=1))
-            h = self.state_cell(torch.cat([x, u[:, t]], dim=1), h)
-        return torch.stack(tr, dim=1)
-
-    def state_chain_levels(self, X, a_z, ld_c, u, ya, yd, yt, nodes, h0=None, z=None,
-                           trunks=None, split=False):
-        """Per-bout log-likelihood at each drift level, with the GRU state carried.
-
-        ``split=False`` (the trainer) returns (B, T, L) with turn + distance + interval SUMMED and
-        the kinematic masks folded in -- what the forward recursion consumes. The drift loads on all
-        three, which is the whole point of it over ``dt_latent`` and the only way to reproduce the
-        real cross-channel coupling (corr(log dt, log dist) = -0.386, corr(log dt, |dth|) = +0.308)
-        that three independent per-channel latents sit at ~0 on by construction.
-
-        ``split=True`` (the scorer) returns the three channels SEPARATELY, each (B, T, L), unmasked.
-        They have to be apart there because the scorer reweights the belief WITHIN a bout, in the
-        same chained order the model factorises: distance is scored under a posterior that has
-        already seen this bout's turn, and the interval under one that has also seen its distance.
-        Summing first would double-count the evidence and the three would no longer chain-rule to
-        log p(dtheta, l, tau | past).
-
-        Masked kinematic bouts contribute 0 to EVERY level in the summed form -- not NaN, and not a
-        real density -- so the chain still transitions through them without the belief being updated
-        by a bout the model was never fitted on.
-        """
-        B, T, _ = X.shape
-        if trunks is None:
-            trunks = self.state_trunks(X, u, h0)
-        # FLATTEN (B, T) -> rows and evaluate the heads ONCE over every bout. Only the GRU needs a
-        # Python loop over time (it is a recursion); the heads are position-independent given the
-        # trunk, so looping them per bout costs Q x T x L iterations where Q x L suffices. Measured
-        # the wrong way round first: scoring one 3257-bout record was ~1.4M head calls.
-        tr = trunks.reshape(B * T, -1)
-        zc = None
-        if z is not None:
-            # one z per SEQUENCE, so repeat it down the flattened rows -- interleaved to match
-            # reshape's row-major order, or fish i's latent would be applied to fish j's bouts.
-            zc = self._z_core(z).repeat_interleave(T, dim=0)
-        out, do, to = self._state_heads(tr, a_z.reshape(-1, 1), ld_c.reshape(-1, 1), zc)
-        ydc = torch.clamp(yd.reshape(-1), min=1e-6)
-        ytc = torch.clamp(yt.reshape(-1), min=1e-6)
-        yaf = ya.reshape(-1)
-        pa, pd, pt = [], [], []
-        for j in range(nodes.shape[0]):
-            ang, dpar, tpar = self._params_at(out, do, to, nodes[j])
-            pa.append(MX.mix_logdens(yaf, ang))
-            pd.append(MX._lnk_logpdf(ydc, *dpar))
-            pt.append(MX._dt_logpdf(ytc, *tpar, hi=self.dt_trunc))
-        la = torch.stack(pa, 1).reshape(B, T, -1)
-        ld = torch.stack(pd, 1).reshape(B, T, -1)
-        lt = torch.stack(pt, 1).reshape(B, T, -1)
-        if split:
-            return la, ld, lt
-        md = (torch.isfinite(yd) & (yd > 0)).float().unsqueeze(2)
-        mt = (torch.isfinite(yt) & (yt > 0)).float().unsqueeze(2)
-        return la + md * ld + mt * lt
 
     def d_phi(self):
         """Drift persistence -- a CONSTANT, pinned from ``tau``, never a parameter.
@@ -523,17 +169,6 @@ class MDNMixJointRE(JT.MDNMixJoint):
         """
         return torch.tensor(drift_phi(self.drift["tau"]), dtype=torch.float32,
                             device=self.d_turn.device)
-
-    def dt_level_logliks(self, tpar, y_dt, nodes):
-        """(n, L) ``log p(tau | ..., s = nodes[j])``, reusing ONE dt-head forward pass.
-
-        The latent only shifts the interval mixture's LOCATION, so the head output is computed
-        once and each level costs a single log-normal-mixture evaluation rather than a full
-        forward pass. That is what keeps an L-level marginalisation affordable inside training."""
-        logw, mu, sig = tpar
-        y = torch.clamp(y_dt, min=1e-6)
-        return torch.stack([MX._dt_logpdf(y, logw, mu + self.s_lam * nodes[j], sig, hi=self.dt_trunc)
-                            for j in range(nodes.shape[0])], dim=1)
 
     def joint_forward_re(self, x, a_z, ld_c, z):
         """Same chain as ``joint_forward`` with the latent added. ``z`` is (n, m).
@@ -577,14 +212,7 @@ class MDNMixJointRE(JT.MDNMixJoint):
 
     def _trunk_turn(self, x, z):
         """(body activation, core latent, turn head's raw outputs, x as the heads read it)."""
-        if self.border_gain:
-            # bounded per-fish gain on the border columns only: exp(+-1.5) caps the swing at
-            # 0.22-4.5x, and clamp(0)=0 keeps the z=0 path (joint_forward, the population fish)
-            # bit-identical to a net without the mechanism.
-            g = torch.exp(torch.clamp(self.z_bord(self._z_spatial(z)), -1.5, 1.5))
-            s0, s1 = self.border_slice
-            x = torch.cat([x[:, :s0], x[:, s0:s1] * g, x[:, s1:]], dim=1)
-        b = torch.relu(self.body[0](x) + self.z_body(z)) if self.use_body else self.body(x)
+        b = self.body(x)
         zc = self._z_core(z)
         h = self.head(b) + self.skip_term(x)
         out = self._turn_with_z(torch.cat([h[:, :1] + self.z_turn(zc), h[:, 1:]], dim=1), zc)
@@ -653,45 +281,6 @@ class MDNMixJointRE(JT.MDNMixJoint):
                        + mt * MX._dt_logpdf(ytc, *tpar, hi=self.dt_trunc))
         return torch.stack(lev, dim=1)
 
-    def two_chain_logliks(self, x, a_z, ld_c, z, ya, yd, yt, nodes_d, nodes_s):
-        """TWO-STATE design (drift with ``dt_off`` + ``dt_latent``): per-bout log-likelihood of
-        turn + step at each SLOW-chain level, (n, L_d), and of the interval at each FAST-chain
-        level, (n, L_s), from ONE trunk pass. Masked kinematic bouts contribute 0 to every level.
-
-        Given z the two chains see disjoint channels (the within-bout conditioners |dtheta| and
-        log l are observed, so the interval head's dependence on them is not a dependence on the
-        slow state), so the joint marginal is the SUM of two independent forward recursions --
-        2 x L levels, not L^2. That is what makes the second state affordable in the scorer.
-        """
-        out, do, to = self._trunk(x, a_z, ld_c, z)
-        md = (torch.isfinite(yd) & (yd > 0)).float()
-        mt = (torch.isfinite(yt) & (yt > 0)).float()
-        ydc = torch.clamp(yd, min=1e-6)
-        lev = []
-        for j in range(nodes_d.shape[0]):
-            ang, dpar, _ = self._params_at(out, do, to, nodes_d[j])
-            lev.append(MX.mix_logdens(ya, ang) + md * MX._lnk_logpdf(ydc, *dpar))
-        tpar = self._params_at(out, do, to)[2]             # d_dt is 0: no slow-chain shift on dt
-        lt = mt.unsqueeze(1) * self.dt_level_logliks(tpar, yt, nodes_s)
-        return torch.stack(lev, dim=1), lt
-
-
-# =========================================================================== #
-#  Per-bout log-likelihood, shared by the trainer, the EM step and the scorer
-# =========================================================================== #
-def state_gru_input(y_ang, y_dist, y_dt, dth_scale, kin_scales):
-    """(n, 3) the GRU's emission input: ``[dtheta/dth_scale, ld_c, (log dt - tm)/ts]``.
-
-    ONE definition, used by both the teacher-forced chain and the torch rollout, so the state
-    cannot mean different things at train and generation time.
-    """
-    dm, ds, tm, ts = kin_scales
-    a = np.asarray(y_ang, float) / float(dth_scale)
-    d = (np.log(np.clip(np.asarray(y_dist, float), 1e-6, None)) - dm) / ds
-    t = (np.log(np.clip(np.asarray(y_dt, float), 1e-6, None)) - tm) / ts
-    return np.nan_to_num(np.stack([a, d, t], axis=1)).astype(np.float32)
-
-
 def _chan_logliks(net, Xt, az, lc, ya, yd, yt, z):
     """(la, ld, lt, md, mt): per-bout log-densities for the three channels at latent ``z``.
 
@@ -729,9 +318,6 @@ def _chan_logliks(net, Xt, az, lc, ya, yd, yt, z):
 # per-state emission spends its states on the MARGINAL instead -- it learns a "long pause" mode
 # and a "short bout" mode, dwell collapses to a couple of bouts, and what looks like a latent is
 # really a mixture model. Constrain it to shift the level and nothing else.
-PHI_LO, PHI_HI = 0.50, 0.999
-DT_LATENT_DEFAULT = {"n_levels": 9, "chunk": 256, "phi_init": 0.97, "span": 3.0, "lam_init": 0.15}
-
 # =========================================================================== #
 #  DRIFT: the same AR(1) chain, but loading on EVERY channel instead of only dt
 # =========================================================================== #
@@ -813,59 +399,6 @@ DRIFT_TAU_BOUTS = 70.0
 DRIFT_DEFAULT = {"n_levels": 9, "chunk": 256, "span": 3.0, "lam_init": 0.15,
                  "tau": DRIFT_TAU_BOUTS, "bord": 0.0,
                  "g_dist": 1.0, "g_dt": 1.0, "dist_c": 0.0, "dt_c": 0.0}
-
-
-# =========================================================================== #
-#  SCHEDULED SAMPLING on the lag inputs (Bengio et al. 2015)
-# =========================================================================== #
-# WHY. Real steps and intervals persist bout to bout for three reasons -- a fish-level tempo, a slow
-# drift over minutes, and genuine bout-to-bout dependence -- and a teacher-forced fit has only the
-# third, so its lag coefficients absorb the other two (omitted-variable bias). In the free run the
-# inflated coefficients show up as too-high WITHIN-window acf (dist_acf1 0.263 vs real 0.198 before
-# the per-fish latent, dt_acf1 0.144 vs 0.073) and too-wide interval spread. The drift above puts
-# the missing slow state INTO the likelihood; scheduled sampling instead trains the conditional on
-# the inputs it will actually see in a rollout: with probability 1 - p the lagged (dtheta, distance,
-# dt) a bout is conditioned on are the MODEL'S OWN one-step draws for those earlier bouts rather than
-# the recorded values, p decaying linearly from 1 (teacher forcing) to `p_min` over `decay` epochs
-# after `warmup` epochs of plain fitting. Targets stay real; stimulus, border, lag-validity and
-# clock inputs stay teacher-forced (the pose is not replayed); the VALIDATION loss stays clean --
-# so early stopping and Metric A are the same teacher-forced density as every other arm, but the
-# fitted objective is no longer an exact likelihood.
-# ONE-STEP form: the draw for bout t-k is made from bout t-k's real context, not from a free run
-# (a 60k-step sequential pass per epoch); the standard approximation for a fixed-window
-# autoregressive emission, and the same construction as MLPBorderLoopDensity's scheduled mode,
-# extended to all three channels and to the random-effect net (each fish's fitted z is used).
-SS_DEFAULT = {"p_min": 0.5, "warmup": 5, "decay": 40}
-
-
-def ss_teacher_p(ep, ss):
-    """Teacher-forcing probability at epoch ``ep``: 1 through the warmup, then linear to p_min."""
-    w, d, pm = int(ss["warmup"]), max(int(ss["decay"]), 1), float(ss["p_min"])
-    if ep < w:
-        return 1.0
-    return float(max(pm, 1.0 - (ep - w + 1) / d * (1.0 - pm)))
-
-
-@torch.no_grad()
-def ss_draw(net, X, a_z, ld_c, z, dth_scale, kin_scales, kin_clip):
-    """One draw of (dtheta, distance, dt) per row from the CURRENT net through the adt chain --
-    dtheta from x alone, distance given the DRAWN |dtheta|, dt given both -- exactly the
-    generator's order, so the lag a later bout sees is a value the model would have emitted. The
-    drift / state shift is off (``s=None``): this is the fast lag feedback; the slow state is the
-    drift's job. Draws use the global torch RNG (seeded by the trainer) through rollout_torch's
-    samplers, which clamp at the same ``kin_clip`` the generator uses."""
-    from twin import rollout_torch as RT
-    dm, ds, _tm, _ts = kin_scales
-    ang, _d, _t = net.joint_forward_re(X, a_z, ld_c, z)
-    ya = RT.sample_angle(ang, dth_scale, 1.0, reparam=False)
-    az = torch.abs(ya) / float(dth_scale)
-    _a, dpar, _t = net.joint_forward_re(X, az, ld_c, z)
-    yd = RT.sample_lognorm_mix(dpar, kin_clip[0], 1.0, reparam=False)
-    lc = (torch.log(yd) - dm) / ds
-    _a, _d, tpar = net.joint_forward_re(X, az, lc, z)
-    yt = RT.sample_lognorm_mix(tpar, kin_clip[1], 1.0, reparam=False,
-                               trunc=getattr(net, "dt_trunc", None))
-    return ya, yd, yt
 
 
 def drift_phi(tau):
@@ -997,15 +530,9 @@ def _marginal_predictive(L, log_pi):
 # =========================================================================== #
 def fit_mix_joint_re(X, y_ang, y_dist, y_dt, fish_idx, n_fish, hidden, dth_scale, kin_scales, *,
                      m=2, epochs=80, lr=1e-3, batch_size=256, patience=8, val_frac=0.15, seed=0,
-                     device=None, n_dist=2, n_dt=3, weight_decay=1e-5, sigma_init=0.5,
-                     freeze_sigma_zero=False, shuffle_labels=False, use_body=False,
-                     border_gain=False, border_slice=None, dt_latent=None, block=False, drift=None,
-                     state=0, seq_batch=1, state_chunk=64, h0_dim=0,
-                     noise_builder=None, noise_mode="concat", noise_frac=0.5,
-                     ss=None, ss_builder=None, kin_clip=(400.0, 600.0), weights=None,
-                     dt_trunc=None, disp=False, lag_slice=None, tail=False, weight_heads=None,
-                     weights_per_head=None,
-                     skip_slices=None, depth=1, tsize=False):
+                     device=None, n_dist=2, n_dt=3, weight_decay=1e-5, sigma_init=0.5, drift=None,
+                     weights=None, dt_trunc=None, weight_heads=None, weights_per_head=None, depth=1,
+                     tsize=False):
     """Stage A. Joint MAP fit of the net and the per-fish latents under a FIXED N(0, I) prior.
 
     ``weight_heads`` (Model 16): the heads ``weights`` applies to, e.g. ``("turn",)``; the other
@@ -1016,13 +543,8 @@ def fit_mix_joint_re(X, y_ang, y_dist, y_dt, fish_idx, n_fish, hidden, dth_scale
     ``weights`` = per-row training weights (MB.regime_weights): a weighted MEAN per channel, the
     same form as JT.fit_mix_joint, so the loss keeps its scale and ``weights=None`` is bit-identical.
     Early stopping is on the WEIGHTED validation loss (the objective being fitted); Metric A is
-    scored unweighted afterwards. Not implemented on the sequence paths (drift / dt_latent / state).
-
-    ``ss`` (dict, see SS_DEFAULT) turns on SCHEDULED SAMPLING: from epoch ``warmup`` on, a
-    Bernoulli(1 - p) subset of the TRAINING rows has its recorded (dtheta, distance, dt) replaced
-    by the current net's one-step draws (``ss_draw``) before the lag blocks are rebuilt by
-    ``ss_builder(dtheta, distance, dt) -> X`` -- so a bout's history carries what the model would
-    have emitted, not what the fish did. Targets and the validation split stay clean.
+    scored unweighted afterwards. With the drift the loss is the sequence likelihood of contiguous per-fish
+    blocks, the drift marginalised by the forward recursion (``nll_seq_drift``).
 
     The prior scale is fixed and the between-fish magnitude is carried by the loadings, because only
     the product (loading x latent) is identified -- see the module docstring for the measured
@@ -1039,16 +561,6 @@ def fit_mix_joint_re(X, y_ang, y_dist, y_dt, fish_idx, n_fish, hidden, dth_scale
     every fish represented (so z_i is still identified) while making the held-out rows temporally
     disjoint from the ones that fitted it.
 
-    TWO CONTROL ARMS, and they answer different questions.
-      ``freeze_sigma_zero`` pins Sigma at 0. Because the loadings are zero-initialised and receive no
-        gradient at z = 0, the whole mechanism stays inert -- so this arm is the TRAINING-LOOP
-        control: same trainer, same contiguous validation split, no random effect. It is what stops
-        a win being credited to the mechanism when it belongs to the reshuffle fix or the new split.
-      ``shuffle_labels`` keeps the mechanism fully live but assigns each ROW a random fish index, so
-        the embedding has identical capacity and identical gradient flow while fish identity carries
-        no information. It is the CAPACITY control: it answers "did it use the between-fish
-        structure, or just the extra parameters?", which pinning Sigma cannot, because a pinned arm
-        has no free parameters to overfit with.
     """
     M._seed_everything(seed)
     dev = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
@@ -1059,21 +571,7 @@ def fit_mix_joint_re(X, y_ang, y_dist, y_dt, fish_idx, n_fish, hidden, dth_scale
     yt = torch.tensor(np.asarray(y_dt, np.float32), device=dev)
     az = torch.tensor(a_z, device=dev); lc = torch.tensor(ld_c, device=dev)
     fish_idx = np.asarray(fish_idx, np.int64)
-    # The validation split below is always built from the TRUE fish blocks, so the permutation
-    # control changes only what the embedding is allowed to learn, never how the model is selected.
-    lbl = fish_idx
-    if shuffle_labels:
-        lbl = np.random.default_rng(seed).permutation(fish_idx)
-    fi = torch.tensor(lbl, device=dev)
-
-    if (dt_latent or drift) and noise_builder is not None:
-        raise ValueError("a latent state + noise_aug is an untested combination; noise augmentation "
-                         "was resolved WORSE twice in round 1 (+0.111 / +0.137 c2st_traj).")
-    if ss and ss_builder is None:
-        raise ValueError("scheduled sampling needs ss_builder (MLPMixJointREDensity supplies it)")
-    if ss and (state or noise_builder is not None):
-        raise ValueError("scheduled sampling with the GRU state or noise_aug is untested; one "
-                         "input-side treatment at a time")
+    fi = torch.tensor(fish_idx, device=dev)
     wt = None if weights is None else torch.tensor(np.asarray(weights, np.float32), device=dev)
     # PER-HEAD weights (Model 16): the row loss normalises each channel by its own weight sum, the
     # drift recursion cannot (it needs the per-bout SUM over channels), so there each head's
@@ -1092,31 +590,13 @@ def fit_mix_joint_re(X, y_ang, y_dist, y_dt, fish_idx, n_fish, hidden, dth_scale
         w_d = wt if "dist" in _heads else _ones
         w_t = wt if "dt" in _heads else _ones
         w_seq = tuple(v / v.mean() for v in (w_a, w_d, w_t))
-    if wt is not None and (dt_latent or state):
-        raise NotImplementedError("regime weights are per-bout; the dt_latent / state sequence "
-                                  "losses marginalise over blocks and are unweighted (the drift "
-                                  "loss supports them: see nll_seq_drift)")
-    if wt is not None and noise_builder is not None:
-        raise ValueError("regime weights + noise_aug: the noisy copy has no weights; not combined")
     net = MDNMixJointRE(Xt.shape[1], hidden, n_dist=n_dist, n_dt=n_dt,
-                        n_fish=int(n_fish), m=int(m), sigma_init=sigma_init,
-                        use_body=use_body, border_gain=border_gain,
-                        border_slice=border_slice, dt_latent=dt_latent,
-                        block=block, drift=drift, state=state, h0_dim=h0_dim,
-                        disp=disp, lag_slice=lag_slice, tail=tail, skip_slices=skip_slices,
+                        n_fish=int(n_fish), m=int(m), sigma_init=sigma_init, drift=drift,
                         depth=depth, tsize=tsize).to(dev)
     net.dt_trunc = (float(dt_trunc) if dt_trunc else None)
     # No weight decay on the embedding: it already has an explicit N(0, I) prior in the loss, and
     # decaying it as well would apply that prior twice at an unstated strength.
     emb_params = list(net.emb.parameters())
-    if os.environ.get("FISHRE_NO_WD_LOADINGS") == "1":
-        # TEST SWITCH (off by default, so every archived fit is reproduced bit-for-bit). The same
-        # argument as above applies to the LOADINGS: the random effect is c.z, the N(0, I) prior in
-        # the loss is on z, so decaying c shrinks the individuality AMPLITUDE under a prior nobody
-        # stated. Motivated by popd fold 2, whose z_dist fell from an init norm of ~0.2 to 0.0029
-        # while its z_turn / z_dt stayed healthy -- a direction the likelihood barely constrains,
-        # where Adam turns even a 1e-5 decay into a full-size step toward zero.
-        emb_params += [p for n_, p in net.named_parameters() if n_.startswith("z_")]
     emb_ids = {id(p) for p in emb_params}
     opt = torch.optim.Adam(
         [dict(params=[p for p in net.parameters() if id(p) not in emb_ids],
@@ -1124,10 +604,9 @@ def fit_mix_joint_re(X, y_ang, y_dist, y_dt, fish_idx, n_fish, hidden, dth_scale
          dict(params=emb_params, weight_decay=0.0)], lr=lr)
 
     n = Xt.shape[0]
-    zero_z = torch.zeros((1, int(m)), device=dev)
 
     def _z_for(ix):
-        return zero_z.expand(ix.shape[0], -1) if freeze_sigma_zero else net.emb(fi[ix])
+        return net.emb(fi[ix])
 
     def _nll_arrays(ix, Xb, azb, lcb, yab, ydb, ytb):
         z = _z_for(ix)
@@ -1141,51 +620,14 @@ def fit_mix_joint_re(X, y_ang, y_dist, y_dt, fish_idx, n_fish, hidden, dth_scale
             ll = ((wa * la).sum() / wa.sum()
                   + ((wd[md] * ld[md]).sum() / wd[md].sum() if md.any() else zt)
                   + ((wt_[mt] * lt[mt]).sum() / wt_[mt].sum() if mt.any() else zt))
-        if freeze_sigma_zero:
-            return -ll
         return -ll + (0.5 * net.emb.weight ** 2).sum() / float(n)
 
     def nll(ix):
         return _nll_arrays(ix, Xt[ix], az[ix], lc[ix], ya[ix], yd[ix], yt[ix])
 
-    def nll_seq(blocks):
-        """Loss on B CONTIGUOUS blocks of T bouts, with the timing latent marginalised exactly.
-
-        ``blocks`` is (B, T) row indices, each row ordered and within one fish. Turn and distance
-        are per-bout as before; the interval channel goes through the forward recursion, which is
-        the only reason the batch has to be ordered at all. Dividing the sequence log-likelihood by
-        the number of VALID interval bouts keeps it on the same per-bout scale as the other two
-        channels, so the three-way weighting of the loss is unchanged from the base model."""
-        B, T = blocks.shape
-        ix = blocks.reshape(-1)
-        z = _z_for(ix)
-        ang, dpar, tpar = net.joint_forward_re(Xt[ix], az[ix], lc[ix], z)
-        la = MX.mix_logdens(ya[ix], ang)
-        ydb, ytb = yd[ix], yt[ix]
-        md = torch.isfinite(ydb) & (ydb > 0)
-        mt = torch.isfinite(ytb) & (ytb > 0)
-        ld = MX._lnk_logpdf(torch.clamp(ydb, min=1e-6), *dpar)
-        nodes, logP, log_pi0 = ar1_chain(net.s_phi(), int(net.dt_latent["n_levels"]),
-                                       span=float(net.dt_latent["span"]))
-        lt_lev = net.dt_level_logliks(tpar, ytb, nodes)                       # (B*T, L)
-        # A masked bout must contribute log-weight 0 to EVERY level -- not NaN, and not a real
-        # density -- so the chain still transitions through it without the belief being updated by
-        # a bout the model was never fitted on.
-        lt_lev = torch.where(mt.unsqueeze(1), lt_lev, torch.zeros_like(lt_lev))
-        ll_dt = forward_recursion(lt_lev.reshape(B, T, -1), logP, log_pi0).sum()
-        zt = torch.zeros((), device=dev)
-        ll = (la.mean() + (ld[md].mean() if md.any() else zt)
-              + ll_dt / torch.clamp(mt.sum(), min=1))
-        if freeze_sigma_zero:
-            return -ll
-        return -ll + (0.5 * net.emb.weight ** 2).sum() / float(n)
-
     def nll_seq_drift(blocks):
-        """Same contiguous-block loss, but the DRIFT path is marginalised across ALL THREE channels.
-
-        That is the whole difference from ``nll_seq``: ``dt_latent`` shifts only the interval
-        location, so turn and distance stay per-bout; the drift shifts all three, so the forward
-        recursion has to run on their SUM. ``drift_level_logliks`` already folds the kinematic masks
+        """Loss on B CONTIGUOUS blocks of T bouts with the DRIFT marginalised exactly across ALL THREE
+        channels: the drift shifts all three, so the forward recursion runs on their SUM. ``drift_level_logliks`` already folds the kinematic masks
         in (a masked bout contributes 0 to every level), so the chain transitions through it without
         updating the belief.
 
@@ -1207,112 +649,10 @@ def fit_mix_joint_re(X, y_ang, y_dist, y_dt, fish_idx, n_fish, hidden, dth_scale
         lev = net.drift_level_logliks(Xt[ix], az[ix], lc[ix], z, ya[ix], yd[ix], yt[ix], nodes,
                                       weights=(None if wt is None else tuple(v[ix] for v in w_seq)))
         ll = forward_recursion(lev.reshape(B, T, -1), logP, log_pi0).sum() / float(len(ix))
-        if freeze_sigma_zero:
-            return -ll
         return -ll + (0.5 * net.emb.weight ** 2).sum() / float(n)
 
-    def nll_seq_two(blocks):
-        """TWO-STATE design: the slow chain (turn + step) and the fast interval chain are
-        marginalised by two independent forward recursions on the same contiguous blocks (see
-        ``two_chain_logliks``). Joint per-bout normalisation, as ``nll_seq_drift``."""
-        B, T = blocks.shape
-        ix = blocks.reshape(-1)
-        z = _z_for(ix)
-        nd, logP_d, pi0_d = ar1_chain(net.d_phi(), int(net.drift["n_levels"]))
-        ns, logP_s, pi0_s = ar1_chain(net.s_phi(), int(net.dt_latent["n_levels"]),
-                                      span=float(net.dt_latent["span"]))
-        lev_td, lev_t = net.two_chain_logliks(Xt[ix], az[ix], lc[ix], z,
-                                              ya[ix], yd[ix], yt[ix], nd, ns)
-        ll = (forward_recursion(lev_td.reshape(B, T, -1), logP_d, pi0_d).sum()
-              + forward_recursion(lev_t.reshape(B, T, -1), logP_s, pi0_s).sum()) / float(len(ix))
-        if freeze_sigma_zero:
-            return -ll
-        return -ll + (0.5 * net.emb.weight ** 2).sum() / float(n)
-
-    ugru = (torch.tensor(state_gru_input(y_ang, y_dist, y_dt, dth_scale, kin_scales), device=dev)
-            if state else None)
-
-    def nll_seq_state(blocks):
-        """Teacher-forced sequence loss for the RECURRENT model, on B contiguous blocks.
-
-        No marginalisation of any kind: with the targets observed the GRU is deterministic, so this
-        IS the exact sequence log-likelihood. h_0 = 0 for every block -- the blocks are random
-        windows, so carrying a state across them would attach it to sampling order rather than to
-        the fish. The cost is that the first bouts of a block are scored from a cold state; with
-        chunk >> the state's useful memory that is a small, constant handicap applied equally to
-        every arm.
-
-        The fish_re latent ``z``, when it is on, is the OPPOSITE of that: static per fish, so it is
-        the one thing that legitimately survives across blocks and it is read from the embedding by
-        the block's fish. See ``state_chain`` for why it and the GRU are not redundant.
-        """
-        ix = blocks.reshape(-1)
-        B, T = blocks.shape
-        # every row of a block comes from ONE fish (that is what makes it a sequence), so the
-        # block's fish is just the fish of its first row.
-        h0 = (net.h0_from(net.h0_emb(fi[blocks[:, 0]])) if net.h0_dim else None)
-        # None, NOT _z_for's zero vector: the pinned arm must stay bit-identical (see state_chain).
-        zb = None if freeze_sigma_zero else net.emb(fi[blocks[:, 0]])
-        la, ld, lt, _ = net.state_chain(
-            Xt[ix].reshape(B, T, -1), az[ix].reshape(B, T), lc[ix].reshape(B, T),
-            ugru[ix].reshape(B, T, 3), ya[ix].reshape(B, T),
-            yd[ix].reshape(B, T), yt[ix].reshape(B, T), h0=h0, z=zb)
-        ydb, ytb = yd[ix].reshape(B, T), yt[ix].reshape(B, T)
-        md = torch.isfinite(ydb) & (ydb > 0)
-        mt = torch.isfinite(ytb) & (ytb > 0)
-        zt = torch.zeros((), device=dev)
-        ll = (la.mean() + (ld[md].mean() if md.any() else zt)
-              + (lt[mt].mean() if mt.any() else zt))
-        # Explicit N(0, I) prior on each latent that is on: the latent is generated from that prior
-        # at rollout time, so it has to be fitted under it or the trained values and the sampled
-        # ones describe different fish. Both terms are the same expression the non-recurrent losses
-        # use, so the penalty is on the same per-row scale as `_nll_arrays` and `nll_seq_drift`.
-        pen = torch.zeros((), device=dev)
-        if net.h0_dim:
-            pen = pen + (0.5 * net.h0_emb.weight ** 2).sum() / float(n)
-        if not freeze_sigma_zero:
-            pen = pen + (0.5 * net.emb.weight ** 2).sum() / float(n)
-        return -ll + pen
-
-    def nll_seq_state_drift(blocks):
-        """SRNN Stage 1: the recurrent chain with the slow AR(1) marginalised EXACTLY.
-
-        Three variance components, one mechanism each, all fitted under this one loss:
-          * ``z``   static per fish        -> BETWEEN-fish   (embedding, prior N(0, I))
-          * ``s_t`` pinned AR(1), tau > W  -> WITHIN-fish slow, marginalised by forward recursion
-          * ``h_t`` GRU                    -> fast context, deterministic given y
-
-        The recursion runs on the SUM of the three channels (``state_chain_levels``), because the
-        drift loads on all three -- so unlike a per-channel latent it can reproduce the real
-        cross-channel coupling. ``h_t`` does not depend on ``s``, so the GRU pass is computed once
-        and the L levels cost only the heads.
-
-        Normalisation matches ``nll_seq_drift`` rather than ``nll_seq_state``: this is the true joint
-        per-bout log-likelihood, where the plain state loss sums three separately-averaged channels.
-        The two agree to well under a millinat (10 invalid distance bouts in 70590), but the joint
-        form is the one the recursion defines, and mixing them would make the two arms' bits
-        incomparable for a reason that has nothing to do with the model.
-        """
-        ix = blocks.reshape(-1)
-        B, T = blocks.shape
-        h0 = (net.h0_from(net.h0_emb(fi[blocks[:, 0]])) if net.h0_dim else None)
-        zb = None if freeze_sigma_zero else net.emb(fi[blocks[:, 0]])
-        nodes, logP, log_pi0 = ar1_chain(net.d_phi(), int(net.drift["n_levels"]))
-        lev = net.state_chain_levels(
-            Xt[ix].reshape(B, T, -1), az[ix].reshape(B, T), lc[ix].reshape(B, T),
-            ugru[ix].reshape(B, T, 3), ya[ix].reshape(B, T),
-            yd[ix].reshape(B, T), yt[ix].reshape(B, T), nodes, h0=h0, z=zb)     # (B, T, L), summed
-        ll = forward_recursion(lev, logP, log_pi0).sum() / float(len(ix))
-        pen = torch.zeros((), device=dev)
-        if net.h0_dim:
-            pen = pen + (0.5 * net.h0_emb.weight ** 2).sum() / float(n)
-        if not freeze_sigma_zero:
-            pen = pen + (0.5 * net.emb.weight ** 2).sum() / float(n)
-        return -ll + pen
-
-    seq_loss = ((nll_seq_state_drift if drift else nll_seq_state) if state
-                else (nll_seq_two if (drift and dt_latent) else (nll_seq_drift if drift else nll_seq)))
-    seq_on = bool(dt_latent or drift or state)
+    seq_loss = nll_seq_drift
+    seq_on = bool(drift)
 
     # Contiguous per-fish validation blocks (see docstring).
     idx_all = np.arange(n)
@@ -1324,29 +664,17 @@ def fit_mix_joint_re(X, y_ang, y_dist, y_dt, fish_idx, n_fish, hidden, dth_scale
     tr = torch.tensor(np.concatenate(tr_list), dtype=torch.long, device=dev)
     va = torch.tensor(np.concatenate([v for v in va_list if len(v)]), dtype=torch.long, device=dev)
 
-    # ---- contiguous-chunk sampler, used only when the timing latent is on ------------------- #
+    # ---- contiguous-chunk sampler, used only with the drift ---------------------------------- #
     # The forward recursion needs ORDERED rows, so batches become contiguous windows instead of
-    # shuffled rows. Step count and rows-per-step are deliberately left EXACTLY as they were
-    # (chunk == batch_size, one block per step), so this arm's optimiser budget matches the base
-    # and the comparison is not confounded by a different number of updates -- the failure that
-    # made psire3's gain search unreadable. The one real difference is that a batch is now
-    # correlated rather than i.i.d.; the windows are redrawn (random fish, random offset) every
-    # step, so the "same 256 bouts for all 80 epochs" trap this repo hit before cannot recur.
+    # shuffled rows: one block of ``chunk`` bouts per step, as many steps as rows / chunk, so the
+    # optimiser budget matches the per-row loss. The windows are redrawn (random fish, random
+    # offset) every step.
     _rng_ck = np.random.default_rng(seed + 991)
     _tr_by_fish = [r for r in tr_list if len(r) >= 2]
     _T = 0
     if seq_on:
-        # ONE chunk length for every block, so they stack. Clamped by the SHORTEST fish rather
-        # than per-fish, or np.stack would raise on a ragged batch the moment one fish is short.
-        # CHUNK LENGTH IS THE COST KNOB, and this is the whole reason it is separate for the
-        # recurrent model. `state_chain` walks T timesteps SEQUENTIALLY and is dispatch-bound, so
-        # wall time ~ (optimiser steps) x T, essentially INDEPENDENT of batch size (measured: 2.0
-        # ms/timestep at B=1, 2.6 ms at B=24). dt_latent's 256 was chosen for a forward recursion
-        # that had no such loop; inheriting it made a GRU epoch take 125 s with the GPU idle.
-        # 64 keeps well over the state's useful memory at a quarter of the cost -- and the big
-        # batch then makes each of those cheaper steps far better informed, which is free here.
-        _cfg_seq = (drift if drift else dt_latent) or {}
-        _T = int(state_chunk) if state else int(_cfg_seq.get("chunk", DT_LATENT_DEFAULT["chunk"]))
+        # ONE chunk length for every block, clamped by the SHORTEST fish so the blocks stack.
+        _T = int(drift.get("chunk", DRIFT_DEFAULT["chunk"]))
         _T = max(2, min(_T, min(len(r) for r in _tr_by_fish)))
 
     def _sample_blocks(nb):
@@ -1357,71 +685,28 @@ def fit_mix_joint_re(X, y_ang, y_dist, y_dt, fish_idx, n_fish, hidden, dth_scale
             out.append(rows[o:o + _T])
         return torch.tensor(np.stack(out), dtype=torch.long, device=dev)
 
-    # SCHEDULED SAMPLING state. `Xt` is REBOUND per epoch (mixed for the training steps, clean for
-    # validation); every loss closure above reads the name at call time, so they all follow it.
-    Xt_clean = Xt
-    _is_tr = torch.zeros(n, dtype=torch.bool, device=dev)
-    _is_tr[tr] = True
-    _ss_last, _ss_epochs = None, 0
-
     best, best_state, bad, hist = np.inf, None, 0, []
     _gstats = {}
     for _ep in range(epochs):
         net.train()
-        Xt = Xt_clean
-        if ss and ss_teacher_p(_ep, ss) < 1.0:
-            p_tf = ss_teacher_p(_ep, ss)
-            net.eval()
-            with torch.no_grad():
-                ix_all = torch.arange(n, device=dev)
-                sa, sd, st_ = ss_draw(net, Xt_clean, az, lc, _z_for(ix_all), dth_scale,
-                                      kin_scales, kin_clip)
-            net.train()
-            mix = (torch.rand(n, device=dev) < (1.0 - p_tf)) & _is_tr     # validation rows stay clean
-            mixed = [torch.where(mix & torch.isfinite(y_), s_, y_)
-                     for y_, s_ in ((ya, sa), (yd, sd), (yt, st_))]
-            Xt = torch.tensor(np.asarray(ss_builder(*[m_.cpu().numpy() for m_ in mixed]), np.float32),
-                              device=dev)
-            _ss_last, _ss_epochs = (p_tf, float(mix.float().sum() / _is_tr.float().sum())), _ss_epochs + 1
         if seq_on:
-            # ``seq_batch`` blocks per step, with ``steps`` scaled down so the epoch still covers
-            # the same number of ROWS -- the optimiser sees fewer, larger batches, not more data.
-            #
-            # WHY IT IS 1 FOR dt_latent/drift AND >1 FOR THE GRU. Those arms were tuned at one
-            # block per step and their archived numbers are only comparable at that optimiser
-            # budget, so they stay put. The recurrent model has no such history and cannot afford
-            # it: `state_chain` walks T timesteps SEQUENTIALLY, so at B=1 every step is 256 tiny
-            # ops on a batch of one and the whole fit is Python-dispatch bound -- measured on an
-            # A100 with the GPU sitting at ~0% while an epoch took minutes. Batching the blocks is
-            # the same fix that took generation from 89 s to 12 s for 8 rollouts.
-            nb = max(1, int(seq_batch))
+            nb = 1
             steps = max(1, int(np.ceil(len(tr) / max(_T * nb, 1))))
             for _s in range(steps):
                 opt.zero_grad()
                 JT.guarded_step(opt, seq_loss(_sample_blocks(nb)), net.parameters(), stats=_gstats)
-            Xt = Xt_clean                                    # validation is teacher-forced
             net.eval()
             with torch.no_grad():
                 # Validation blocks are ALREADY contiguous per fish (that is why they were built
                 # that way), so each is a valid sequence for the recursion.
-                if nb > 1:
-                    # Batched: stack the per-fish blocks truncated to the shortest, so validation is
-                    # ONE call instead of one per fish. Truncation makes it a fixed, equal-per-fish
-                    # slice -- a consistent early-stopping signal, which is all it has to be.
-                    rows = [r for r in va_list if len(r) >= 2]
-                    tv = min(len(r) for r in rows)
-                    blk = torch.tensor(np.stack([r[:tv] for r in rows]), dtype=torch.long,
-                                       device=dev)
-                    v = float(seq_loss(blk))
-                else:
-                    # one fish at a time, length-weighted, because they differ in length
-                    num = 0.0; den = 0
-                    for r in va_list:
-                        if len(r) < 2:
-                            continue
-                        b_ = torch.tensor(r.reshape(1, -1), dtype=torch.long, device=dev)
-                        num += float(seq_loss(b_)) * len(r); den += len(r)
-                    v = num / max(den, 1)
+                # one fish at a time, length-weighted, because they differ in length
+                num = 0.0; den = 0
+                for r in va_list:
+                    if len(r) < 2:
+                        continue
+                    b_ = torch.tensor(r.reshape(1, -1), dtype=torch.long, device=dev)
+                    num += float(seq_loss(b_)) * len(r); den += len(r)
+                v = num / max(den, 1)
             hist.append(v)
             if v < best - 1e-5:
                 best, bad = v, 0
@@ -1431,35 +716,11 @@ def fit_mix_joint_re(X, y_ang, y_dist, y_dt, fish_idx, n_fish, hidden, dth_scale
                 if bad >= patience:
                     break
             continue
-        # NOISE AUGMENTATION -- see JT.fit_mix_joint. The per-fish latent index `ix` is UNCHANGED
-        # for the noisy copy (same rows, same fish), so z_i keeps its meaning and the augmentation
-        # teaches the same fish to correct its own drift. Validation stays CLEAN.
-        NT = (JT._noise_tensors(noise_builder, _ep, dth_scale, kin_scales, dev)
-              if noise_builder is not None else None)
         tr_ep = tr[torch.randperm(len(tr), device=dev)]
         for i in range(0, len(tr_ep), batch_size):
             ix = tr_ep[i:i + batch_size]
-            if NT is not None and noise_mode == "mask":
-                mk = torch.rand(len(ix), device=dev) < float(noise_frac)
-                opt.zero_grad()
-                loss = _nll_arrays(ix, torch.where(mk.unsqueeze(1), NT[0][ix], Xt[ix]),
-                                   torch.where(mk, NT[1][ix], az[ix]),
-                                   torch.where(mk, NT[2][ix], lc[ix]),
-                                   torch.where(mk, NT[3][ix], ya[ix]),
-                                   torch.where(mk, NT[4][ix], yd[ix]),
-                                   torch.where(mk, NT[5][ix], yt[ix]))
-            else:
-                opt.zero_grad(); loss = nll(ix)
+            opt.zero_grad(); loss = nll(ix)
             JT.guarded_step(opt, loss, net.parameters(), stats=_gstats)
-        if NT is not None and noise_mode != "mask":       # 'concat': a second, noisy pass
-            tr_ep2 = tr[torch.randperm(len(tr), device=dev)]
-            for i in range(0, len(tr_ep2), batch_size):
-                ix = tr_ep2[i:i + batch_size]
-                opt.zero_grad()
-                loss = _nll_arrays(ix, NT[0][ix], NT[1][ix], NT[2][ix],
-                                   NT[3][ix], NT[4][ix], NT[5][ix])
-                JT.guarded_step(opt, loss, net.parameters(), stats=_gstats)
-        Xt = Xt_clean                                        # validation is teacher-forced
         net.eval()
         with torch.no_grad():
             v = float(nll(va))
@@ -1471,14 +732,6 @@ def fit_mix_joint_re(X, y_ang, y_dist, y_dt, fish_idx, n_fish, hidden, dth_scale
             bad += 1
             if bad >= patience:
                 break
-    if ss:
-        if _ss_last is None:
-            print(f"    scheduled sampling: NEVER ACTIVE -- the fit stopped after {len(hist)} epochs, "
-                  f"inside the {ss['warmup']}-epoch warmup")
-        else:
-            print(f"    scheduled sampling: {_ss_epochs} mixed epochs of {len(hist)}; last epoch "
-                  f"teacher p {_ss_last[0]:.2f} (floor {ss['p_min']}), {100 * _ss_last[1]:.0f}% of "
-                  f"train rows carried model-drawn lags")
     JT._warn_unstable(_gstats, hist)
     if best_state is not None:
         net.load_state_dict(best_state)
@@ -1512,39 +765,25 @@ GAIN_GRID_WIDE = (0.10, 0.18, 0.28, 0.40, 0.70, 1.20, 1.90, 3.00)
 # population of fish as +g (and scores the same marginal likelihood). They would only double the
 # search cost and return each answer twice.
 GAIN_GRID_WIDE_UP = GAIN_GRID_WIDE + (4.50, 6.50)
-# PER-CHANNEL grid (re_gain_mode='per_channel'): five points spanning 0.25-2.5, which brackets every
-# per-channel value the global searches have wanted (step ~0.4, interval / forward ~1-1.5) at a
-# third of the wide grid's cost -- the per-channel search sweeps it 3 channels x 2 sweeps.
-GAIN_GRID_PC = (0.25, 0.45, 0.8, 1.4, 2.5)
 
 
 def apply_drift_gains(m, gd, gt, report):
     """Publish the rollout-fitted drift gains into the density's cfg (what the generator reads)
     with the log-normal re-centring, and print the outcome. Shared by ``fit`` and the local
-    recalibration (rollout_model1_local.recalibrate_drift), so a re-searched checkpoint carries
-    exactly what a freshly fitted one would.
-
-    TWO-STATE design (``report['dt_via_latent']``): the interval chain is dt_latent, so the dt gain
-    scales ITS amplitude (lam) and the slow chain's dt loading -- 0 -- gets no gain."""
+    and the drift's fixed-strength units (twin/correction.py), so a re-searched checkpoint carries exactly what a
+    freshly fitted one would."""
     cf = m._cfg_feat
     _dd = float(cf["drift"].get("dist", 0.0))
     _dt = float(cf["drift"].get("dt", 0.0))
-    if report.get("dt_via_latent"):
-        _lam = float(cf["dt_latent"]["lam"])
-        cf["drift"].update(g_dist=gd, g_dt=1.0, dist_c=0.5 * (gd * gd - 1.0) * _dd * _dd, dt_c=0.0)
-        cf["dt_latent"].update(g_lam=gt, lam_c=0.5 * (gt * gt - 1.0) * _lam * _lam)
-        m.drift.update(g_dist=gd, g_dt=1.0)
-        m.dt_latent.update(g_lam=gt)
-    else:
-        cf["drift"].update(g_dist=gd, g_dt=gt,
-                           dist_c=0.5 * (gd * gd - 1.0) * _dd * _dd,
-                           dt_c=0.5 * (gt * gt - 1.0) * _dt * _dt)
-        m.drift.update(g_dist=gd, g_dt=gt)
+    cf["drift"].update(g_dist=gd, g_dt=gt,
+                       dist_c=0.5 * (gd * gd - 1.0) * _dd * _dd,
+                       dt_c=0.5 * (gt * gt - 1.0) * _dt * _dt)
+    m.drift.update(g_dist=gd, g_dt=gt)
     m.drift_report = report
     got, tgt = report["got"], report["target"]
     pk = report.get("pick", {})
     print(f"    [{m.name}] drift gains dist {gd:.2f} ({pk.get('dist', '?')}) "
-          f"{'dt-chain' if report.get('dt_via_latent') else 'dt'} {gt:.2f} ({pk.get('dt', '?')}): "
+          f"dt {gt:.2f} ({pk.get('dt', '?')}): "
           f"window-acf1 dt {got['dt']:+.3f}/{tgt['dt']:+.3f}  "
           f"dist {got['dist']:+.3f}/{tgt['dist']:+.3f}  "
           f"rad {got['rad']:+.3f}/{tgt['rad']:+.3f} (REPORTED, not fitted)   (got/real)")
@@ -1568,49 +807,6 @@ def _fish_level_stats(dth, dist, dt):
     return (float(ld.mean()) if len(ld) else np.nan,
             float(lt.mean()) if len(lt) else np.nan,
             float((a < M.DTHETA0).mean()) if len(a) else np.nan)
-
-
-def state_rollout_batch(net, rec, cfg_feat, n, rng, n_cap=None):
-    """``n`` independent free-runs of one record through the TORCH rollout, as sample dicts.
-
-    THE ONE PLACE the recurrent free-run is built. Every caller that rolls out a state model --
-    ``sample_batch`` for the metrics, ``search_loading_gain`` for the latent calibration -- comes
-    through here, because the alternative is the trap this repo keeps hitting: ``MX._gen_for``
-    returns the NUMPY generator, which has no GRU, so a calibrator that used it would tune the
-    latent of a stateless model and hand the result to a stateful one.
-
-    ``n_cap`` truncates the rollout to that many bouts. DIAGNOSTIC USE ONLY -- it is for the gain
-    search, where the quantity estimated is a BETWEEN-fish spread driven by the latent draw rather
-    than by within-trajectory sampling noise, so a few hundred bouts already pins each trajectory's
-    level and the cost falls linearly. Never pass it from the metrics: those compare generated
-    trajectories with real ones bout for bout, and a short rollout would change the comparison
-    rather than just its precision. Default None = the record's own length.
-    """
-    from twin import rollout_torch as RT
-    dev = torch.device("cpu")
-    n = int(n)
-    static = RT.build_static([rec], cfg_feat, dev)
-    gen = torch.Generator(device="cpu").manual_seed(int(rng.integers(0, 2 ** 31 - 1)))
-    idx = torch.zeros(n, dtype=torch.long, device=dev)          # n copies of the same record
-    with torch.no_grad():
-        h0 = None
-        if int(getattr(net, "h0_dim", 0)):
-            w = torch.randn((n, net.h0_dim), device=dev, generator=gen)
-            h0 = net.h0_from(w)
-        st = RT.RolloutState(static, idx, cfg_feat, dev, hidden=int(net.state_hidden),
-                             z=RT.draw_latent(cfg_feat, n, dev, gen), h0=h0)
-        T = int(rec.n) if n_cap is None else min(int(rec.n), int(n_cap))
-        o = RT.rollout(net, static, st, cfg_feat, T, tau=1.0, reparam=False, generator=gen)
-    out = []
-    for i in range(n):
-        dth = o["dtheta"][i].numpy().astype(float)
-        out.append(dict(dtheta=dth, symbol=E.symbols_from_dtheta(dth),
-                        distance_px=o["dist"][i].numpy().astype(float),
-                        dt_s=o["dt"][i].numpy().astype(float),
-                        x_px=o["x"][i].numpy().astype(float),
-                        y_px=o["y"][i].numpy().astype(float),
-                        n_hits=0, n_bounces=0))
-    return out
 
 
 def search_loading_gain(net, records, cfg_feat, *, grid=GAIN_GRID, seed=0, max_fish=12, n_draws=2,
@@ -1662,13 +858,7 @@ def search_loading_gain(net, records, cfg_feat, *, grid=GAIN_GRID, seed=0, max_f
     # pinned at the grid FLOOR on the first bgblk run, the same signature m=3 produced before the
     # block existed. Each block must be measured against its own moment with the other neutral.
     hold = {n_: base[n_] for n_ in base if any(n_.startswith(h) for h in hold_zero)}
-    # THE GENERATOR MUST MATCH THE MODEL. `MX._gen_for` returns the NUMPY generator, which cannot
-    # carry a GRU state -- calibrating the latent on that and shipping it on a recurrent model is
-    # exactly the two-objects trap. With `state` on we go through the torch rollout instead, and
-    # batch the n_draws of each fish into ONE call: the rollout is dispatch-bound, so the draws
-    # are close to free while the fish loop is not.
-    _state = int(cfg_feat.get("state", 0))
-    gen_fn = None if _state else MX._gen_for(cfg_feat)
+    gen_fn = MX._gen_for(cfg_feat)
     curve = []
     for g in grid:
         with torch.no_grad():
@@ -1678,26 +868,11 @@ def search_loading_gain(net, records, cfg_feat, *, grid=GAIN_GRID, seed=0, max_f
                 elif n_ in base:
                     p.copy_(base[n_] * float(g))
         stats = []
-        if _state:
-            # ONE batched call for every (record, draw). This is the calibrator that CANNOT be
-            # skipped in the Metric A pass -- the gain is folded into the weights, so it changes the
-            # scored model -- which made it the single largest remaining cost per fold: on the old
-            # per-record path it was ~13 min on 4 fish, and it ran in BOTH CV passes. Batched and
-            # capped it is well under a minute.
-            #
-            # The cap is safe here for the same reason it is elsewhere: the estimand is a
-            # BETWEEN-fish spread of three per-fish level means, which converges long before a
-            # record's full length; `_level_se` reports the residual within-trajectory floor.
-            for out in state_rollout_many(net, records, cfg_feat, int(n_draws),
-                                          np.random.default_rng([seed, 0]),
-                                          n_cap=MX.STATE_CALIB_CAP):
+        for d in range(int(n_draws)):
+            for r in records:
+                out = gen_fn(net, r, cfg_feat,
+                             np.random.default_rng([seed, int(r.fish_id), d]), **gen_kw)
                 stats.append(_fish_level_stats(out["dtheta"], out["distance_px"], out["dt_s"]))
-        else:
-            for d in range(int(n_draws)):
-                for r in records:
-                    out = gen_fn(net, r, cfg_feat,
-                                 np.random.default_rng([seed, int(r.fish_id), d]), **gen_kw)
-                    stats.append(_fish_level_stats(out["dtheta"], out["distance_px"], out["dt_s"]))
         arr = np.array(stats)
         sd = np.nanstd(arr, axis=0, ddof=1)
         # ONE job for the gain: match the SPREAD, in log-ratio units (the three statistics live on
@@ -1727,88 +902,6 @@ def search_loading_gain(net, records, cfg_feat, *, grid=GAIN_GRID, seed=0, max_f
                                 curve=[(c[0], c[1], c[2].tolist(), c[3], c[4]) for c in curve])
 
 
-# level index -> the loading whose spread it measures. `_fish_level_stats` returns
-# (mean log travel, mean log interval, forward fraction), and the three loadings are read out of
-# the SAME per-fish latent independently, so each has its own moment to be matched against.
-CHANNEL_LEVEL = (("turn", 2), ("dist", 0), ("dt", 1))
-LEVEL_NAME = ("mean log travel", "mean log interval", "forward fraction")
-
-
-
-
-def state_rollout_many(net, records, cfg_feat, n_draws, rng, n_cap=None, static=None):
-    """``n_draws`` free-runs of EVERY record, in ONE batched rollout. Returns a flat list.
-
-    WHY NOT JUST LOOP ``state_rollout_batch``. The rollout is dispatch-bound -- 4700 sequential
-    steps of ~30 tiny ops -- so wall-clock tracks the number of CALLS far more than the batch width.
-    Measured on the gain search: 6 records x 2 draws as six batch-2 calls cost 43 s per grid point,
-    where the same 12 trajectories as ONE batch-12 call is a single pass over the timesteps. The
-    fish loop, not the draw loop, was the expensive one.
-
-    EQUAL LENGTH, and that is a feature here rather than a compromise. Every trajectory runs for
-    ``T = min(record length)`` bouts, so each simulated fish contributes a level estimate of the
-    same precision -- which is what the between-fish spread this feeds wants. A ragged batch would
-    weight long fish more, and ``build_static`` pads with NaN dot centroid past a record's own
-    length, so running to the max would silently roll short fish out with no stimulus.
-
-    NOT for the metrics: those compare generated trajectories against real ones bout for bout, and
-    a common truncated T would change the comparison rather than its precision. Use
-    ``state_rollout_batch`` there.
-
-    ``static`` may be a prebuilt ``RT.build_static`` for the SAME records, hoisted by a caller that
-    rolls out repeatedly -- it depends only on the records and cfg, so rebuilding it once per grid
-    point (12 records x up to 6686 bouts of stimulus arrays) is pure repeated work.
-    """
-    from twin import rollout_torch as RT
-    dev = torch.device("cpu")
-    records = list(records)
-    nd = int(n_draws)
-    T = min(int(r.n) for r in records)
-    if n_cap is not None:
-        T = min(T, int(n_cap))
-    if static is None:
-        static = RT.build_static(records, cfg_feat, dev)
-    elif int(static["B"]) != len(records):
-        raise ValueError(f"prebuilt static has B={int(static['B'])} but {len(records)} records "
-                         "were passed -- it must be built from the SAME list, or `idx` below "
-                         "would select the wrong fish's dish and stimulus programme.")
-    gen = torch.Generator(device="cpu").manual_seed(int(rng.integers(0, 2 ** 31 - 1)))
-    # row -> record. repeat_interleave so a record's draws are contiguous, which keeps the returned
-    # order (record 0 draw 0, record 0 draw 1, record 1 draw 0, ...) readable at the call site.
-    idx = torch.arange(len(records), device=dev).repeat_interleave(nd)
-    B = int(idx.shape[0])
-    with torch.no_grad():
-        h0 = None
-        if int(getattr(net, "h0_dim", 0)):
-            h0 = net.h0_from(torch.randn((B, net.h0_dim), device=dev, generator=gen))
-        st = RT.RolloutState(static, idx, cfg_feat, dev, hidden=int(net.state_hidden),
-                             z=RT.draw_latent(cfg_feat, B, dev, gen), h0=h0)
-        o = RT.rollout(net, static, st, cfg_feat, T, tau=1.0, reparam=False, generator=gen)
-    out = []
-    for i in range(B):
-        dth = o["dtheta"][i].numpy().astype(float)
-        out.append(dict(dtheta=dth, symbol=E.symbols_from_dtheta(dth),
-                        distance_px=o["dist"][i].numpy().astype(float),
-                        dt_s=o["dt"][i].numpy().astype(float),
-                        x_px=o["x"][i].numpy().astype(float),
-                        y_px=o["y"][i].numpy().astype(float),
-                        n_hits=0, n_bounces=0))
-    return out
-
-
-TAIL_GAIN_GRID = (0.25, 0.5, 1.0, 2.0, 4.0)
-
-
-
-
-# Geometric, spanning 22x, and it goes DOWN as well as up on purpose. Up is the expected need --
-# `rej` produces an across-fish sd(mean r/R) of 0.0246 against a real 0.0779, so ~3x more spread is
-# wanted -- but the wiring check pinned this at the lower end on an under-trained model, and a grid
-# that cannot shrink would have clipped that silently. A method-of-moments search must be able to
-# go both ways, and the loading-gain history in this file is a catalogue of edge-pinned searches
-# that were read as results. 6 points x 8 fish x 2 draws = 96 rollouts per fit, paid for by the
-# ~108 the pinned d0 saves in the boundary search.
-SPATIAL_GAIN_GRID = (0.4, 0.8, 1.5, 2.8, 5.0, 9.0)
 
 
 
@@ -1897,183 +990,30 @@ def apply_loading_gain(net, gain, which="all"):
 class MLPMixJointREDensity(JT.MLPMixJointDensity):
     """Joint model with a fitted per-fish random effect, marginalised exactly at score time."""
 
-    def __init__(self, *args, re_m=2, re_sigma_init=0.5, re_gain_search=True, re_ghq_k=7,
-                 re_zero=False, re_shuffle=False, re_body=False, contain_decouple=False,
-                 contain_graded=False, rad_indiv=False, re_bgain=False,
-                 re_gain_grid="std", dt_latent=None, re_block=False, drift=None,
-                 drift_gain_search=True, state=0, seq_batch=64, state_chunk=64, h0_dim=0,
-                 ss=None, re_gain_mode="global", re_disp=False, re_lag=False, re_tail=False,
-                 turn_skip=False, depth=1, re_tsize=False, **kwargs):
+    def __init__(self, *args, re_m=2, re_sigma_init=0.5, re_gain_search=True, re_ghq_k=7, re_gain_grid="std",
+                 drift=None, drift_gain_search=True, re_gain_mode="global", depth=1, re_tsize=False, **kwargs):
         super().__init__(*args, **kwargs)
-        self.re_tail = bool(re_tail)            # Model 13: z on the interval component weights
         self.re_tsize = bool(re_tsize)          # Model 38: z on the turning components' scales (turn size)
-        # Model 17: a skip path from the stimulus inputs to the turn head / a deeper body
-        self.turn_skip = bool(turn_skip)
-        self.depth = int(depth)
-        # SCHEDULED SAMPLING on the lag inputs (see SS_DEFAULT): True or {} takes the defaults, a
-        # dict overrides p_min / warmup / decay. Training-time only; nothing at generation.
-        self.ss = (dict(SS_DEFAULT) if ss is True else (dict(SS_DEFAULT, **ss) if ss else None))
-        # Model 12: z on the interval head's widths (re_disp) / on its lag slopes (re_lag) -- see
-        # MDNMixJointRE.__init__ for the measurements behind each.
-        self.re_disp = bool(re_disp)
-        self.re_lag = bool(re_lag)
+        self.depth = int(depth)                 # Model 17: a deeper body
         self.re_gain_grid = str(re_gain_grid)
-        # LOADING GAIN, one scalar over the three loadings ('global', every archived arm) or THREE
-        # ('per_channel': search_loading_gain_per_channel, each matched to its own between-fish
-        # moment). Measured on S3_adt_z2: the single gain lands on 0.7 on every fold as a compromise
-        # -- step spread 1.5-3x too wide, interval / forward spread 0.6-0.9x too narrow.
-        self.re_gain_mode = str(re_gain_mode)
-        if self.re_gain_mode not in ("global", "per_channel"):
-            raise ValueError(f"re_gain_mode must be 'global' or 'per_channel', got {re_gain_mode!r}")
-        # Block-structured latent: reserve the LAST dimension for the border gain so
-        # re_bgain finally has an axis it cannot lose to turn/tempo. Needs re_bgain.
-        self.re_block = bool(re_block)
-        self.spatial_gain = None
-        self.spatial_gain_report = None
-        # Slow WITHIN-trajectory timing state (None = off, byte-identical to every archived arm).
-        # True or {} takes DT_LATENT_DEFAULT; a dict overrides n_levels / chunk / phi_init / span.
-        self.dt_latent = (dict(DT_LATENT_DEFAULT) if dt_latent is True
-                          else (dict(DT_LATENT_DEFAULT, **dt_latent) if dt_latent else None))
-        # `tau` (bouts) is the readable way to PIN the interval chain's timescale: it becomes
-        # phi_fixed, so no s_phi_raw parameter exists and the timescale cannot be refitted.
-        if self.dt_latent and self.dt_latent.get("tau") is not None \
-                and self.dt_latent.get("phi_fixed") is None:
-            self.dt_latent["phi_fixed"] = drift_phi(self.dt_latent["tau"])
-        # re_bgain: LIKELIHOOD-VISIBLE spatial individuality -- a fitted per-fish gain on the
-        # border input columns (see MDNMixJointRE). Built because every generation-time radial
-        # lever is measured dead on the psi/basis models: the multiplicative swing is inert on
-        # bulk=0 biases, and the gate offset probed 0.0335 -> 0.0335 on psib (the net's own,
-        # fish-identical wall response dominates the weakened patch). Spatial personality must
-        # be LEARNED. Pair with re_m=3 -- at m=2 both axes are already claimed by turn/tempo.
-        self.re_bgain = bool(re_bgain)
+        # LOADING GAIN: one scalar over the three loadings, matched by rollout to the real between-fish spread
+        # (``search_loading_gain``).
+        if str(re_gain_mode) != "global":
+            raise ValueError(f"re_gain_mode must be 'global', got {re_gain_mode!r}")
+        self.re_gain_mode = "global"
         self.re_m = int(re_m)
         self.re_sigma_init = float(re_sigma_init)
         self.re_gain_search = bool(re_gain_search)
         self.re_ghq_k = int(re_ghq_k)
-        self.re_zero = bool(re_zero)          # training-loop control: prior pinned at 0, arm inert
-        self.re_shuffle = bool(re_shuffle)    # capacity control: same capacity, fish labels permuted
-        self.re_body = bool(re_body)          # OFF: level-only. See joint_forward_re's docstring.
-        # 2-D containment search (bulk against the MEAN radius, shell against the TAIL) instead of
-        # one scale over both. The 1-D form ties a bias that acts EVERYWHERE to one that acts only
-        # inside the shell, so it can only buy wall occupancy by dragging the whole distribution
-        # inward. Measured on re_swap: rad_mean 0.392 vs real 0.449 and rad_median 0.385 vs 0.456,
-        # both ~0.45 sd low and the top radial tells, while rad_q90 (-0.12 sd) and rad_frac_wall
-        # (+0.19 sd) were nearly right -- i.e. the wall was fine and the CENTRE was over-corrected.
-        self.contain_decouple = bool(contain_decouple)
-        # Wide graded containment: bulk pinned at 0, gate opened to mid-dish so the bias acts on
-        # APPROACH rather than only inside the shell. Beats the shipped 1-D form on BOTH the mean
-        # radius and wall occupancy simultaneously; see _search_containment's graded branch.
-        self.contain_graded = bool(contain_graded)
-        # Radial individuality: the likelihood latent z loads on fwd logit / mu_l / mu_tau and has
-        # NO spatial channel, so every fishre rollout has the same radial personality (measured
-        # between-fish SD of mean r/R 0.030 vs real 0.075). rad_indiv adds a generation-time
-        # per-trajectory multiplicative swing on the containment bias (fish_re['rad_sd'], moments-
-        # calibrated by MX._search_rad_indiv, drawn from a SPAWNED stream so CRN pairing holds).
-        self.rad_indiv = bool(rad_indiv)
-        # DRIFT: a within-trajectory AR(1) state loading on all three heads plus (via the rollout
-        # search) the containment bias. The one kind of object never tried -- every previous
-        # individuality mechanism is STATIC per trajectory and so contributes exactly zero to the
-        # across-window autocorrelation, which is the largest measured gap. See DRIFT_DEFAULT.
+        # DRIFT: a within-trajectory AR(1) state loading on the three heads; its generation gains are searched by
+        # rollout (``MX._search_drift_gain``). See DRIFT_DEFAULT.
         self.drift = (dict(DRIFT_DEFAULT) if drift is True
                       else (dict(DRIFT_DEFAULT, **drift) if drift else None))
         self.drift_gain_search = bool(drift_gain_search)
         self.drift_report = None
-        # RECURRENT STATE (see MDNMixJointRE). Mutually exclusive with drift/dt_latent/fish_re: it
-        # is meant to REPLACE them, and running them together would put three mechanisms in
-        # competition for the same variance -- the trap that produced the dt_latent/z
-        # double-counting (between_fish_share 0.304 against a real 0.255).
-        self.state = int(state)
-        # MEASURED defaults (6 fish, hidden 128, 4 epochs, s/epoch and val NLL):
-        #   B=1  chunk=256 -> 114.6 s,  9.51     <- the inherited dt_latent setting
-        #   B=16 chunk=64  ->   7.2 s,  9.94
-        #   B=48 chunk=64  ->   5.1 s, 14.77     <- batch WITHOUT lr: faster, under-trained
-        #   B=48 chunk=32  ->   3.8 s, 10.66
-        # Re-measured on an A100, 12 fish, 8 epochs (s/epoch, val, and whether it had converged):
-        #   B=16  lr 1e-3 c64  -> 30.7 s,  9.76  CONVERGED (flat 5 epochs), 51% of steps NaN-skipped
-        #   B=64  lr 2e-3 c64  ->  8.9 s,  9.98  still falling      <- CHOSEN
-        #   B=256 lr 4e-3 c64  ->  3.6 s, 12.14  PLATEAUED (stuck)
-        #   B=64  lr 2e-3 c128 ->  9.0 s, 11.28  no faster, trains worse
-        # 3.4x faster per epoch and still descending, so it passes B=16 well inside B=16's budget.
-        # The NaN-skip rate also falls with batch (51% -> 29% -> 21%): one extreme bout can blow up
-        # a batch of ONE sequence but is diluted across 64.
-        # Cost is per-TIMESTEP, not per-row (2.0 ms/timestep at B=1, 2.6 ms at B=24), so the
-        # chunk is the real knob and the batch is close to free -- it just makes each of the
-        # cheaper steps far better informed.
-        self.seq_batch = int(seq_batch) if state else 1
-        self.state_chunk = int(state_chunk)
-        # per-fish seed for the recurrent state; 0 reproduces gru1 exactly
-        self.h0_dim = int(h0_dim) if state else 0
-        if self.state:
-            # DRIFT + GRU IS NOW ALLOWED, and the guard that refused it was built on a premise that
-            # has since been measured false. It read "the GRU replaces them" -- but gru1 measured
-            # between_fish_share 0.071 against a real 0.255 (worse than the memoryless MLP's 0.215),
-            # and var_ratio distance 3.13 on gruz with win_acf1 ~ 0, i.e. the GRU produces white
-            # window-to-window jitter rather than the slow correlated drift it was supposed to
-            # subsume. It replaces neither the between-fish latent nor the slow one.
-            #
-            # The two are ORTHOGONAL by construction, not merely by measurement: win_acf1 demeans
-            # WITHIN a fish, so a static latent scores exactly zero on it; and a zero-mean AR(1)
-            # shifts every window of a fish by a different amount, so it contributes nothing to the
-            # between-fish term. One mechanism per variance component.
-            #
-            # dt_latent STAYS refused: it is a slow state on the interval head alone, so it and the
-            # drift genuinely do compete for the same variance -- that is the double-counting the
-            # original guard was right about.
-            if self.dt_latent:
-                raise ValueError("state (GRU) with dt_latent: both are slow states on the interval "
-                                 "channel, competing for the same variance. Use drift, which loads "
-                                 "on all three heads.")
-            # fish_re (re_zero=False) IS allowed alongside the GRU, and is the `gruz` arm: the GRU
-            # carries WITHIN-fish slow structure, z carries BETWEEN-fish identity, and gru1 measured
-            # those moving independently (var_ratio fixed, between_fish_share collapsed to 0.071).
-            # What is refused is BOTH static latents at once -- h_0 and z parameterise the same
-            # between-fish quantity, so they would fit against each other, and scoring them would
-            # need the product quadrature grid.
-            if self.h0_dim and not self.re_zero:
-                raise ValueError("h0_dim>0 with the fish_re latent live (re_zero=False): two static "
-                                 "per-fish latents for one between-fish variance. Pick one -- "
-                                 "h0_dim=2 with re_zero=True is `gru2`, h0_dim=0 with "
-                                 "re_zero=False is `gruz`.")
         self.re_sd = None
         self.re_gain = None
         self.re_gain_report = None
-
-    def _ss_builder(self, train_records):
-        """Feature-matrix rebuilder for scheduled sampling: the clean matrix with ONLY the two
-        history blocks (turn lags, kinematic lags) recomputed from the mixed real / model-drawn
-        series. Everything else is copied from the clean matrix on purpose -- the border block
-        under ``psi_ref='travel'`` derives the previous heading from the CURRENT bout's dtheta
-        (``heading - dtheta``), so rebuilding it from a mixed series would leak a model draw into a
-        teacher-forced input. Column offsets follow build_feature_matrix's block order:
-        [K hist][(3K symbols)][stim][stimhist][border][adapt][kin][lag_valid][clock][run_clock]."""
-        import copy
-        cfg = self._cfg_feat
-        r0 = train_records[0]
-        K = int(cfg["K"])
-        k0 = K + (3 * K if cfg["include_symbols"] else 0)
-        k0 += M._stim_block(r0, cfg["stim_mode"], cfg["rich_scales"],
-                            phi_ref=cfg.get("phi_ref", "ori")).shape[1]
-        if int(cfg.get("K_stim", 1)) > 1:
-            k0 += MB._stimhist_block(r0, cfg).shape[1]
-        if cfg.get("use_border"):
-            k0 += MB._border_block(r0, cfg).shape[1]
-        if cfg.get("use_adapt"):
-            k0 += MB._adapt_block(r0, cfg).shape[1]
-        kin_w = MB.kin_width(cfg)
-        offs = np.cumsum([0] + [len(r.dtheta) for r in train_records])
-        Xc = np.concatenate([MB.build_feature_matrix(r, cfg) for r in train_records], 0)
-
-        def build(ya, yd, yt):
-            X = Xc.copy()
-            for i, r in enumerate(train_records):
-                sl = slice(int(offs[i]), int(offs[i + 1]))
-                X[sl, :K] = M._history_block(ya[sl], K, cfg["dth_scale"],
-                                             run_pos=getattr(r, "run_pos", None))
-                r2 = copy.copy(r)
-                r2.distance_px, r2.dt_s = yd[sl], yt[sl]
-                X[sl, k0:k0 + kin_w] = MB._kin_history_block(r2, cfg)
-            return X
-        return build
 
     # ---- the pieces score() and the EM step both need, built once per record --------------- #
     def _rec_arrays(self, rec):
@@ -2149,53 +1089,10 @@ class MLPMixJointREDensity(JT.MLPMixJointDensity):
                   f"{100 * self.regime_info['frac_pursuit']:.1f}% -> "
                   f"{100 * self.regime_info['share_pursuit']:.0f}%")
 
-        bg_slice = None
-        if self.re_bgain:
-            # column range of the border block inside x:
-            # [K hist][(3K symbols)][stim][stimhist][border][kin]
-            r0 = train_records[0]
-            stim_w = M._stim_block(r0, self.stim_mode, self._rich_scales,
-                                   phi_ref=self._cfg_feat.get("phi_ref", "ori")).shape[1]
-            # K_stim inserts its block BETWEEN stim and border, so the offset must include it or
-            # re_bgain would silently scale the wrong columns.
-            sh_w = MB._stimhist_block(r0, self._cfg_feat).shape[1]
-            bord_w = MB._border_block(r0, self._cfg_feat).shape[1]
-            s0 = self.K + (3 * self.K if self.include_symbols else 0) + stim_w + sh_w
-            bg_slice = (int(s0), int(s0 + bord_w))
-        lag_slice = None
-        if self.re_lag:
-            # column range of the INTERVAL lags inside x, the same offset arithmetic `_ss_builder`
-            # uses: [K hist][(3K symbols)][stim][stimhist][border][adapt][step lags][interval lags]
-            if not self._cfg_feat.get("kin_dt_lags", True):
-                raise ValueError("re_lag needs the interval lags (kin_dt_lags True or 'centred')")
-            r0 = train_records[0]
-            k0 = self.K + (3 * self.K if self.include_symbols else 0)
-            k0 += M._stim_block(r0, self.stim_mode, self._rich_scales,
-                                phi_ref=self._cfg_feat.get("phi_ref", "ori")).shape[1]
-            if int(self._cfg_feat.get("K_stim", 1)) > 1:
-                k0 += MB._stimhist_block(r0, self._cfg_feat).shape[1]
-            if self._cfg_feat.get("use_border"):
-                k0 += MB._border_block(r0, self._cfg_feat).shape[1]
-            if self._cfg_feat.get("use_adapt"):
-                k0 += MB._adapt_block(r0, self._cfg_feat).shape[1]
-            Kk = int(self._cfg_feat.get("K_kin", self.K))
-            lag_slice = (int(k0 + Kk), int(k0 + 2 * Kk))
         per_fish = [MB.build_feature_matrix(r, self._cfg_feat) for r in train_records]
         X = np.concatenate(per_fish, 0)
         fish_idx = np.concatenate([np.full(len(m_), i, dtype=np.int64)
                                    for i, m_ in enumerate(per_fish)])
-        skip_slices = None
-        if self.turn_skip:
-            # the stimulus block [K hist][(3K symbols)][stim ...] and the tail blocks appended after
-            # the run clock (align, static): both straight onto the turn head's outputs
-            r0 = train_records[0]
-            k_s = self.K + (3 * self.K if self.include_symbols else 0)
-            stim_w = M._stim_block(r0, self.stim_mode, self._rich_scales,
-                                   phi_ref=self._cfg_feat.get("phi_ref", "ori")).shape[1]
-            skip_slices = [(int(k_s), int(k_s + stim_w))]
-            tw = MB.tail_width(self._cfg_feat)
-            if tw:
-                skip_slices.append((int(X.shape[1] - tw), int(X.shape[1])))
         y_ang = np.concatenate([r.dtheta for r in train_records])
         y_dist = np.concatenate([np.asarray(r.distance_px, float) for r in train_records])
         y_dt = np.concatenate([np.asarray(r.dt_s, float) for r in train_records])
@@ -2206,17 +1103,10 @@ class MLPMixJointREDensity(JT.MLPMixJointDensity):
             self._dth_scale, self._kin_scales, m=self.re_m,
             epochs=self.epochs, lr=self.lr, patience=self.patience,
             batch_size=self.batch_size, seed=self.seed, n_dist=self.n_dist, n_dt=self.n_dt,
-            sigma_init=self.re_sigma_init, freeze_sigma_zero=self.re_zero,
-            shuffle_labels=self.re_shuffle, use_body=self.re_body,
-            border_gain=self.re_bgain, border_slice=bg_slice, dt_latent=self.dt_latent,
-            block=self.re_block, drift=self.drift, state=self.state,
-            seq_batch=(self.seq_batch if self.state else 1), state_chunk=self.state_chunk,
-            h0_dim=self.h0_dim,
-            ss=self.ss, ss_builder=(self._ss_builder(train_records) if self.ss else None),
-            kin_clip=self._kin_clip, weights=weights, dt_trunc=getattr(self, "dt_trunc", None),
-            disp=self.re_disp, lag_slice=lag_slice, tail=self.re_tail,
+            sigma_init=self.re_sigma_init, drift=self.drift,
+            weights=weights, dt_trunc=getattr(self, "dt_trunc", None),
             weight_heads=(self.regime_w or {}).get("heads"), weights_per_head=weights_per_head,
-            skip_slices=skip_slices, depth=self.depth, tsize=self.re_tsize)
+            depth=self.depth, tsize=self.re_tsize)
         if self.drift:
             # Publish the FITTED loadings into cfg_feat BEFORE the calibrators, which all roll out.
             # Same discipline dt_latent and fish_re follow, and for the same reason: the generator
@@ -2231,8 +1121,8 @@ class MLPMixJointREDensity(JT.MLPMixJointDensity):
                   f"loadings turn {d['turn']:+.4f}  dist {d['dist']:+.4f}  dt {d['dt']:+.4f}")
         # ---- Stage B --------------------------------------------------------------------- #
         # The prior is N(0, I) throughout; `re_sd` exists only so the generator and the quadrature
-        # grid read the same object, and is zeroed for the pinned control.
-        self.re_sd = np.zeros(self.re_m) if self.re_zero else np.ones(self.re_m)
+        # grid read the same object.
+        self.re_sd = np.ones(self.re_m)
         # The generator reads this; JT.generate_mix_joint_loop draws z ~ N(0, diag(sd^2)) per
         # trajectory from a SPAWNED stream. Setting it BEFORE the gain search and the calibrators is
         # deliberate: they all roll out train fish through MX._gen_for, so they see PRIOR draws,
@@ -2247,7 +1137,7 @@ class MLPMixJointREDensity(JT.MLPMixJointDensity):
         # Metric A describe a different object from Metric B.
         _skip_cal = bool((ctx.cfg or {}).get("skip_calibrators", False))
         self.re_gain, self.re_gain_report = 1.0, None
-        if not self.re_zero and self.re_gain_search:
+        if self.re_gain_search:
             # max_fish=8, matching _search_kin_feedback's precedent: this runs inside every fold's
             # fit, so it is charged 5 grid points x max_fish x n_draws rollouts every time. 8 fish
             # x 2 draws = 16 trajectories is what the smoke suite showed gives a clean interior
@@ -2260,12 +1150,10 @@ class MLPMixJointREDensity(JT.MLPMixJointDensity):
                 max_fish=min(self.contain_fish, 8), **_gen_kw)
             apply_loading_gain(self._model, self.re_gain, which="all")
             print(f"    [{self.name}] loading gain {self.re_gain} (grid {self.re_gain_grid}, {len(_grid)} pts)")
-            self.tail_gain, self.tail_gain_report = 1.0, None
             if self.re_gain in (_grid[0], _grid[-1]):
                 print(f"    WARNING [{self.name}]: loading gain pinned at the grid edge "
                       f"({self.re_gain}); the between-fish spread could not be matched, so widen "
-                      f"the grid (re_gain_grid='wide') before trusting this arm"
-                      + ("  (expected for the label-shuffled control)" if self.re_shuffle else ""))
+                      f"the grid (re_gain_grid='wide') before trusting this arm")
         self._re_nodes, self._re_log_pi = _ghq(self.re_m, self.re_sd, k=self.re_ghq_k)
 
         # ---- the drift's generation gains, searched by rollout ---------------------------- #
@@ -2307,158 +1195,6 @@ class MLPMixJointREDensity(JT.MLPMixJointDensity):
         """
         from scipy.special import logsumexp
         X, (a_z, ld_c), (ya, yd, yt) = self._rec_arrays(rec)
-        if int(getattr(self, "state", 0)) and getattr(self._model, "drift", None):
-            # SRNN STAGE 1: GRU + pinned AR(1) drift (+ optionally the static z).
-            #
-            # Structurally IDENTICAL to the non-recurrent drift branch below -- same product grid
-            # g = (q, j), same `I (x) P` transition (z never moves, s does), same chained
-            # within-bout reweighting -- with one substitution: the emission parameters come from
-            # the recurrent trunk instead of `_trunk`. Written to mirror that code deliberately;
-            # a second, differently-shaped implementation of the same recursion is how two objects
-            # start diverging.
-            #
-            # The GRU pass is hoisted OUT of the grid (`state_trunks`), because the state sees
-            # neither z nor s. One recurrent pass per record, Q x L head evaluations on top.
-            from scipy.special import logsumexp as _lse
-            net = self._model
-            s_nodes, logP_t, log_pi0_t = ar1_chain(net.d_phi(), int(net.drift["n_levels"]))
-            logP = logP_t.numpy().astype(float); log_pi0 = log_pi0_t.numpy().astype(float)
-            L = int(s_nodes.shape[0])
-            live_z = bool(self._state_latent_dim()) and not int(net.h0_dim)
-            zn, zlp = ((self._re_nodes, self._re_log_pi) if live_z
-                       else (np.zeros((1, max(int(self.re_m), 1))), np.zeros(1)))
-            Q, n = zn.shape[0], X.shape[0]
-            La = np.empty((n, Q, L)); Ld = np.empty((n, Q, L)); Lt = np.empty((n, Q, L))
-            W = np.empty((n, Q, 5)); SHP = np.empty((9, n, Q))
-            with torch.no_grad():
-                t1 = lambda a, d=np.float32: torch.tensor(np.asarray(a, d)).reshape(1, -1)
-                u = torch.tensor(state_gru_input(ya, yd, yt, self._cfg_feat["dth_scale"],
-                                                 self._cfg_feat["kin_scales"])).reshape(1, n, 3)
-                Xq = torch.tensor(np.asarray(X, np.float32)).reshape(1, n, -1)
-                trunks = net.state_trunks(Xq, u)                       # ONCE, shared by all Q x L
-                for q in range(Q):
-                    zq = (torch.tensor(np.asarray(zn[q:q + 1], np.float32)) if live_z else None)
-                    la, ld_, lt_ = net.state_chain_levels(
-                        Xq, t1(a_z), t1(ld_c), u, t1(ya), t1(yd), t1(yt), s_nodes,
-                        z=zq, trunks=trunks, split=True)
-                    La[:, q, :] = la[0].numpy(); Ld[:, q, :] = ld_[0].numpy()
-                    Lt[:, q, :] = lt_[0].numpy()
-                    # symbol track at the drift's prior MEAN (s = 0), as the non-recurrent drift
-                    # branch does: with the drift on, the turn emission depends on s, so a single
-                    # symbol PMF cannot be exact. The approximation is confined to this column --
-                    # the three density channels are marginalised exactly, and they are Metric A.
-                    zc = None if zq is None else net._z_core(zq).repeat_interleave(n, dim=0)
-                    o0, d0_, t0_ = net._state_heads(trunks.reshape(n, -1),
-                                                    t1(a_z).reshape(-1, 1),
-                                                    t1(ld_c).reshape(-1, 1), zc)
-                    ang0 = net._params_at(o0, d0_, t0_)[0]
-                    W[:, q, :] = np.exp(ang0[0].numpy())
-                    for j in range(9):
-                        SHP[j, :, q] = ang0[j + 1].numpy()
-
-            G = Q * L
-            La = La.reshape(n, G); Ld = Ld.reshape(n, G); Lt = Lt.reshape(n, G)
-            log_pi_g = (zlp.reshape(-1, 1) + log_pi0.reshape(1, -1)).reshape(-1)
-            dv = np.asarray(yd, float); tv = np.asarray(yt, float)
-            md = np.isfinite(dv) & (dv > 0); mt = np.isfinite(tv) & (tv > 0)
-            Ld_w = np.where(md.reshape(-1, 1), Ld, 0.0)
-            Lt_w = np.where(mt.reshape(-1, 1), Lt, 0.0)
-            Ltot = La + Ld_w + Lt_w
-            # Running belief over (z, s): the prior times everything seen strictly BEFORE bout t,
-            # propagated through I (x) P.
-            lw0 = np.empty((n, G))
-            lw0[0] = log_pi_g
-            for t in range(1, n):
-                prev = (lw0[t - 1] + Ltot[t - 1]).reshape(Q, L)
-                lw0[t] = _lse(prev[:, :, None] + logP[None, :, :], axis=1).reshape(-1)
-            d0 = _lse(lw0, axis=1)
-            logdens = _lse(lw0 + La, axis=1) - d0                      # p(dtheta | past)
-            lw1 = lw0 + La; d1 = _lse(lw1, axis=1)
-            ldv = _lse(lw1 + Ld, axis=1) - d1                          # p(l | past, dtheta)
-            lw2 = lw1 + Ld_w; d2 = _lse(lw2, axis=1)
-            ltv = _lse(lw2 + Lt, axis=1) - d2                          # p(tau | past, dtheta, l)
-            pw = np.exp(lw0 - d0.reshape(-1, 1)).reshape(n, Q, L).sum(axis=2)
-            slq_q = np.stack([MX.symbol_logq_mix(W[:, q, :], *[SHP[j, :, q] for j in range(9)])
-                              for q in range(Q)], axis=1)
-            slq = _lse(slq_q + np.log(np.maximum(pw, 1e-300))[:, :, None], axis=1)
-            slq = slq - _lse(slq, axis=1, keepdims=True)
-            return dict(logdens=logdens, symbol_logq=slq,
-                        logdens_dist=np.where(md, ldv, np.nan),
-                        logdens_dt=np.where(mt, ltv, np.nan))
-        if int(getattr(self, "state", 0)) and self._state_latent_dim():
-            # RECURRENT MODEL WITH A STATIC PER-FISH LATENT -- either the GRU seed (h0_dim) or the
-            # fish_re offset z. It must be integrated out, because a held-out fish has no fitted
-            # embedding. Given the latent the GRU is still deterministic, so the latent is STATIC
-            # over the sequence and the belief update is the same cumsum `fish_re` uses -- no
-            # forward recursion needed. The Q quadrature nodes are run as a BATCH through
-            # state_chain, which is why this costs about one pass rather than Q of them: the loop
-            # is dispatch-bound, so the batch dimension is nearly free.
-            #
-            # ONE latent, never both. Two static latents would need the PRODUCT grid (2-d x 2-d =
-            # 2401 nodes at k=7) and, worse, they would be fitting the same between-fish variance
-            # against each other -- the dt_latent/z double-counting trap. The constructor refuses
-            # the combination; this branch therefore only ever has one to integrate.
-            from scipy.special import logsumexp as _lse
-            net = self._model
-            if int(net.h0_dim):
-                nodes, log_pi = _ghq(net.h0_dim, np.ones(net.h0_dim), k=int(self.re_ghq_k))
-            else:
-                # the SAME grid the non-recurrent fish_re path uses, built from the fitted prior sd
-                nodes, log_pi = self._re_nodes, self._re_log_pi
-            Q, n = nodes.shape[0], X.shape[0]
-            with torch.no_grad():
-                t1 = lambda a, d=np.float32: torch.tensor(np.asarray(a, d)).reshape(1, -1).expand(Q, -1)
-                u = torch.tensor(state_gru_input(ya, yd, yt, self._cfg_feat["dth_scale"],
-                                                 self._cfg_feat["kin_scales"])).reshape(1, n, 3).expand(Q, -1, -1)
-                Xq = torch.tensor(np.asarray(X, np.float32)).reshape(1, n, -1).expand(Q, -1, -1)
-                nt = torch.tensor(np.asarray(nodes, np.float32))
-                h0 = net.h0_from(nt) if int(net.h0_dim) else None
-                zq = None if int(net.h0_dim) else nt
-                la_q, ld_q, lt_q, _ = net.state_chain(Xq, t1(a_z), t1(ld_c), u,
-                                                      t1(ya), t1(yd), t1(yt), h0=h0, z=zq)
-            La = la_q.numpy().T.astype(float)                      # (n, Q)
-            Ld = ld_q.numpy().T.astype(float); Lt = lt_q.numpy().T.astype(float)
-            dv = np.asarray(yd, float); tv = np.asarray(yt, float)
-            md = np.isfinite(dv) & (dv > 0); mt = np.isfinite(tv) & (tv > 0)
-            Ld_w = np.where(md.reshape(-1, 1), Ld, 0.0)
-            Lt_w = np.where(mt.reshape(-1, 1), Lt, 0.0)
-            cum = np.zeros_like(La)
-            if n > 1:
-                cum[1:] = np.cumsum((La + Ld_w + Lt_w)[:-1], axis=0)
-            lw0 = log_pi.reshape(1, -1) + cum
-            d0 = _lse(lw0, axis=1)
-            logdens = _lse(lw0 + La, axis=1) - d0
-            lw1 = lw0 + La; d1 = _lse(lw1, axis=1)
-            ldv = _lse(lw1 + Ld, axis=1) - d1
-            lw2 = lw1 + Ld_w; d2 = _lse(lw2, axis=1)
-            ltv = _lse(lw2 + Lt, axis=1) - d2
-            # symbol track at the prior MEAN latent (zero for both parameterisations) -- an
-            # approximation confined to that column; the three density channels above are
-            # marginalised exactly and they are what Metric A is.
-            slq = self._state_symbol_logq(X, ya, yd, yt)
-            return dict(logdens=logdens, symbol_logq=slq,
-                        logdens_dist=np.where(md, ldv, np.nan),
-                        logdens_dt=np.where(mt, ltv, np.nan))
-        if int(getattr(self, "state", 0)):
-            # RECURRENT MODEL, h_0 = 0: no latent to integrate out. With the targets observed the
-            # GRU is deterministic, so the chain rule IS the exact marginal predictive.
-            with torch.no_grad():
-                t = lambda a, d=np.float32: torch.tensor(np.asarray(a, d)).reshape(1, -1)
-                u = torch.tensor(state_gru_input(ya, yd, yt, self._cfg_feat["dth_scale"],
-                                                 self._cfg_feat["kin_scales"])).reshape(1, -1, 3)
-                la, ld_, lt_, _ = self._model.state_chain(
-                    torch.tensor(np.asarray(X, np.float32)).reshape(1, X.shape[0], -1),
-                    t(a_z), t(ld_c), u, t(ya), t(yd), t(yt))
-                trunk_lo = la.reshape(-1).numpy()
-                ldv = ld_.reshape(-1).numpy(); ltv = lt_.reshape(-1).numpy()
-            md = np.isfinite(np.asarray(yd, float)) & (np.asarray(yd, float) > 0)
-            mt = np.isfinite(np.asarray(yt, float)) & (np.asarray(yt, float) > 0)
-            # symbol PMF from the SAME per-bout angle params the density used
-            with torch.no_grad():
-                slq = self._state_symbol_logq(X, ya, yd, yt)
-            return dict(logdens=trunk_lo, symbol_logq=slq,
-                        logdens_dist=np.where(md, ldv, np.nan),
-                        logdens_dt=np.where(mt, ltv, np.nan))
         nodes, log_pi = self._re_nodes, self._re_log_pi
         n, Q = X.shape[0], nodes.shape[0]
 
@@ -2467,23 +1203,13 @@ class MLPMixJointREDensity(JT.MLPMixJointDensity):
         yat = torch.tensor(np.asarray(ya, np.float32))
         ydt = torch.tensor(np.asarray(yd, np.float32))
         ytt = torch.tensor(np.asarray(yt, np.float32))
-        # THE GRID. Without the timing latent it is the Q z-nodes, exactly as before. With it, the
-        # belief lives on the PRODUCT grid (z_q, s_j), flattened as g = q*L + j, and the transition
-        # is I (x) P -- z never moves, s does. Every line below is shared; only the propagation
-        # differs, which is the entire structural difference between a static latent and a state.
-        DTL = getattr(self._model, "dt_latent", None)
+        # THE GRID. Without the drift it is the Q z-nodes. With it, the belief lives on the PRODUCT grid (z_q, s_j),
+        # flattened as g = q*L + j, and the transition is I (x) P -- z never moves, s does. Every line below is
+        # shared; only the propagation differs.
         DRF = getattr(self._model, "drift", None)
-        if DTL and DRF:
-            return self._score_two_chain(X, a_z, ld_c, ya, yd, yt, nodes, log_pi)
-        if DTL or DRF:
+        if DRF:
             with torch.no_grad():
-                if DRF:
-                    s_nodes, logP_t, log_pi0_t = ar1_chain(self._model.d_phi(),
-                                                           int(DRF["n_levels"]))
-                else:
-                    s_nodes, logP_t, log_pi0_t = ar1_chain(self._model.s_phi(),
-                                                           int(DTL["n_levels"]),
-                                                           span=float(DTL["span"]))
+                s_nodes, logP_t, log_pi0_t = ar1_chain(self._model.d_phi(), int(DRF["n_levels"]))
             logP = logP_t.numpy().astype(float); log_pi0 = log_pi0_t.numpy().astype(float)
             L = int(s_nodes.shape[0])
         else:
@@ -2513,11 +1239,8 @@ class MLPMixJointREDensity(JT.MLPMixJointDensity):
                     ang, dpar, tpar = self._model.joint_forward_re(Xt, azt, lct, zq)
                     La[:, q] = MX.mix_logdens(yat, ang).numpy()
                     Ld[:, q] = MX._lnk_logpdf(torch.clamp(ydt, min=1e-6), *dpar).numpy()
-                    if DTL:
-                        Lt[:, q, :] = self._model.dt_level_logliks(tpar, ytt, s_nodes).numpy()
-                    else:
-                        Lt[:, q, 0] = MX._dt_logpdf(torch.clamp(ytt, min=1e-6), *tpar,
-                                                    hi=self._model.dt_trunc).numpy()
+                    Lt[:, q, 0] = MX._dt_logpdf(torch.clamp(ytt, min=1e-6), *tpar,
+                                                hi=self._model.dt_trunc).numpy()
                 W[:, q, :] = np.exp(ang[0].numpy())
                 for j in range(9):
                     SHP[j, :, q] = ang[j + 1].numpy()
@@ -2541,7 +1264,7 @@ class MLPMixJointREDensity(JT.MLPMixJointDensity):
 
         # Running belief: the prior times everything seen strictly before bout t.
         Ltot = La + Ld_w + Lt_w
-        if DTL or DRF:
+        if DRF:
             lw0 = np.empty((n, G))
             lw0[0] = log_pi_g
             for t in range(1, n):
@@ -2570,9 +1293,8 @@ class MLPMixJointREDensity(JT.MLPMixJointDensity):
         # Symbol PMF under the SAME belief as the density beside it. Running symbol_logq_mix on the
         # z = 0 parameters, as the parent class does, would report a symbol column conditioned on a
         # different object than the density column and the two would silently disagree.
-        # Under dt_latent the turn emission does not depend on s, so summing the product-grid
-        # posterior over levels leaves exactly the belief about z. Under DRIFT the turn emission
-        # DOES depend on s, so this reports the symbol track at the drift's prior mean (s = 0) --
+        # Under the DRIFT the turn emission depends on s, so this reports the symbol track at the drift's prior mean
+        # (s = 0) --
         # an approximation, and confined to the symbol column: the three density channels above are
         # marginalised exactly, and they are what Metric A reports.
         pw = np.exp(lw0 - d0.reshape(-1, 1)).reshape(n, Q, L).sum(axis=2)      # (n, Q)
@@ -2582,151 +1304,9 @@ class MLPMixJointREDensity(JT.MLPMixJointDensity):
         slq = slq - logsumexp(slq, axis=1, keepdims=True)
         return dict(logdens=logdens, symbol_logq=slq, logdens_dist=ld, logdens_dt=lt)
 
-    def _score_two_chain(self, X, a_z, ld_c, ya, yd, yt, nodes, log_pi):
-        """TWO-STATE design: the slow chain (turn + step) and the fast interval chain marginalised
-        EXACTLY, z integrated out on the quadrature grid.
-
-        Given z the two chains see disjoint channels, so their posteriors factorise: the belief is
-        (Q, L_d) + (Q, L_s), never Q x L_d x L_s. Within a bout the reweighting follows the chained
-        order, as the one-chain branches do: the turn is scored under the slow-chain posterior with
-        the fast chain's evidence folded into the z-weights; the step under the slow-chain posterior
-        that has also seen this bout's turn; the interval under the fast-chain posterior with the
-        slow chain's evidence INCLUDING this bout's turn and step folded into the z-weights. The
-        three conditionals multiply to p(dtheta, l, tau | past), so the record's sum telescopes to
-        the exact joint marginal -- checked against the trainer's two-recursion loss at z = 0.
-        """
-        from scipy.special import logsumexp as lse
-        net = self._model
-        with torch.no_grad():
-            nd, logPd_t, pi0d_t = ar1_chain(net.d_phi(), int(net.drift["n_levels"]))
-            ns, logPs_t, pi0s_t = ar1_chain(net.s_phi(), int(net.dt_latent["n_levels"]),
-                                            span=float(net.dt_latent["span"]))
-        logPd, pi0d = logPd_t.numpy().astype(float), pi0d_t.numpy().astype(float)
-        logPs, pi0s = logPs_t.numpy().astype(float), pi0s_t.numpy().astype(float)
-        Ld, Ls = len(pi0d), len(pi0s)
-        n, Q = X.shape[0], nodes.shape[0]
-        Xt = torch.tensor(np.asarray(X, np.float32))
-        azt = torch.tensor(a_z); lct = torch.tensor(ld_c)
-        yat = torch.tensor(np.asarray(ya, np.float32))
-        ydt = torch.tensor(np.asarray(yd, np.float32))
-        ytt = torch.tensor(np.asarray(yt, np.float32))
-        La = np.empty((n, Q, Ld)); Ldd = np.empty((n, Q, Ld)); Lt = np.empty((n, Q, Ls))
-        W = np.empty((n, Q, 5)); SHP = np.empty((9, n, Q))
-        with torch.no_grad():
-            for q in range(Q):
-                zq = torch.tensor(nodes[q]).reshape(1, -1).expand(n, -1)
-                out_, do_, to_ = net._trunk(Xt, azt, lct, zq)
-                for j in range(Ld):
-                    ang_j, dp_j, _ = net._params_at(out_, do_, to_, nd[j])
-                    La[:, q, j] = MX.mix_logdens(yat, ang_j).numpy()
-                    Ldd[:, q, j] = MX._lnk_logpdf(torch.clamp(ydt, min=1e-6), *dp_j).numpy()
-                ang, _, tpar = net._params_at(out_, do_, to_)     # d_dt = 0: dt sees no slow shift
-                Lt[:, q, :] = net.dt_level_logliks(tpar, ytt, ns).numpy()
-                W[:, q, :] = np.exp(ang[0].numpy())
-                for j in range(9):
-                    SHP[j, :, q] = ang[j + 1].numpy()
-        dv = np.asarray(yd, float); tv = np.asarray(yt, float)
-        md = np.isfinite(dv) & (dv > 0); mt = np.isfinite(tv) & (tv > 0)
-        Ld_w = np.where(md[:, None, None], Ldd, 0.0)
-        Lt_w = np.where(mt[:, None, None], Lt, 0.0)
-        # Forward recursions per z-node: the belief over each chain's level BEFORE bout t.
-        ad = np.empty((n, Q, Ld)); at = np.empty((n, Q, Ls))
-        ad[0] = pi0d[None, :]; at[0] = pi0s[None, :]
-        for t in range(1, n):
-            ad[t] = lse((ad[t - 1] + La[t - 1] + Ld_w[t - 1])[:, :, None] + logPd[None, :, :], axis=1)
-            at[t] = lse((at[t - 1] + Lt_w[t - 1])[:, :, None] + logPs[None, :, :], axis=1)
-        Ct = lse(at, axis=2)                                        # (n, Q) fast-chain evidence < t
-        w0 = log_pi[None, :, None] + ad + Ct[:, :, None]           # belief over (z, s_slow)
-        d0 = lse(w0, axis=(1, 2))
-        logdens = lse(w0 + La, axis=(1, 2)) - d0                    # p(dtheta | past)
-        w1 = w0 + La
-        d1 = lse(w1, axis=(1, 2))
-        ldv = lse(w1 + Ldd, axis=(1, 2)) - d1                       # p(l | past, dtheta)
-        Dinc = lse(ad + La + Ld_w, axis=2)                          # slow-chain evidence <= t
-        v0 = log_pi[None, :, None] + at + Dinc[:, :, None]          # belief over (z, s_fast)
-        e0 = lse(v0, axis=(1, 2))
-        ltv = lse(v0 + Lt, axis=(1, 2)) - e0                        # p(tau | past, dtheta, l)
-        # symbol track at both chains' prior mean, under the belief about z (as the drift branch)
-        pw = np.exp(w0 - d0[:, None, None]).sum(axis=2)             # (n, Q)
-        slq_q = np.stack([MX.symbol_logq_mix(W[:, q, :], *[SHP[j, :, q] for j in range(9)])
-                          for q in range(Q)], axis=1)
-        slq = lse(slq_q + np.log(np.maximum(pw, 1e-300))[:, :, None], axis=1)
-        slq = slq - lse(slq, axis=1, keepdims=True)
-        return dict(logdens=logdens, symbol_logq=slq,
-                    logdens_dist=np.where(md, ldv, np.nan), logdens_dt=np.where(mt, ltv, np.nan))
-
-    def _state_latent_dim(self):
-        """Width of the STATIC per-fish latent the recurrent scorer has to integrate out, or 0.
-
-        Exactly one of the two can be live (the constructor refuses both), so this is a single
-        number rather than a pair. ``re_sd`` is all-zero for the pinned control, which is what makes
-        gru1 fall through to the cheap deterministic branch untouched.
-        """
-        if int(getattr(self._model, "h0_dim", 0)):
-            return int(self._model.h0_dim)
-        sd = getattr(self, "re_sd", None)
-        return int(self.re_m) if sd is not None and float(np.max(np.abs(sd))) > 0.0 else 0
-
-    @torch.no_grad()
-    def _state_symbol_logq(self, X, ya, yd, yt):
-        """(n, 3) symbol log-PMF for the recurrent model, from the same per-bout angle params.
-
-        Re-runs the state forward to collect the angle parameters, then hands them to the SAME
-        ``MX.symbol_logq_mix`` the rest of the family uses -- so the symbol column is conditioned on
-        exactly the object the density column is, rather than on a z=0 stand-in.
-        """
-        net = self._model
-        u = torch.tensor(state_gru_input(ya, yd, yt, self._cfg_feat["dth_scale"],
-                                         self._cfg_feat["kin_scales"]))
-        Xt = torch.tensor(np.asarray(X, np.float32))
-        h = torch.zeros((1, net.state_hidden))
-        W = np.empty((len(X), 5)); SHP = np.empty((9, len(X)))
-        for t in range(len(X)):
-            trunk = torch.cat([net.body(Xt[t:t + 1]), h], dim=1)
-            ang = net._angle_params(net.head(trunk))
-            W[t] = np.exp(ang[0][0].numpy())
-            for j in range(9):
-                SHP[j, t] = float(ang[j + 1][0])
-            h = net.state_cell(torch.cat([Xt[t:t + 1], u[t:t + 1]], dim=1), h)
-        return MX.symbol_logq_mix(W, *[SHP[j] for j in range(9)])
-
     def sample(self, rec, rng, **kw):
-        """Free-run one trajectory.
-
-        The RECURRENT model must go through the torch rollout: the numpy generator has no way to
-        carry a GRU state, so dispatching to it would silently roll out a stateless model while the
-        likelihood reported a stateful one -- exactly the two-objects trap this repo keeps hitting.
-        """
-        if int(self._cfg_feat.get("state", 0)):
-            return self.sample_batch(rec, 1, rng)[0]
+        """Free-run one trajectory (``JT.generate_mix_joint_loop``)."""
         return self._sample_legacy(rec, rng, **kw)
-
-    @property
-    def batched_sample(self):
-        """True when ``sample_batch`` is worth calling -- see its docstring for why it matters."""
-        return bool(int(self._cfg_feat.get("state", 0)))
-
-    def sample_batch(self, rec, n, rng, **kw):
-        """``n`` independent free-runs of one record, generated in ONE batched rollout.
-
-        WHY THIS EXISTS. A recurrent rollout is 4700 SEQUENTIAL steps, each ~30 small torch ops.
-        At batch 1 that is entirely Python-dispatch bound -- measured on an A100, Metric B (which
-        needs R=12 panel rollouts per held-out fish plus the C2ST replicates, ~80 rollouts for a
-        2-fold run) took longer than the whole teacher-forced fit, with the GPU essentially idle.
-        Batching the replicates costs almost nothing per extra trajectory because the dispatch is
-        amortised over the batch dimension.
-
-        The trajectories are independent: nothing in the rollout couples rows (feature blocks,
-        heads, GRU cell and samplers are all elementwise per row), and ``advance_t``'s early break
-        on ``inside.all()`` only skips iterations that are masked no-ops for the rows already
-        finished. Batching therefore changes WHICH variates each trajectory draws -- a different
-        realisation of the same law -- not the law itself.
-        """
-        if not self.batched_sample:
-            # legacy path unchanged: successive draws off the SAME rng, exactly as the callers did
-            return [self._sample_legacy(rec, rng, **kw) for _ in range(int(n))]
-        self._model.to(torch.device("cpu")).eval()
-        return state_rollout_batch(self._model, rec, self._cfg_feat, int(n), rng)
 
     def _sample_legacy(self, rec, rng, **kw):
         # **kw forwards the tool-mode knobs (stim_provider / stop_time_s); see JT.sample.
@@ -2762,45 +1342,17 @@ def save_fishre(model, path):
                     include_symbols=model.include_symbols, use_border=model.use_border,
                     border_mode=model.border_mode, wall_mode=model._cfg_feat.get("wall_mode", "clip"),
                     n_dist=model.n_dist, n_dt=model.n_dt,
-                    vigor=model.vigor, vigor_drift_calib=model.vigor_drift_calib,
-                    kin_fb_calib=model.kin_fb_calib,
-                    indiv=model.indiv, innov_comp=model.innov_comp,
-                    re_m=int(model.re_m), re_sd=np.asarray(model.re_sd, float),
-                    re_zero=bool(model.re_zero), re_shuffle=bool(model.re_shuffle),
-                    re_body=bool(model.re_body), contain_graded=bool(model.contain_graded),
-                    contain_decouple=bool(getattr(model, "contain_decouple", False)),
-                    rad_indiv=bool(getattr(model, "rad_indiv", False)),
-                    re_bgain=bool(getattr(model, "re_bgain", False)),
-                    re_border_slice=(tuple(model._model.border_slice)
-                                     if getattr(model._model, "border_gain", False) else None),
+                    re_m=int(model.re_m), re_sd=np.asarray(model.re_sd, float), re_body=False,
                     re_ghq_k=int(model.re_ghq_k), re_gain=model.re_gain,
-                    re_gain_grid=str(getattr(model, "re_gain_grid", "std")),
-                    re_gain_mode=str(getattr(model, "re_gain_mode", "global")),
-                    re_block=bool(getattr(model, "re_block", False)),
-                    re_disp=bool(getattr(model, "re_disp", False)),
-                    re_lag=bool(getattr(model, "re_lag", False)),
-                    re_tail=bool(getattr(model, "re_tail", False)),
+                    re_gain_grid=str(getattr(model, "re_gain_grid", "std")), re_gain_mode="global",
                     re_tsize=bool(getattr(model, "re_tsize", False)),
-                    turn_skip=bool(getattr(model, "turn_skip", False)),
                     skip_slices=(list(model._model.skip_slices) if getattr(model._model, "skip_slices", None) else None),
                     depth=int(getattr(model._model, "depth", 1)),
-                    tail_gain=getattr(model, "tail_gain", None),
-                    tail_gain_report=getattr(model, "tail_gain_report", None),
-                    re_lag_slice=(tuple(model._model.lag_slice)
-                                  if getattr(model._model, "lag_slice", None) else None),
-                    spatial_gain=getattr(model, "spatial_gain", None),
-                    spatial_gain_report=getattr(model, "spatial_gain_report", None),
                     re_gain_report=getattr(model, "re_gain_report", None),
-                    dt_latent=getattr(model, "dt_latent", None),
                     drift=getattr(model, "drift", None),
-                    state=int(getattr(model, "state", 0)),
-                    h0_dim=int(getattr(model, "h0_dim", 0)),
                     drift_report=getattr(model, "drift_report", None),
-                    ss=getattr(model, "ss", None),            # training-only; for the record
                     regime_w=getattr(model, "regime_w", None),   # training-only; for the record
                     K_stim=int(getattr(model, "K_stim", 1)),
-                    noise_aug=getattr(model, "noise_aug", None),
-                    contain_mode=str(getattr(model, "contain_mode", "bias")),
                     n_fish=int(model.config["n_fish"]),
                     z_twin=getattr(model, "z_twin", None),   # in-sample twin table, else None
                     stim_turn=(model._model.stim_turn.spec()
@@ -2810,6 +1362,11 @@ def save_fishre(model, path):
     return path
 
 
+# options of earlier models that this code does not have: a checkpoint that uses one is refused
+_REMOVED = ("re_zero", "re_shuffle", "contain_graded", "contain_decouple", "rad_indiv", "re_bgain", "re_block",
+            "re_disp", "re_lag", "re_tail", "turn_skip", "dt_latent", "ss", "noise_aug", "state", "h0_dim")
+
+
 def load_fishre(path, map_location="cpu"):
     """Reload a model saved by ``save_fishre``, ready to ``.sample`` / ``.score``."""
     MX._numpy2_unpickle_compat()
@@ -2817,6 +1374,9 @@ def load_fishre(path, map_location="cpu"):
         blob = torch.load(path, map_location=map_location, weights_only=False)
     except TypeError:
         blob = torch.load(path, map_location=map_location)
+    off = [k for k in _REMOVED if blob.get(k)] + (["re_body"] if blob.get("re_body", True) else [])
+    if off or str(blob.get("re_gain_mode", "global")) != "global":
+        raise ValueError(f"{path}: the checkpoint uses options this code does not have: {off}")
     lp = blob["loop"]
     m = MLPMixJointREDensity(K=blob["K"], K_kin=blob["K_kin"], stim_mode=blob["stim_mode"],
                              include_symbols=blob["include_symbols"], hidden=blob["hidden"],
@@ -2825,42 +1385,16 @@ def load_fishre(path, map_location="cpu"):
                              closed_loop=lp["closed_loop"], guardrail=lp["guardrail"],
                              eps=lp["eps"], stim_loop=lp["stim_loop"],
                              n_dist=blob["n_dist"], n_dt=blob["n_dt"],
-                             re_m=blob["re_m"], re_zero=blob.get("re_zero", False),
-                             re_shuffle=blob.get("re_shuffle", False),
-                             re_body=blob.get("re_body", True),   # pre-flag ckpts HAD the body
-                             contain_graded=blob.get("contain_graded", False),
-                             contain_decouple=blob.get("contain_decouple", False),
-                             rad_indiv=blob.get("rad_indiv", False),
-                             re_bgain=blob.get("re_bgain", False),
-                             re_gain_grid=blob.get("re_gain_grid", "std"),
-                             re_gain_mode=blob.get("re_gain_mode", "global"),
-                             re_block=blob.get("re_block", False),
-                             dt_latent=blob.get("dt_latent"),
-                             drift=blob.get("drift"),
-                             state=int(blob.get("state", 0)),
-                             h0_dim=int(blob.get("h0_dim", 0)),
-                             ss=blob.get("ss"),
-                             re_disp=blob.get("re_disp", False), re_lag=blob.get("re_lag", False),
-                             re_tail=blob.get("re_tail", False), re_tsize=blob.get("re_tsize", False),
-                             turn_skip=blob.get("turn_skip", False), depth=int(blob.get("depth", 1)),
-                             re_ghq_k=blob.get("re_ghq_k", 7))
+                             re_m=blob["re_m"], re_gain_grid=blob.get("re_gain_grid", "std"),
+                             drift=blob.get("drift"), re_tsize=blob.get("re_tsize", False),
+                             depth=int(blob.get("depth", 1)), re_ghq_k=blob.get("re_ghq_k", 7))
     net = MDNMixJointRE(blob["n_features"], blob["hidden"], n_dist=blob["n_dist"],
                         n_dt=blob["n_dt"], n_fish=blob["n_fish"], m=blob["re_m"],
-                        use_body=blob.get("re_body", True),
-                        border_gain=blob.get("re_bgain", False),
-                        border_slice=blob.get("re_border_slice"),
-                        dt_latent=blob.get("dt_latent"),
-                        block=blob.get("re_block", False),
-                        drift=blob.get("drift"),
-                        state=int(blob.get("state", 0)),
-                        h0_dim=int(blob.get("h0_dim", 0)),
-                        disp=blob.get("re_disp", False), lag_slice=blob.get("re_lag_slice"),
-                        tail=blob.get("re_tail", False), skip_slices=blob.get("skip_slices"),
+                        drift=blob.get("drift"), skip_slices=blob.get("skip_slices"),
                         depth=int(blob.get("depth", 1)), tsize=blob.get("re_tsize", False))
     if blob.get("stim_turn") is not None:          # profile fine-tune: rebuild the term before loading
         net.stim_turn = JT.stim_turn_from_spec(blob["stim_turn"])
     net.load_state_dict(blob["state_dict"]); net.eval()
-    m.tail_gain = blob.get("tail_gain"); m.tail_gain_report = blob.get("tail_gain_report")
     net.dt_trunc = blob["cfg_feat"].get("dt_trunc")
     m.dt_trunc = net.dt_trunc
     m._model = net
@@ -2869,24 +1403,11 @@ def load_fishre(path, map_location="cpu"):
     m._dt_pool = blob["dt_pool"]; m._dist_pool = blob["dist_pool"]
     m.config = blob["config"]; m.name = blob["name"]; m.history = blob.get("history")
     m._dth_scale = blob["cfg_feat"]["dth_scale"]; m._kin_scales = blob["cfg_feat"]["kin_scales"]
-    # Restore the treatment flags. Generation reads _cfg_feat, not these, so a rollout is
-    # correct either way -- but a reloaded checkpoint that reports contain=False while its
-    # cfg_feat carries a fitted centre_bias is a trap for anything that inspects the object.
-    for _f in ("vigor", "vigor_drift_calib", "kin_fb_calib", "indiv", "innov_comp"):
-        if _f in blob:
-            setattr(m, _f, bool(blob[_f]))
-    m.contain = m._cfg_feat.get("centre_bias") is not None   # not stored; infer from the cfg
-    # cfg-carried flags added 2026-08: a refit of the loaded object rebuilds _cfg_feat from
-    # these attributes, so they must round-trip or a psit/dt_snap recipe silently reverts.
+    # the cfg-carried flags a refit of the loaded object rebuilds _cfg_feat from
     m.dt_snap = bool(m._cfg_feat.get("dt_snap", False))
     m.psi_ref = str(m._cfg_feat.get("psi_ref", "ori"))
     m.phi_ref = str(m._cfg_feat.get("phi_ref", "ori"))
-    # Same fallback order as load_joint: cfg_feat is what generation reads, the top-level keys
-    # are the compatibility path for checkpoints written before these treatments existed.
     m.K_stim = int(m._cfg_feat.get("K_stim", blob.get("K_stim", 1)))
-    m.noise_aug = m._cfg_feat.get("noise_aug", blob.get("noise_aug"))
-    m.contain_mode = str(blob.get("contain_mode",
-                                  "reject" if m._cfg_feat.get("wall_reject") else "bias"))
     m.re_sd = np.asarray(blob["re_sd"], float)
     # The gain is already folded into the saved loadings; kept for reporting only. Re-applying it
     # here would square it.
@@ -2894,28 +1415,16 @@ def load_fishre(path, map_location="cpu"):
     m.re_gain_report = blob.get("re_gain_report")
     # Round-trip the active-only extras so a REFIT of a loaded object rebuilds the same features
     # (generation reads _cfg_feat and is correct either way).
-    m.cfg_feat_extra = {k: m._cfg_feat[k] for k in ("clock_mode", "clock_tau_s", "clock2_tau_s",
-                                                    "lag_valid", "wall_reject", "kin_dt_lags",
-                                                    "run_clock_tau", "stim_align", "stim_static",
-                                                    "stim_static_clock", "stim_static_bump", "stim_onset",
-                                                    "stim_lags", "stim_jump", "stim_dmove")
+    m.cfg_feat_extra = {k: m._cfg_feat[k] for k in ("clock_mode", "clock_tau_s", "lag_valid", "wall_reject",
+                                                    "kin_dt_lags", "run_clock_tau", "stim_align", "stim_static",
+                                                    "stim_jump", "stim_dmove")
                         if k in m._cfg_feat}
-    # cfg_feat is what generation reads and already carries the fitted (lam, phi); this keeps the
-    # attribute in step so a refit of a loaded checkpoint rebuilds the same architecture.
-    m.dt_latent = m._cfg_feat.get("dt_latent", blob.get("dt_latent"))
-    # cfg_feat is what the generator reads, so it wins; the blob key is the fallback. d_bord lives
-    # only in cfg_feat (it is fitted by the rollout search, not by the likelihood), so it has to be
-    # copied back onto the net or a reloaded checkpoint would roll out with the drift's spatial
-    # channel silently switched off.
-    m.state = int(m._cfg_feat.get("state", blob.get("state", 0)))
-    m.h0_dim = int(m._cfg_feat.get("h0_dim", blob.get("h0_dim", 0)))
+    # cfg_feat is what the generator reads, so it wins; the blob key is the fallback
     m.drift = m._cfg_feat.get("drift", blob.get("drift"))
     m.drift_report = blob.get("drift_report")
     m.regime_w = blob.get("regime_w")
     if m.drift is not None and getattr(net, "drift", None) is not None:
         net.d_bord = float(m.drift.get("bord", 0.0))
-    m.spatial_gain = blob.get("spatial_gain")
-    m.spatial_gain_report = blob.get("spatial_gain_report")
     # twin table (fish_id -> fitted z_i) of an in-sample checkpoint; None on every fold checkpoint
     m.z_twin = ({int(k): [float(v) for v in np.asarray(z).reshape(-1)] for k, z in blob["z_twin"].items()}
                 if blob.get("z_twin") else None)

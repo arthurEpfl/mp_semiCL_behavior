@@ -5,8 +5,6 @@ times the calibrated strength, one row per seed. From output/screen/grtest_<14f|
     python thesis_grouprep_fig.py [out_dir]      # default MSc_Thesis_local/figures -> fig_app_grouprep.pdf
 """
 import json
-import sys
-from pathlib import Path
 
 import numpy as np
 import matplotlib

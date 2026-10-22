@@ -16,7 +16,6 @@ scoring) and ``fit_MLP_mix._dot_stim_row`` one row from a generated pose (closed
 ``shoal_channels``.
 """
 
-import math
 import os
 
 import numpy as np
@@ -29,7 +28,6 @@ DTHETA0 = H.DTHETA0_DEG       # 10.0 deg forward/turn threshold
 LOG_FLOOR = H.LOG_FLOOR       # -700.0
 ALPHA_MIN = H.ALPHA_MIN       # 1.0  (Gamma shape floor, paper constraint)
 EPS = H.EPS                   # 1e-12
-LOG2PI = math.log(2 * math.pi)
 
 # ------------------- 'shoal' stimulus block constants ----------------------- #
 # Non-monotone RANGE tuning x group SIZE x MOTION. Real fish steer toward the shoal

@@ -29,8 +29,6 @@ missing). Latencies, SEM-unit errors and fish counts are not converted.
     uv run python -m figures.fig_profiles --rebuild    # regenerate the rollouts (20 jobs, <= 8 workers)
 """
 
-import sys
-from pathlib import Path
 
 from figures.style import *  # noqa: F401,F403,E402  (sets rcParams, gives save(), panel(), colours)
 
@@ -61,7 +59,6 @@ HEAD = {("M6", 0): ("M26e", ARM_M6, "26e"), ("M6", 101): ("M30d", ARM_M6, "30d")
         ("F", 0): ("M14f", ARM_F, "14f"), ("F", 101): ("M32b", ARM_F, "32b")}
 ZERO = {0: "29e", 101: "33u"}                    # M6 -stim: the stimulus-blind zero point of attraction
 N_FOLDS, R_PER_MODEL = 5, 10
-CHECK_COLS = ("dip", "lat", "plateau", "d1_plateau", "grading", "mv_err_sem", "st_err_sem", "static_drift")
 CONDS = ["d1s3.5", "d2s3.5", "d4s3.5", "d6s3.5", "d8s3.5", "d1s0", "d4s0", "d8s0"]
 COUNTS = (1, 2, 4, 6, 8)
 N_BOOT, BOOT_SEED = 4000, 0

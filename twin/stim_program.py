@@ -25,7 +25,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from twin import paths
 from twin.segment_bouts import PX_PER_MM, STIM_NONE, parse_stimulus
 
 FPS = 30.0

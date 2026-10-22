@@ -15,8 +15,6 @@ Run:  uv run python -m figures.fig_slow_data      (writes figures/out/fig_slow_d
 """
 import contextlib
 import io
-import sys
-from pathlib import Path
 
 from figures.style import *  # noqa: F401,F403,E402
 

@@ -19,8 +19,6 @@ Inputs: the fig_profiles cache (curves + fig_profiles_gen_<key>.pkl); run fig_pr
     uv run python -m figures.fig_profiles_bands
 """
 
-import sys
-from pathlib import Path
 
 from figures.style import *  # noqa: F401,F403,E402
 

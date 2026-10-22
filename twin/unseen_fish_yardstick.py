@@ -25,7 +25,6 @@ Windows and pair AUCs are cached next to the checkpoints (``yardstick_*``), so a
 from __future__ import annotations
 
 import json
-import sys
 import time
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path

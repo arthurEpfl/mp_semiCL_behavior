@@ -36,8 +36,6 @@ Reuses the model adapters and records from evaluate.py.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 
 import numpy as np
 from scipy.stats import wasserstein_distance, ks_2samp
@@ -1422,6 +1420,5 @@ PANEL_METRICS = ["abs_dtheta_w1", "symbol_js", "dt_w1", "dist_w1", "trans_js",
                  "following_gap_h", "following_gap_static_h",
                  "dot_dist_w1", "time_near_dot_gap", "approach_gap",
                  "dot_dist_bias", "time_far_gap", "wall_frac_gap"]
-PANEL_METRICS_TEACHER_FORCED = ["following_gap", "following_gap_static"]
 
 

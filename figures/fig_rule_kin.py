@@ -9,8 +9,6 @@ single-bout scatter). Writes figures/out/fig_rule_3panel.pdf.
 
     uv run python -m figures.fig_rule_kin            # build the kinematics cache if missing, draw
 """
-import sys
-from pathlib import Path
 
 from figures.style import *  # noqa: F401,F403,E402
 

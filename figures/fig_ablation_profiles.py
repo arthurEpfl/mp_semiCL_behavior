@@ -14,8 +14,6 @@ and re-block-matched (fig_profiles_bands.bands, first thinning); real: over the 
     uv run python -m figures.fig_ablation_profiles            # rollouts if missing (50 fold jobs), check, draw
 """
 import pickle
-import sys
-from pathlib import Path
 
 from figures.style import *  # noqa: F401,F403,E402
 

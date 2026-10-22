@@ -17,15 +17,13 @@ so ``fit_MLP.py`` and ``evaluate.py`` are untouched. Use ``MLPBorderDensity`` ne
 """
 from __future__ import annotations
 
-from pathlib import Path
 
 import numpy as np
-import torch
 
 from twin import evaluate as E
 from twin import paths
 from twin import fit_MLP as M
-from twin.segment_bouts import PX_PER_MM, R0_MM, load_physical_dish
+from twin.segment_bouts import load_physical_dish
 
 # raw physical ROIdef (true 100 mm dish geometry) -> per-fish (cx, cy, radius)
 _DEFAULT_ROI = paths.ROI_PHYS
@@ -156,7 +154,6 @@ def build_border_records(df, roi_path=_DEFAULT_ROI, min_len=10, active_only=True
 BORDER_KNOTS = (0.03, 0.10, 0.25, 0.55)      # dist_to_border_norm (0 = wall, 1 = centre)
 BORDER_W = 0.55                               # basis width in natural-log units
 BORDER_MIN = 0.005                            # floor before log (dnorm reaches 0 exactly)
-BORDER_COLS_RAW = ("dnorm", "sin_psi", "cos_psi")
 BORDER_COLS_BASIS = ("dnorm", "bs1", "bs2", "bs3", "bs4", "bc1", "bc2", "bc3", "bc4")
 _BORDER_LC = np.log(np.asarray(BORDER_KNOTS, float))
 
@@ -246,8 +243,6 @@ def _border_block(rec, cfg_feat):
 #  Stimulus BLOCK structure -- one definition, shared by the features and the metrics
 # =========================================================================== #
 _FPS = 30.0
-STIMHIST_CYCLE_S = 110.0       # one 60 s stimulus block + one 50 s pause (the rig's programme)
-STIMHIST_AGE_S = 330.0         # three cycles: the scale over which an older block is 'recent'
 
 
 def block_onsets(rec, fps=_FPS):
@@ -497,10 +492,6 @@ def clock_taus(cfg_feat):
     return taus
 
 
-# --------------------------------------------------------------------------- #
-#  Regime weights: the two rare regimes where the fitted turn law is short
-# --------------------------------------------------------------------------- #
-REGIME_DEFAULT = dict(w_onset=8.0, w_pursuit=8.0, onset_bouts=4, pursuit_deg=30.0, pursuit_px=80.0)
 
 
 def regime_weights(rec, w_onset=8.0, w_pursuit=8.0, onset_bouts=4, pursuit_deg=30.0,
@@ -739,11 +730,6 @@ def _kin_history_block(rec, cfg_feat):
     return H
 
 
-def kin_width(cfg_feat):
-    """Width of the kinematic history block (step lags + optional interval lags; 'centred' keeps
-    the width)."""
-    Kk = int(cfg_feat.get("K_kin", cfg_feat["K"]))
-    return Kk * (2 if cfg_feat.get("kin_dt_lags", True) else 1)
 
 
 KIN_DT_EMA = 250.0        # bouts; the level is a SLOW average (~4 windows), well above the drift's tau
@@ -764,24 +750,6 @@ def kin_dt_level(dt_s, tm, tau=KIN_DT_EMA):
     return lev
 
 
-# Sized by measurement, not by analogy. The knob trades COVERAGE of drifted states against
-# DISTORTION of the conditional the model is meant to learn, and the two pull in opposite
-# directions. Measured over 6 fish (real turn sd 56.96 deg, median step 15.03 px):
-#
-#   sigma_pos   sd(dtheta~ - dtheta)   / real turn sd   sd(dnorm shift)   sign agreement
-#      1 px           6.9 deg               0.12            0.006             0.750
-#      2 px          14.2 deg               0.25            0.011             0.750
-#      4 px          31.0 deg               0.54            0.022             0.751
-#      8 px          59.6 deg               1.05            0.044             0.737
-#     12 px          76.3 deg               1.34            0.066             0.713
-#
-# At 8 px the corrective signal is LARGER than the behaviour it is supposed to decorate, so the
-# net would spend most of its capacity learning to undo a jump no rollout produces in one bout.
-# 4 px (1.1 mm, 0.023 R) keeps the correction at ~half the real turn sd while still straddling
-# the innermost border-basis knot (dnorm 0.03 = 5.3 px), which is the channel the drift actually
-# corrupts. sigma_ori 15 deg is modest next to the 40.6 deg median f_ori-vs-travel discrepancy
-# that already exists in the data. THIS IS THE OBVIOUS THING TO SWEEP if the arm is promising.
-NOISE_AUG_DEFAULT = {"sigma_pos": 4.0, "sigma_ori": 15.0, "mode": "concat", "frac": 0.5}
 
 
 # =========================================================================== #

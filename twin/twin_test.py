@@ -44,7 +44,6 @@ import sys
 import zipfile
 import zlib
 from concurrent.futures import ProcessPoolExecutor
-from pathlib import Path
 
 import numpy as np
 import pandas as pd

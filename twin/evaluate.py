@@ -44,19 +44,14 @@ Model adapters reuse the existing implementations in ``fit_hmm.py`` /
 
 from __future__ import annotations
 
-import sys
 from dataclasses import dataclass, field
-from pathlib import Path
 
 import numpy as np
-from scipy.special import erf, gammainc          # normal / gamma CDFs for the symbol track
 
 from twin import fit_hmm as H
 from twin import fit_hmm_stim as S
 
-LN2 = np.log(2.0)
 DTHETA0 = H.DTHETA0_DEG                            # +/-10 deg forward/turn threshold
-SQRT2 = np.sqrt(2.0)
 
 
 # =========================================================================== #
@@ -190,38 +185,6 @@ def _rich_features_for_group(g, fid, abs_dict, roi, cache):
 
 
 
-def symbol_logmass(states, sigma, alpha, theta, mu=0.0, dtheta0=DTHETA0, eps=1e-300):
-    """One-step predictive log-PMF over {F,L,R} for a continuous 3-state emission.
-
-    Integrates each state's emission over the +/-dtheta0 bins (exact via CDFs) and
-    mixes by the predicted state distribution ``states`` (n,3):
-
-      state 0 (forward)  Normal(mu, sigma)      -> mass to all three bins
-      state 1 (turn-)    Gamma on -dtheta (<0)  -> [P(0<mag<dtheta0), P(mag>dtheta0), 0]
-      state 2 (turn+)    Gamma on +dtheta (>0)  -> [P(0<mag<dtheta0), 0, P(mag>dtheta0)]
-
-    ``mu`` may be a scalar (spontaneous, mu=0) or an (n,) array (stimulus shifts the
-    forward mean). Returns (n,3) log-probabilities, rows sum to 1 in prob space.
-    The forward state gives strictly positive mass to every bin, so log is finite.
-    """
-    n = states.shape[0]
-    mu = np.broadcast_to(np.asarray(mu, float), (n,))
-    Gc = gammainc(alpha, dtheta0 / theta)            # P(turn magnitude < dtheta0), scalar
-    z_hi = (dtheta0 - mu) / sigma
-    z_lo = (-dtheta0 - mu) / sigma
-    Phi_hi = 0.5 * (1.0 + erf(z_hi / SQRT2))
-    Phi_lo = 0.5 * (1.0 + erf(z_lo / SQRT2))
-    nR = 1.0 - Phi_hi                                # forward-state mass in Right bin
-    nL = Phi_lo                                      # forward-state mass in Left bin
-    nF = Phi_hi - Phi_lo                             # forward-state mass in Forward bin
-    s0, s1, s2 = states[:, 0], states[:, 1], states[:, 2]
-    qF = s0 * nF + s1 * Gc + s2 * Gc
-    qL = s0 * nL + s1 * (1.0 - Gc)
-    qR = s0 * nR + s2 * (1.0 - Gc)
-    q = np.stack([qF, qL, qR], axis=1)
-    q = np.maximum(q, eps)
-    q /= q.sum(axis=1, keepdims=True)
-    return np.log(q)
 
 
 # =========================================================================== #

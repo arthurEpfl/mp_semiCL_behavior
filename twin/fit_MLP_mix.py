@@ -194,7 +194,6 @@ def save_mix(model, path):
     sampler and the density scorer need. Records are NOT stored (rebuild them locally with
     ``fit_MLP_border.build_border_records``). Typical use: fit on all fish in Colab, save,
     download the (~1 MB) file, then ``load_mix`` locally and feed it to ``bout_video``."""
-    import torch
     if not hasattr(model, "_model"):
         raise RuntimeError("model is not fitted; call .fit(...) before save_mix")
     # Different head layout -> own serialiser. isinstance, NOT a class-name string: a SUBCLASS of
@@ -309,8 +308,6 @@ def _dt_logpdf(x, logw, mu, sigma, hi=None):
 
 
 
-_STATE_ROLL_CACHE = {}
-STATE_CALIB_CAP = 1800          # bouts; 30 windows of 60, vs the 12 win_acf1 needs
 
 
 def _gen_for(cfg_feat, records=None):

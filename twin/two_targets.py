@@ -44,15 +44,11 @@ import itertools
 import os
 import sys
 import time
-import zlib
 from dataclasses import dataclass
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from twin import fit_MLP_border as MB
-from twin import fit_MLP_joint as JT
 from twin import model_figures as MF
 from twin import paths
 from twin import stim_program as SPm
@@ -72,7 +68,6 @@ ARM_M6 = "S4x_adt_z2_cdt_tr_rc_al_w3ft"
 ARM_F = "S4_adt_z2_drift_cdt_tr_rc_al_w3ft_st_pf5Bcr_last"
 MODELS = {"26e": ("M26e", ARM_M6), "30d": ("M30d", ARM_M6),
           "14f": ("M14f", ARM_F), "32b": ("M32b", ARM_F)}
-UNIT_LABEL = {"26e": ("M6", 0), "30d": ("M6", 101), "14f": ("F", 0), "32b": ("F", 101)}
 
 
 @dataclass(frozen=True)
@@ -314,13 +309,10 @@ def load(tag, pair, L, cond, arena=1, onset="free"):
 
 
 
-COLS = ("absx", "x", "abslat", "lat", "closerA", "middle")
 
 
 
 
-DIP_BW_MM = 3.0                                                  # kernel width of the lateral density (mm)
-DIP_SPLIT = 0.9                                                  # a clear trough: the midline >= 10 % below the branches
 
 
 

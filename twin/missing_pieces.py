@@ -24,7 +24,6 @@ import io
 import json
 import os
 import pickle
-import subprocess
 import sys
 import time
 from concurrent.futures import ProcessPoolExecutor
@@ -44,8 +43,6 @@ ARM_F = "S4_adt_z2_drift_cdt_tr_rc_al_w3ft_st_pf5Bcr_last"
 HEAD = {"M6 s0": ("M26e", ARM_M6, "26e"), "M6 s101": ("M30d", ARM_M6, "30d"),
         "F s0": ("M14f", ARM_F, "14f"), "F s101": ("M32b", ARM_F, "32b")}
 W = 60
-WIN_REPS = 8
-TOWARD_BEARING = (10.0, 170.0)    # a bout has a side only when the target is not dead ahead / behind
 
 
 def _threads1():
@@ -165,11 +162,6 @@ def real_floor(seeds=5):
 
 
 
-# =========================================================================== #
-# 2. Models against the real-data properties; what the classifier uses; nearest real neighbour
-# =========================================================================== #
-WALL_BINS = (0.0, 0.4, 0.6, 0.7, 0.8, 0.9, 1.0)
-RAD_BINS = np.linspace(0, 1, 21)
 
 
 
@@ -250,7 +242,6 @@ def _toward_cols(t):
 
 
 
-STREAM_COLS = ("dip", "lat", "plateau", "d1_plateau", "grading", "mv_err_sem", "st_err_sem", "static_drift")
 
 
 

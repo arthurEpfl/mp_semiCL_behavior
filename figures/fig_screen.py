@@ -12,8 +12,6 @@ figure: the zero-shot models (trained on our 15 fish); bottom row: M6 and D4 tra
 from __future__ import annotations
 
 import json
-import sys
-from pathlib import Path
 
 import numpy as np
 import matplotlib

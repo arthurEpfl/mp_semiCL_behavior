@@ -39,7 +39,6 @@ Usage (from a notebook, after fitting ``model`` on ``records``):
 """
 from __future__ import annotations
 
-import copy
 import os
 import subprocess
 import sys
@@ -51,7 +50,6 @@ import pandas as pd
 
 from twin import paths
 from twin.fit_hmm_stim import _stim01_frame                 # verified real-dots -> 0/1 converter
-from twin.segment_bouts import parse_stimulus, fish_prefix  # exact HMM stimulus-block parsing
 
 _DEFAULT_TRANSFORMED = paths.FRAMES
 FPS = 30

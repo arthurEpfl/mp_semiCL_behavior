@@ -12,8 +12,6 @@ Writes figures/out/fig_range_law.pdf (+ PNG preview) and prints every plotted va
 
     uv run python -m figures.fig_range_law
 """
-import sys
-from pathlib import Path
 
 from figures.style import *  # noqa: F401,F403,E402
 

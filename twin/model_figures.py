@@ -654,7 +654,6 @@ def dot_profile(ckpt_dir, arm, rej=REJ_BAND, r_per_model=3, band="sem"):
 import torch                                    # noqa: E402
 from twin import fit_MLP_joint as JT                     # noqa: E402
 
-RUN_BINS = [(0, 5), (5, 15), (15, 30), (30, 60), (60, 120), (120, 240), (240, 100000)]
 CI_Z = 1.96
 AQUA, GREEN, PURPLE = "#1baf7a", "#4c9a52", "#9b59b6"
 
@@ -690,8 +689,6 @@ def conditional_kin(model, rec):
 
 
 
-RANGE_BANDS = [(40, 60), (60, 80), (80, 120)]
-ALIGN = [("ahead  |bearing| < 30", 0.0, 30.0), ("side  30-90", 30.0, 90.0), ("behind  > 90", 90.0, 180.1)]
 
 
 

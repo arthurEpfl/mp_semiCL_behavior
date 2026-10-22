@@ -15,8 +15,6 @@
     uv run python -m figures.fig_app_training
 """
 import glob
-import sys
-from pathlib import Path
 
 from figures.style import *  # noqa: F401,F403,E402
 

@@ -47,13 +47,8 @@ INK, MUTED, FAINT = "#1a1a1a", "#666666", "#c8c8c8"
 # seed 101 = dashed line / open marker (never pooled, always shown side by side).
 REAL_C = INK
 MODEL_C = {"M6": BLUE, "F": VERM, "M6+C": SKY}
-SEED_LS = {0: "-", 101: "--"}
-SEED_MFC = {0: "full", 101: "none"}      # matplotlib fillstyle
 # Stimulus conditions, as in Chapter 3.
 COND_C = {"moving": BLUE, "static": VERM, "none": MUTED}
-# Two-group combination rules (distinct from the model colours on purpose).
-RULE_C = {"effects": GREEN, "add": ORANGE, "avg": PURPLE, "nearest": SKY,
-          "reference": MUTED}
 
 mpl.rcParams.update({
     "figure.dpi": 150, "savefig.dpi": 300,

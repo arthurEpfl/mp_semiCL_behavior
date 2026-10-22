@@ -61,7 +61,6 @@ N_CAP = 8                          # largest trained group size
 LATE_S = 60.0                      # largest block time in training (60 s blocks)
 TAIL_S = 10.0                      # every fish runs to T + 10 s (dt <= 10 s): every pose up to T is published
 POSE_SEED, FISH_SEED, SCR_SEED = 7101, 7102, 7103
-SHOAL_MM = 25.0                    # 'together' = within 25 mm, single linkage (real fish hold 16-19 mm from moving dots)
 SHIFTS_S = tuple(60.0 * k for k in range(1, 11))   # Larsch / Kappel: 10 time shifts
 CHUNK_S = 300.0                                     # Larsch / Kappel: 5-min chunks
 
@@ -1076,7 +1075,6 @@ def render_npz(npz, out_mp4, trail_s=4.0, dpi=110):
 VIDEO_DIR = OUT / "videos"
 
 
-VIDEO_BODY_MM = 2.0   # Final_report_shoaling videos: each fish a dot 2 mm across (the collision distance), in dish units
 
 
 

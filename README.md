@@ -68,10 +68,18 @@ versions, retrained models differ within the seed-to-seed noise.
 
 ## How this was checked
 
-The code was cleaned from the development repository (tag `pre-cleanup`) and checked against it: the training
-recipes against the ones that trained every thesis checkpoint; two-epoch fits bit-identical; the evaluation of M6
-reproducing its saved summary exactly; the 30 fps tables rebuilt from the rig's files, and the bout table and the
-training table from them; every thesis figure pixel-identical; the thesis tables reproduced from the saved evaluations.
+The code was cleaned from the development repository (tag `pre-cleanup`) and checked against it:
+
+- the training recipes against the ones that trained every thesis checkpoint, and every checkpoint loads;
+- two-epoch fits bit-identical to the original code (M1, M6, D4, and the 3-layer, turn-size, dot-direction and
+  position-only variants), and a two-step profile correction of D4 likewise;
+- rollouts bit-identical on every path the thesis uses (evaluation, the correction, stimulus programmes, the second
+  data set, shoals, two groups), and the evaluations of M6 and F reproducing their saved summaries exactly;
+- the 30 fps tables rebuilt from the rig's files, and the bout table and the training table from them;
+- every thesis figure pixel-identical, and the thesis tables reproduced from the saved evaluations;
+- the cached shoal and two-group simulations reproduced by the new code.
+
+Options the thesis models never used were removed; a configuration that asks for one is refused rather than run.
 
 ## Second data set
 

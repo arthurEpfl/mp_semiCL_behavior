@@ -24,11 +24,9 @@ from pathlib import Path
 
 import numpy as np
 
-from twin import evaluate as E
 from twin import fit_MLP_joint as JT
-from twin import fit_MLP_mix as MX
 from twin import paths
-from twin.segment_bouts import PX_PER_MM, load_physical_dish
+from twin.segment_bouts import load_physical_dish
 
 _DEFAULT_ROI = paths.ROI_PHYS
 _DEFAULT_TRANSFORMED = paths.FRAMES

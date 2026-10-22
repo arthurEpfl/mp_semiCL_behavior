@@ -25,8 +25,6 @@ static-clock / static-bump / K_stim > 1 / adapt. Those raise, so a config outsid
 """
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 
 import numpy as np
 

@@ -12,7 +12,6 @@ Palette: Okabe-Ito blue / vermillion / green, validated for CVD separation
 """
 
 import argparse
-from pathlib import Path
 
 import matplotlib as mpl
 import numpy as np
