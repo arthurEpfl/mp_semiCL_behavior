@@ -9,7 +9,7 @@ trajectory.
 THE ONE THING THAT MUST BE TRUE: it is the SAME object as ``generate_mix_joint_loop`` on the block-start path
 (record-indexed stimulus, ``_force_P`` forcing, twin z). Two design choices make that checkable rather than hoped:
 
-  * FEATURES come from the generator's own vectorised feature functions (``M.pop_channels`` -- whose one-group path
+  * FEATURES come from the generator's own vectorised feature functions (``M.shoal_channels`` -- whose one-group path
     is vectorised and verified equal to its loop --, ``M.shoal_channels``, ``M.static_channels``,
     ``MB.border_channels``, ``MB.align_feature``), called on all rows at once. Verified exact against
     ``MB.build_feature_matrix`` under full forcing (``verify_features``).
@@ -33,8 +33,8 @@ import numpy as np
 from twin import fit_MLP as M                      # noqa: E402
 from twin import fit_MLP_border as MB              # noqa: E402
 
-_UNSUPPORTED = ("dt_latent", "vigor", "indiv", "kin_innov", "dt_snap", "stim_onset",
-                "stim_static_clock", "stim_static_bump", "rad_gate", "use_adapt")
+_UNSUPPORTED = ("dt_latent", "vigor", "indiv", "kin_innov", "kin_feedback", "dt_snap", "stim_onset",
+                "stim_static_clock", "stim_static_bump", "stim_lags", "rad_gate", "use_adapt")
 # THE DRIFT (report Model 11, fine-tunes on Model 17) IS SUPPORTED, as the generator implements it: one AR(1) state
 # per trajectory, stationary N(0, 1) at the start, advanced ONCE PER BOUT (forced bouts included, never per reject
 # draw); it tilts the forward component's logit by turn * d and shifts the step / interval log-locations by
@@ -44,8 +44,6 @@ _UNSUPPORTED = ("dt_latent", "vigor", "indiv", "kin_innov", "dt_snap", "stim_ons
 
 def _check_scope(model, cfg):
     bad = [k for k in _UNSUPPORTED if cfg.get(k)]
-    if cfg.get("repulsion"):                          # per-dot repulsion term: numpy generator only
-        bad.append("repulsion")
     if cfg.get("drift") and abs(float((cfg.get("drift") or {}).get("bord", 0.0))) > 0:
         bad.append("drift bord loading")
     if cfg.get("centre_bias"):
@@ -112,12 +110,10 @@ class _Batch:
         self.B = B = len(recs)
         self.n = np.array([int(r.n) for r in recs])
         self.T = T = int(self.n.max())
-        Kd = max(np.asarray(r.dot_xs).shape[1] for r in recs) if getattr(recs[0], "dot_xs", None) is not None else 0
         f = lambda: np.zeros((B, T))  # noqa: E731
         self.dth, self.dist, self.dt, self.x, self.y, self.h = f(), f(), f(), f(), f(), f()
         self.dcx = np.full((B, T), np.nan); self.dcy = np.full((B, T), np.nan)
         self.mv, self.nd = f(), f()
-        self.dxs = np.full((B, T, Kd), np.nan); self.dys = np.full((B, T, Kd), np.nan)
         ck = _clock_track(recs[0], cfg)
         self.clock = np.zeros((B, T, ck.shape[1]), np.float32)
         self.force = np.array([int(getattr(r, "_force_P", 0) or 0) for r in recs])
@@ -129,7 +125,6 @@ class _Batch:
         self.cx = np.array([r.dish_cx for r in recs], float); self.cy = np.array([r.dish_cy for r in recs], float)
         self.R = np.array([r.dish_R for r in recs], float)
         self.z = np.asarray(zs, np.float32)
-        self.seg = np.full((B, T), -1, dtype=np.int64)       # stimulus-lag segments (condition changes; one run)
         # dot-jump phase (MB._jump_block, Model 41): the record-indexed path reads each bout's own frame, as the clock
         self.jump = np.zeros((B, T, 2 if cfg.get("stim_jump") else 0), np.float32)
         for i, r in enumerate(recs):
@@ -141,11 +136,7 @@ class _Batch:
             self.dcy[i, :k] = np.asarray(getattr(r, "dot_cy", np.full(k, np.nan)), float)
             self.mv[i, :k] = np.asarray(r.moving, float)
             self.nd[i, :k] = np.asarray(getattr(r, "n_dots", np.zeros(k)), float)
-            if Kd:
-                X = np.asarray(r.dot_xs, float); Y = np.asarray(r.dot_ys, float)
-                self.dxs[i, :k, :X.shape[1]] = X; self.dys[i, :k, :Y.shape[1]] = Y
             self.clock[i, :k] = _clock_track(r, cfg)
-            self.seg[i, :k] = MB.stim_segments(self.nd[i, :k], self.mv[i, :k])
             if self.jump.shape[2]:
                 self.jump[i, :k] = MB._jump_block(r, cfg)
 
@@ -174,21 +165,14 @@ def rollout(model, recs, zs, rng, keep_X_from=None, sample_forced=False):
         dt_hi = float(cfg["dt_trunc"])
     kin_dt = bool(cfg.get("kin_dt_lags", True)); kin_dt_c = cfg.get("kin_dt_lags", True) == "centred"
     kdt_a = 1.0 / max(float(cfg.get("kin_dt_ema", MB.KIN_DT_EMA)), 1.0)
-    kfb = cfg.get("kin_feedback", 1.0)
-    kfb_d, kfb_t = ((float(kfb["dist"]), float(kfb["dt"])) if isinstance(kfb, dict) else (float(kfb), float(kfb)))
     mode = cfg["stim_mode"]
-    pop = mode in M.POP_MODES
-    pkw = M.pop_kw(mode) if pop else None
-    skw = None if pop else M.shoal_kw(mode)
-    if not pop and mode not in M.SHOAL_MODES:
+    skw = M.shoal_kw(mode)
+    if mode not in M.SHOAL_MODES:
         raise NotImplementedError(f"stim_mode {mode!r}")
-    if pop and pkw.get("drift"):
-        raise NotImplementedError("dot drift (popld)")
     use_border = bool(cfg.get("use_border")); bmode = cfg.get("border_mode", "raw")
     lv = str(cfg.get("lag_valid", "") or "").lower()
     rc_tau = float(cfg.get("run_clock_tau") or 0.0)
     al_on, st_on = bool(cfg.get("stim_align")), bool(cfg.get("stim_static"))
-    sl_K = int(cfg.get("stim_lags") or 0)
     if cfg.get("stim_dmove"):
         raise NotImplementedError("stim_dmove (Model 51): numpy generator only")
     wr = cfg.get("wall_reject")
@@ -200,8 +184,6 @@ def rollout(model, recs, zs, rng, keep_X_from=None, sample_forced=False):
         R_g = b.R * (1.0 - rd0 / (0.5 * MB.DISH_MM))
     eps = float(getattr(model, "eps", 1e-3))
     any_ra = bool((b.ra >= 0).any())
-    if any_ra and (pop or sl_K):
-        raise NotImplementedError("_reanchor_at: centroid stimulus only (no per-dot code, no stimulus lags)")
     D = int(net.body[0].in_features)
     Z = torch.as_tensor(b.z)
     zeros_t = torch.zeros(B)
@@ -309,25 +291,18 @@ def rollout(model, recs, zs, rng, keep_X_from=None, sample_forced=False):
         fin = np.isfinite(dcx) & np.isfinite(dcy)
         phi_g = np.where(fin, MB._wrap_pi(np.arctan2(np.where(fin, dcy, 0) - y, np.where(fin, dcx, 0) - x) - h), np.nan)
         r_t = np.where(fin, np.hypot(np.where(fin, dcx, 0) - x, np.where(fin, dcy, 0) - y), np.nan)
-        if pop:
-            xs_, ys_ = b.dxs[:, t], b.dys[:, t]
-            on = np.isfinite(xs_) & np.isfinite(ys_)
-            phi_k, r_k = M.dot_geometry(xs_, ys_, x, y, h)
-            mvk = np.repeat(b.mv[:, t][:, None], xs_.shape[1], axis=1)
-            blocks.append(M.pop_channels(phi_k, r_k, on, mvk, **pkw))
-        else:
-            blocks.append(M.shoal_channels(phi_g, r_t, b.nd[:, t], b.mv[:, t], **skw))
+        blocks.append(M.shoal_channels(phi_g, r_t, b.nd[:, t], b.mv[:, t], **skw))
         if use_border:
             rr = np.hypot(x - b.cx, y - b.cy); psi = MB._wrap_pi(np.arctan2(b.cy - y, b.cx - x) - h)
             blocks.append(MB.border_channels((b.R - rr) / b.R, psi, bmode))
         kin = np.zeros((B, 2 * Kk if kin_dt else Kk))
         for k in range(1, Kk + 1):
             if t - k >= 0:
-                kin[:, k - 1] = kfb_d * (ld_h[:, k - 1] - dm) / ds
+                kin[:, k - 1] = (ld_h[:, k - 1] - dm) / ds
                 if kin_dt_c:
-                    kin[:, Kk + k - 1] = kfb_t * (lt_h[:, k - 1] - lev) / ts
+                    kin[:, Kk + k - 1] = (lt_h[:, k - 1] - lev) / ts
                 elif kin_dt:
-                    kin[:, Kk + k - 1] = kfb_t * (lt_h[:, k - 1] - tm) / ts
+                    kin[:, Kk + k - 1] = (lt_h[:, k - 1] - tm) / ts
         blocks.append(kin)
         if lv == "scalar":
             blocks.append((np.minimum(t + b.rp_off, K) / max(K, 1)).reshape(B, 1))
@@ -341,13 +316,6 @@ def rollout(model, recs, zs, rng, keep_X_from=None, sample_forced=False):
             blocks.append(MB.align_feature(phi_g, r_t, b.mv[:, t], b.nd[:, t]).reshape(B, 1))
         if st_on:
             blocks.append(M.static_channels(phi_g, r_t, b.nd[:, t], b.mv[:, t]))
-        if sl_K:                                  # the stimulus lags (MB.stim_lag_rows), LAST as in the builder
-            ks = [t - k for k in range(1, sl_K + 1)]
-            blocks.append(MB.stim_lag_rows(
-                np.stack([b.dcx[:, j] if j >= 0 else np.full(B, np.nan) for j in ks], 1),
-                np.stack([b.dcy[:, j] if j >= 0 else np.full(B, np.nan) for j in ks], 1),
-                np.stack([b.seg[:, j] if j >= 0 else np.full(B, -1) for j in ks], 1),
-                x, y, h, b.seg[:, t]))
         if b.jump.shape[2]:                       # the dot-jump phase, LAST as in the builder
             blocks.append(b.jump[:, t])
         X_all = np.concatenate(blocks, axis=1).astype(np.float32)

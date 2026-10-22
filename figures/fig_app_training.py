@@ -12,7 +12,7 @@
   fig_app_latent_gain       M6 (26e | 30d): the moment-matching objective sum |ln(SD_sim / SD_real)| against the latent
                             gain g for every fold (re_gain_report['curve']), and the chosen g.
 
-    uv run python scripts/report_figs/fig_app_training.py
+    uv run python -m figures.fig_app_training
 """
 import glob
 import sys

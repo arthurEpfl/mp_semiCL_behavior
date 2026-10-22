@@ -16,7 +16,7 @@ the statistic in the "acf" column of tab:drift.
     training fish), c = not a target. Legend seed handles are errorbar containers so they show the
     solid / dashed bar.
 
-Source (read only): Model/report_ckpts/M<key>/panelB_*.csv, one row per held-out fish:
+Source (read only): output/checkpoints/M<key>/panelB_*.csv, one row per held-out fish:
     real   = real_wacf_<ch>
     model  = real_wacf_<ch> + wacf_<ch>_gap      (the panel stores the gap = mean over R of gen - real)
 for ch in dt / dist / rad. Three fish (4, 6, 10) have fewer than six pairs of consecutive within-run
@@ -28,7 +28,7 @@ real_turn, gen_turn): the same record-indexed rollouts as the panel (rollout_mod
 rng = default_rng([rollout_seed, fish]), 20 per held-out fish; the build checked that their interval value gives back
 the archived panel to 1e-16), |dtheta| with the same win_acf1 (real within runs, rollout flat). Not a drift target.
 
-    uv run python scripts/report_figs/fig_slow.py
+    uv run python -m figures.fig_slow
 """
 import glob
 import sys

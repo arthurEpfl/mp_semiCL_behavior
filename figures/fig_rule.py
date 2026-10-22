@@ -2,14 +2,14 @@
 
 (a-c) Response maps: mean toward-turn (deg) over |bearing| x range, moving dots, 2/4/6/8 dots, >= 10 s into the
       block, per fish then across the 15 fish; real fish, M6 seed 0, F seed 0 (teacher-forced, population latent).
-      Source: Model/missing_pieces/laws.pkl via missing_pieces.law_maps (n = (2, 4, 6, 8)). A cell is masked when
+      Source: output/missing_pieces/laws.pkl via missing_pieces.law_maps (n = (2, 4, 6, 8)). A cell is masked when
       fewer than MIN_FISH fish have at least MIN_BOUTS bouts in it (the plotted values are law_maps' own). Every
       held-out bout whose dots have a side (|bearing| 10-170 deg); NO dot-centroid-inside-dish filter; ranges in mm
       at missing_pieces.PX_MM = 3.60 px/mm. Sequential single-hue scale 0-30 deg (no cell mean is negative; the
       script asserts it for all five maps, seed 101 included).
 (d)   The law summary of missing_pieces.law_summary (onset gain, steady gain, count step, static gain), recomputed
       per fish so that a 95 % bootstrap CI over the 15 fish can be drawn (missing_pieces._boot_ci, 4000 resamples).
-(e)   The three teacher-forced head gaps (model - real, deg) of Model/report_outputs/summary_M<key>.json along the
+(e)   The three teacher-forced head gaps (model - real, deg) of output/evaluation/summary_M<key>.json along the
       main line and the drift branch, at both seeds (never pooled), as a forest plot with the 95 % t-interval of
       the paired per-fish gap across the fish that enter each cell. The per-fish gaps are recomputed with
       model_figures.head_gaps (teacher-forced only, no rollouts; 14 units, <= 8 processes) and cached; the script
@@ -17,8 +17,8 @@
       so its teacher-forced gaps are M1's by construction. Bouts: the profile bouts of model_figures.real_dot_profile
       (dot centroid inside the dish), all bearings, >= 10 bouts per fish, condition and phase.
 
-Run:  uv run python scripts/report_figs/fig_rule.py                # build the head-gap cache if missing, check, draw
-      uv run python scripts/report_figs/fig_rule.py --rebuild      # recompute the head gaps (14 jobs, <= 8 workers)
+Run:  uv run python -m figures.fig_rule                # build the head-gap cache if missing, check, draw
+      uv run python -m figures.fig_rule --rebuild      # recompute the head gaps (14 jobs, <= 8 workers)
       (also writes $RF/figs/fig_rule_numbers.json)
 """
 import sys

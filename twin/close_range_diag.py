@@ -290,7 +290,6 @@ def _sim(args):
     m = TT._models(key)[i % 5]
     base = m.__dict__.setdefault("_cfg_base", dict(m._cfg_feat))
     cfg = dict(base)
-    cfg.pop("repulsion", None)
     gp = _gp(key, var)
     if gp:
         cfg["grouprep"] = dict(gp)

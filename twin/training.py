@@ -28,6 +28,7 @@ REPS = {"S0": "shoal_simple",   # 6  presence, motion, log count, log range, bea
         "S4x": "shoal_rx",      # 14 + range x bearing per condition, linear in log range
         "S4": "shoal",          # 18 the range bumps: bearing terms on four Gaussian bumps in log range
         "Snull": "shoal_null",  # 0  no stimulus columns
+        "Scond": "shoal_cond",  # 2  presence and moving flags only: no bearing, range or count
         "S4xnn": "shoal_rx_nn",  # 11 S4x without the dot count
         "S4xnr": "shoal_rx_nr",  # 8  S4x without the range
         "S4xnm": "shoal_rx_nm",  # 7  S4x without the moving indicator

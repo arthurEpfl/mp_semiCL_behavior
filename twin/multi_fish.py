@@ -160,7 +160,6 @@ def models(tag):
             gp, extra = GF.variants(MODELS[tag][0])[var]
             for m in ms.values():
                 cf = dict(m._cfg_feat)
-                cf.pop("repulsion", None)
                 cf["grouprep"] = dict(gp)
                 cf.update(extra)
                 m._cfg_feat = cf

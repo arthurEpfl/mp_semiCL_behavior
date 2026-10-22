@@ -16,7 +16,7 @@ bins), averaged over THIN_REPS thinnings -- the numbers of tab:profile-spread.
 
 Inputs: the fig_profiles cache (curves + fig_profiles_gen_<key>.pkl); run fig_profiles.py first.
 
-    uv run python scripts/report_figs/fig_profiles_bands.py
+    uv run python -m figures.fig_profiles_bands
 """
 
 import sys

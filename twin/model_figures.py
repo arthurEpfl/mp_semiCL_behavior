@@ -671,7 +671,7 @@ def conditional_kin(model, rec):
     cf = model._cfg_feat
     X = MB.build_feature_matrix(rec, cf)
     az, lc, lt = JT._cond_cols(rec.dtheta, rec.distance_px, cf["dth_scale"], cf["kin_scales"], y_dt=rec.dt_s)
-    with torch.no_grad(), JT.repulsion_side(model, rec):
+    with torch.no_grad():
         _, dpar, tpar = model._model.joint_forward(torch.tensor(X), torch.tensor(az), torch.tensor(lc),
                                                    torch.tensor(lt))
     lw, mu, sg = [q.numpy().astype(float) for q in dpar]

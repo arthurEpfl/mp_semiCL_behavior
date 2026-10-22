@@ -11,7 +11,7 @@ COMPARABLE between real and model (2026-10-14): 95 % percentile bootstrap of the
 resampled from its 50 simulated fish, with the simulated bouts thinned at random to the real number per fish and bin
 and re-block-matched (fig_profiles_bands.bands, first thinning); real: over the 15 fish (fig_profiles' cached band). Every mm at 3.60 px/mm (the profile code's 3.67 converted by MM_3P67_TO_3P60).
 
-    uv run python scripts/report_figs/fig_ablation_profiles.py            # rollouts if missing (50 fold jobs), check, draw
+    uv run python -m figures.fig_ablation_profiles            # rollouts if missing (50 fold jobs), check, draw
 """
 import pickle
 import sys
@@ -30,7 +30,7 @@ from figures import fig_profiles_bands as FPB  # noqa: E402
 from figures import data_figures as RF  # noqa: E402
 
 M6_ARM = "S4x_adt_z2_cdt_tr_rc_al_w3ft"
-# (public name, seed) -> (checkpoint dir under Model/, arm, internal key); report_models MODELS k=26/29/30/33
+# (public name, seed) -> (checkpoint folder under output/checkpoints/, arm, registry key)
 UNITS = {("M6", 0): ("M26e", M6_ARM, "26e"), ("M6", 101): ("M30d", M6_ARM, "30d"),
          ("M6−stim", 0): ("M29e", "Snull_adt_z2_cdt_tr_rc_w3ft_nck", "29e"),
          ("M6−stim", 101): ("M33u", "Snull_adt_z2_cdt_tr_rc_w3ft_nck", "33u"),

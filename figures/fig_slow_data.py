@@ -11,7 +11,7 @@ win_acf1 and of fig_slow), so window means here give back the lag-1 values of fi
       shuffled bouts (mean of the per-fish shuffle means, and the 2.5-97.5 % range of their across-fish mean).
   (c) Trend: each fish's window means standardised within the fish, averaged in 15-min bins of session time, then mean
       over fish with a t-based 95 % CI.
-Run:  uv run python scripts/report_figs/fig_slow_data.py      (writes Final_Report/figures/fig_slow_data.pdf + PNG)
+Run:  uv run python -m figures.fig_slow_data      (writes figures/out/fig_slow_data.pdf + PNG)
 """
 import contextlib
 import io

@@ -64,28 +64,18 @@ STATIC_CONDS = ("d1s0", "d4s0", "d8s0")                 # in the objective only 
 
 # ----------------------------------------------------------------------------- setup
 def attach_stim_turn(model, v2=False, v3=False, v4=False, v5=None):
-    """Attach a zero-initialised profile term to a loaded fishre model (no-op if one is attached).
-    ``v2`` adds the range and group-ahead levers (12 numbers; Model 33); ``v3`` is the saturating-count term
-    (10 numbers; Model 34), which also works on the centroid (S4) layout; ``v4`` is one shift per dot count plus a
-    late-block factor (15 numbers; Model 40), centroid layout only; ``v5`` = 'S' / 'B' / 'BS' / 'Bst', the
-    count-gated terms (report Model 11; ``JT.StimTurnTermV5``), centroid layout only."""
+    """Attach a zero-initialised profile term to a loaded fishre model (no-op if one is attached): ``v5`` = the arm
+    of ``JT.StimTurnTermV5`` ('Bc' for F). The earlier versions (``v2`` / ``v3`` / ``v4``) are not in this code."""
     import torch
     from twin import fit_MLP_joint as JT
     net = model._model
     if int(getattr(net, "state", 0) or 0):
         raise ValueError("the profile fine-tune is built for non-recurrent nets (state = 0)")
     if getattr(net, "stim_turn", None) is None:
-        if v5:
-            n_in = next(mm for mm in net.body.modules() if isinstance(mm, torch.nn.Linear)).in_features
-            net.stim_turn = JT.stim_turn_v5(model._cfg_feat, str(v5), n_features=n_in)
-        elif v4:
-            n_in = next(mm for mm in net.body.modules() if isinstance(mm, torch.nn.Linear)).in_features
-            net.stim_turn = JT.stim_turn_v4(model._cfg_feat, n_in)
-        elif v3:
-            net.stim_turn = JT.stim_turn_v3(model._cfg_feat)
-        else:
-            mv, nz = JT.stim_turn_indices(model._cfg_feat)
-            net.stim_turn = JT.StimTurnTerm(mv, nz, rho_idx=JT.stim_rho_indices(model._cfg_feat) if v2 else None)
+        if not v5 or v2 or v3 or v4:
+            raise ValueError("only the version-5 profile term (v5='<arm>') is in this code")
+        n_in = next(mm for mm in net.body.modules() if isinstance(mm, torch.nn.Linear)).in_features
+        net.stim_turn = JT.stim_turn_v5(model._cfg_feat, str(v5), n_features=n_in)
     return net.stim_turn
 
 

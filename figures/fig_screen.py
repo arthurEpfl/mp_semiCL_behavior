@@ -1,11 +1,11 @@
 """Thesis figures for the screen data (Results, Sec. 'A second data set'), from the saved results. Top row of each
 figure: the zero-shot models (trained on our 15 fish); bottom row: M6 and D4 trained from scratch on the screen
-(scripts/screen_train.py), against the real fish of the 98 clutches not used in that training.
-    Model/twin_test/screen_eval.json          zero-shot response by distance       -> fig_screen_response.pdf (a-c)
-    Model/twin_test/screen_trained_eval.json  screen-trained response, profiles    -> fig_screen_response.pdf (d-f),
+(twin/screen_train.py), against the real fish of the 98 clutches not used in that training.
+    output/screen/screen_eval.json          zero-shot response by distance       -> fig_screen_response.pdf (a-c)
+    output/screen/screen_trained_eval.json  screen-trained response, profiles    -> fig_screen_response.pdf (d-f),
                                                                                        fig_screen_switch.pdf (c, d)
-    Model/twin_test/screen_profiles.json      zero-shot distance over the episode  -> fig_screen_switch.pdf (a, b)
-    Model/twin_test/screen_closerange.json    time near the dot, bout decomposition -> fig_closerange.pdf
+    output/screen/screen_profiles.json      zero-shot distance over the episode  -> fig_screen_switch.pdf (a, b)
+    output/screen/screen_closerange.json    time near the dot, bout decomposition -> fig_closerange.pdf
 
     python thesis_screen_figs.py [out_dir]       # default MSc_Thesis_local/figures
 """

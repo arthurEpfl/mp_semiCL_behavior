@@ -164,25 +164,12 @@ class MDNMixJoint(MX.MDNMix):
             out = self.skip(torch.cat([x[:, a:b] for a, b in self.skip_slices], dim=1))
         if getattr(self, "stim_turn", None) is not None:
             out = out + self.stim_turn(x)
-        rs = getattr(self, "_rep_side", None)
-        if rs is not None:                                 # repulsion term (side input of the current record)
-            s = rs[0]
-            if s.shape[0] != x.shape[0]:
-                raise RuntimeError(f"repulsion side input has {s.shape[0]} rows, the feature matrix {x.shape[0]}")
-            z = torch.zeros_like(s)
-            out = out + torch.stack([z, -s, -s, s, s] + [z] * 9, dim=1)
         return out
 
     def step_term(self, x):
         """(n, 1) shift of the step head's log-location from the profile term's v2 levers, or 0.0."""
         st = getattr(self, "stim_turn", None)
-        out = 0.0 if (st is None or not getattr(st, "v2", False)) else st.step_shift(x).reshape(-1, 1)
-        rs = getattr(self, "_rep_side", None)
-        if rs is not None:                                 # repulsion brake (side input of the current record)
-            if rs[1].shape[0] != x.shape[0]:
-                raise RuntimeError(f"repulsion side input has {rs[1].shape[0]} rows, the feature matrix {x.shape[0]}")
-            out = out + rs[1].reshape(-1, 1)
-        return out
+        return 0.0 if (st is None or not getattr(st, "v2", False)) else st.step_shift(x).reshape(-1, 1)
 
     def joint_forward(self, x, a_z, ld_c, lt_c=None):
         """(angle params, (logw,mu,sigma) for distance, same for dt) -- ALWAYS in that return
@@ -215,110 +202,6 @@ class MDNMixJoint(MX.MDNMix):
 
 
 
-# --------------------------------------------------------------------------------------------------------
-#  STIMULUS TURN TERM (the profile fine-tune, scripts/profile_finetune.py)
-# --------------------------------------------------------------------------------------------------------
-# The turn head is a 5-component mixture: 0 = forward (Normal at 0), 1-2 = Gammas on dtheta < 0, 3-4 = Gammas
-# on dtheta > 0. Turning TOWARD a dot group at bearing phi > 0 is dtheta > 0 (the verified toward-turn sign,
-# dtheta * sign(phi) > 0), so the term is a LOG-ODDS SHIFT between turning toward and away from each group:
-#     s = sum_d sin(psi_d) * mv_d * (a_g + b_g nz_d + c_g nz_d^2),   logits[3,4] += s,  logits[1,2] -= s
-# psi_d = the six bearing centres (0, +-60, +-120, 180 deg); sin(psi_d) is 0 straight ahead and behind, where
-# left/right is meaningless. mv_d (moving fraction) confines it to MOVING groups, so static behaviour cannot
-# change. The coefficients are MIRROR-SHARED (+60 with -60, +120 with -120: fish have no handedness), so the
-# whole term is 6 numbers, each readable: extra log-odds of turning toward a moving group of log-count nz at
-# the side (g = 0) or behind the side (g = 1). Zero-initialised, so attaching it leaves the model unchanged.
-_STIM_TURN_GROUP = {60.0: 0, -60.0: 0, 120.0: 1, -120.0: 1, 0.0: 0, 180.0: 0}
-
-
-# V2 LEVERS (Model 33), present only when ``rho_idx`` is given, so Model 32's checkpoints load unchanged. They add
-# the group's RANGE and the case the side term cannot reach -- a group straight AHEAD (sin 0), which is the pursuit
-# regime where D4/D5 and dip_levers located the lost approach (real fish swim straighter and step further there):
-#   rho_d = the group's log range, from the bump map's range profile in its bearing column: sum_j l_j P_dj / sum_j P_dj,
-#           l_j = log2(knot_j / 70 px) -- negative close, positive far; 0 when the column is empty
-#   turn   toward/away log-odds    += sin(psi_d) mv_d e_g rho_d                   (coef_rng: 2, mirror-shared)
-#   turn   FORWARD-component logit += mv_0 (h + k rho_0)  -- straighter bouts at a group ahead   (ahead[0:2])
-#   step   log-step LOCATION       += mv_0 (m + n rho_0)  -- longer steps at a group ahead       (ahead[2:4])
-# 12 numbers in all, each with a plain meaning; all zero-initialised.
-class StimTurnTerm(nn.Module):
-    def __init__(self, mv_idx, nz_idx, rho_idx=None):
-        super().__init__()
-        self.mv_idx = [int(i) for i in mv_idx]; self.nz_idx = [int(i) for i in nz_idx]
-        ang = np.asarray(M.POP_ANG_DEG, float)
-        assert len(self.mv_idx) == len(self.nz_idx) == len(ang)
-        self.register_buffer("sin", torch.tensor(np.sin(np.radians(ang)), dtype=torch.float32))
-        self.register_buffer("grp", torch.tensor([_STIM_TURN_GROUP[float(a)] for a in ang], dtype=torch.long))
-        self.coef = nn.Parameter(torch.zeros(2, 3))
-        self.v2 = rho_idx is not None
-        if self.v2:
-            self.rho_idx = [[int(i) for i in row] for row in rho_idx]                   # (6, n_range)
-            knots = np.asarray(M.SHOAL_RBF_PX, float)
-            self.register_buffer("lk", torch.tensor(np.log2(knots / 70.0), dtype=torch.float32))
-            self.coef_rng = nn.Parameter(torch.zeros(2))
-            self.ahead = nn.Parameter(torch.zeros(4))
-
-    def rho(self, x):
-        """(n, 6) each direction's log range (0 where the column holds no mass)."""
-        P = torch.clamp(x[:, torch.as_tensor(self.rho_idx)], min=0.0)               # (n, 6, R)
-        tot = P.sum(-1)
-        return torch.where(tot > 0, (P * self.lk).sum(-1) / torch.clamp(tot, min=1e-12), torch.zeros_like(tot))
-
-    def shift(self, x):
-        """(n,) the toward-minus-away log-odds shift for each row of the feature matrix ``x``."""
-        mv = x[:, self.mv_idx]; nz = x[:, self.nz_idx]
-        basis = torch.stack([torch.ones_like(nz), nz, nz * nz], dim=-1)            # (n, 6, 3)
-        c = self.coef[self.grp]                                                    # (6, 3)
-        s = (basis * c).sum(-1)
-        if self.v2:
-            s = s + self.coef_rng[self.grp] * self.rho(x)
-        return (self.sin * mv * s).sum(1)
-
-    def forward(self, x):
-        s = self.shift(x)
-        z = torch.zeros_like(s)
-        f = z
-        if self.v2:
-            f = x[:, self.mv_idx[0]] * (self.ahead[0] + self.ahead[1] * self.rho(x)[:, 0])
-        return torch.stack([f, -s, -s, s, s] + [z] * 9, dim=1)                     # (n, 14)
-
-    def step_shift(self, x):
-        """(n,) the shift of the step head's log-location (0 unless the v2 levers are attached)."""
-        if not self.v2:
-            return torch.zeros(x.shape[0], dtype=x.dtype)
-        return x[:, self.mv_idx[0]] * (self.ahead[2] + self.ahead[3] * self.rho(x)[:, 0])
-
-    def spec(self):
-        d = dict(mv_idx=list(self.mv_idx), nz_idx=list(self.nz_idx), coef=self.coef.detach().cpu().numpy().tolist())
-        if self.v2:
-            d.update(rho_idx=self.rho_idx, coef_rng=self.coef_rng.detach().cpu().numpy().tolist(),
-                     ahead=self.ahead.detach().cpu().numpy().tolist())
-        return d
-
-
-def stim_turn_np(coef, sin, grp, mv_idx, nz_idx, x, v2=None):
-    """The numpy twin of ``StimTurnTerm`` for ONE feature row (the generator's per-bout path). ``v2`` =
-    (rho_idx, lk, coef_rng per slot, ahead) when the v2 levers are attached. Returns (turn 14-vector, step shift)."""
-    mv = x[mv_idx]; nz = x[nz_idx]
-    c = coef[grp]
-    s_d = c[:, 0] + c[:, 1] * nz + c[:, 2] * nz * nz
-    f = 0.0; st = 0.0
-    if v2 is not None:
-        rho_idx, lk, rng_slot, ahead = v2
-        P = np.clip(x[rho_idx], 0.0, None); tot = P.sum(-1)
-        rho = np.where(tot > 0, (P * lk).sum(-1) / np.maximum(tot, 1e-12), 0.0)
-        s_d = s_d + rng_slot * rho
-        f = float(mv[0] * (ahead[0] + ahead[1] * rho[0])); st = float(mv[0] * (ahead[2] + ahead[3] * rho[0]))
-    s = float(np.sum(sin * mv * s_d))
-    o = np.zeros(14, dtype=np.float32); o[0] = f; o[1] = o[2] = -s; o[3] = o[4] = s
-    return o, st
-
-
-def stim_rho_indices(cfg_feat):
-    """(6, n_range) feature-row indices of the bump map's cells p{d}_{j} (the v2 range levers read them)."""
-    cols = M.pop_cols(cfg_feat["stim_mode"])
-    k_s = int(cfg_feat["K"]) + (3 * int(cfg_feat["K"]) if cfg_feat.get("include_symbols") else 0)
-    return [[k_s + cols.index(f"p{a}_{r}") for r in range(len(M.SHOAL_RBF_PX))] for a in range(len(M.POP_ANG_DEG))]
-
-
 # V3 (Model 34): the count enters through a SATURATING curve with a fitted saturation point,
 #   g(n) = 1 - exp(-(n - 1) / kappa),  kappa = exp(log_kappa), started at 1,
 # so 1 -> 2 dots can be a STEP (small kappa) or a ramp (large kappa) -- the data decides. MEASURED: real attraction
@@ -336,114 +219,6 @@ def stim_rho_indices(cfg_feat):
 _V3_LK_CLAMP = 3.0
 
 
-class StimTurnTermV3(nn.Module):
-    version = 3
-    v2 = False
-    reg_index = {"logk": [2, 6], "k": [9]}                  # flat indices of the weak pulls (profile_finetune)
-
-    def __init__(self, layout, idx):
-        super().__init__()
-        self.layout = str(layout)
-        # plain ints / lists of ints / lists of lists (JSON-safe, what ``spec`` saves)
-        self.idx = {k: np.asarray(v, dtype=int).tolist() for k, v in idx.items()}
-        if self.layout == "pop":
-            ang = np.asarray(M.POP_ANG_DEG, float)
-            self.register_buffer("sin", torch.tensor(np.sin(np.radians(ang)), dtype=torch.float32))
-            self.register_buffer("grp", torch.tensor([_STIM_TURN_GROUP[float(a)] for a in ang], dtype=torch.long))
-            self.register_buffer("lk", torch.tensor(np.log2(np.asarray(M.SHOAL_RBF_PX, float) / 70.0),
-                                                    dtype=torch.float32))
-        elif self.layout != "centroid":
-            raise ValueError(self.layout)
-        self.coef3 = nn.Parameter(torch.zeros(2, 4))        # [a, b, log kappa, e] x (side, rear-side)
-        self.ahead = nn.Parameter(torch.zeros(2))           # [h, k]
-
-    # ---- shared pieces
-    def _rho_pop(self, x):
-        P = torch.clamp(x[:, torch.as_tensor(self.idx["rho"])], min=0.0)
-        tot = P.sum(-1)
-        return torch.where(tot > 0, (P * self.lk).sum(-1) / torch.clamp(tot, min=1e-12), torch.zeros_like(tot))
-
-    def _g(self, n, grp):
-        kap = torch.exp(torch.clamp(self.coef3[grp, 2], -_V3_LK_CLAMP, _V3_LK_CLAMP))
-        return 1.0 - torch.exp(-torch.clamp(n - 1.0, min=0.0) / kap)
-
-    def forward(self, x):
-        if self.layout == "pop":
-            mv = x[:, self.idx["mv"]]; nz = x[:, self.idx["nz"]]
-            n = torch.pow(8.0, nz); rho = self._rho_pop(x)                          # (n, 6)
-            c = self.coef3[self.grp]                                                # (6, 4)
-            s_d = c[:, 0] + c[:, 1] * self._g(n, self.grp) + c[:, 3] * rho
-            s = (self.sin * mv * s_d).sum(1)
-            f = mv[:, 0] * (self.ahead[0] + self.ahead[1] * rho[:, 0])
-        else:
-            mvf = x[:, self.idx["moving"]]; sn = x[:, self.idx["mv_sin"]]; cs = x[:, self.idx["mv_cos"]]
-            n = torch.pow(8.0, x[:, self.idx["nz"]]); rho = 2.0 * x[:, self.idx["rz"]]
-            grp = (cs < 0).long()
-            c = self.coef3[grp]                                                     # (n, 4)
-            kap = torch.exp(torch.clamp(c[:, 2], -_V3_LK_CLAMP, _V3_LK_CLAMP))
-            g = 1.0 - torch.exp(-torch.clamp(n - 1.0, min=0.0) / kap)
-            s = sn * mvf * (c[:, 0] + c[:, 1] * g + c[:, 3] * rho)
-            ah = mvf * (cs > float(np.cos(np.radians(30.0)))).float()
-            f = ah * (self.ahead[0] + self.ahead[1] * rho)
-        z = torch.zeros_like(s)
-        return torch.stack([f, -s, -s, s, s] + [z] * 9, dim=1)
-
-    def step_shift(self, x):
-        return torch.zeros(x.shape[0], dtype=x.dtype)
-
-    def numpy_fn(self):
-        """x (one feature row) -> (14-vector, 0.0): the generator's per-bout twin of ``forward``."""
-        c3 = self.coef3.detach().cpu().numpy().astype(np.float64)
-        ah = self.ahead.detach().cpu().numpy().astype(np.float64)
-        kap = np.exp(np.clip(c3[:, 2], -_V3_LK_CLAMP, _V3_LK_CLAMP))
-        ix = {k: np.asarray(v) for k, v in self.idx.items()}
-        if self.layout == "pop":
-            sin = self.sin.cpu().numpy().astype(np.float64); grp = self.grp.cpu().numpy()
-            lk = self.lk.cpu().numpy().astype(np.float64)
-
-            def fn(x):
-                mv = x[ix["mv"]]; n = 8.0 ** x[ix["nz"]]
-                P = np.clip(x[ix["rho"]], 0.0, None); tot = P.sum(-1)
-                rho = np.where(tot > 0, (P * lk).sum(-1) / np.maximum(tot, 1e-12), 0.0)
-                g = 1.0 - np.exp(-np.clip(n - 1.0, 0.0, None) / kap[grp])
-                c = c3[grp]
-                s = float(np.sum(sin * mv * (c[:, 0] + c[:, 1] * g + c[:, 3] * rho)))
-                f = float(mv[0] * (ah[0] + ah[1] * rho[0]))
-                o = np.zeros(14, dtype=np.float32); o[0] = f; o[1] = o[2] = -s; o[3] = o[4] = s
-                return o, 0.0
-        else:
-            ca = np.cos(np.radians(30.0))
-
-            def fn(x):
-                mvf = float(x[ix["moving"]]); sn = float(x[ix["mv_sin"]]); cs = float(x[ix["mv_cos"]])
-                n = 8.0 ** float(x[ix["nz"]]); rho = 2.0 * float(x[ix["rz"]])
-                gi = 1 if cs < 0 else 0
-                g = 1.0 - np.exp(-max(n - 1.0, 0.0) / kap[gi])
-                s = sn * mvf * (c3[gi, 0] + c3[gi, 1] * g + c3[gi, 3] * rho)
-                f = mvf * float(cs > ca) * (ah[0] + ah[1] * rho)
-                o = np.zeros(14, dtype=np.float32); o[0] = f; o[1] = o[2] = -s; o[3] = o[4] = s
-                return o, 0.0
-        return fn
-
-    def spec(self):
-        return dict(version=3, layout=self.layout, idx=self.idx,
-                    coef3=self.coef3.detach().cpu().numpy().tolist(), ahead=self.ahead.detach().cpu().numpy().tolist())
-
-
-def stim_turn_v3(cfg_feat):
-    """A zero-started ``StimTurnTermV3`` for the checkpoint's stimulus layout."""
-    mode = cfg_feat["stim_mode"]
-    k_s = int(cfg_feat["K"]) + (3 * int(cfg_feat["K"]) if cfg_feat.get("include_symbols") else 0)
-    if mode in M.POP_MODES:
-        mv, nz = stim_turn_indices(cfg_feat)
-        return StimTurnTermV3("pop", dict(mv=mv, nz=nz, rho=stim_rho_indices(cfg_feat)))
-    cols = M.shoal_cols(mode)
-    need = ("moving", "nz", "rz", "mv_sin", "mv_cos")
-    if not all(c in cols for c in need):
-        raise ValueError(f"the v3 term needs {need} in the stimulus block of {mode!r}")
-    return StimTurnTermV3("centroid", {c: k_s + cols.index(c) for c in need})
-
-
 # V4 (Model 40): ONE SHIFT PER DOT COUNT in place of a + b (1 - exp(-(n - 1) / kappa)). The programme has only five
 # counts, so a table is as readable as the curve, and it removes the kappa-b trade-off Models 36/37 exposed (kappa ~1
 # with the log-kappa prior, 0.15-0.34 without it, at similar loss). It can also give 4-6 dots LESS than 2 dots, which a
@@ -457,90 +232,6 @@ def stim_turn_v3(cfg_feat):
 # group ahead h, k; late gamma -- 15, all zero at the start, so the term is exactly 0 (bit-identical to the base).
 V4_COUNTS = (1.0, 2.0, 4.0, 6.0, 8.0)
 V4_LATE_TAU_S = 20.0
-
-
-class StimTurnTermV4(nn.Module):
-    version = 4
-    v2 = False
-    reg_index = {"logk": [], "k": [13]}                     # flat order: bN (10), e (2), ahead h, k (2), late (1)
-
-    def __init__(self, idx, clock_tau_s=4.0, late_tau_s=V4_LATE_TAU_S):
-        super().__init__()
-        self.layout = "centroid"
-        self.idx = {k: int(v) for k, v in idx.items()}
-        self.clock_tau_s, self.late_tau_s = float(clock_tau_s), float(late_tau_s)
-        self.register_buffer("counts", torch.tensor(V4_COUNTS, dtype=torch.float32))
-        self.bN = nn.Parameter(torch.zeros(2, len(V4_COUNTS)))  # (side, rear-side) x (1, 2, 4, 6, 8 dots)
-        self.e = nn.Parameter(torch.zeros(2))                    # range, per group
-        self.ahead = nn.Parameter(torch.zeros(2))                # [h, k]
-        self.late = nn.Parameter(torch.zeros(1))                 # gamma
-
-    def _late_t(self, clock):
-        """1 - exp(-t / late_tau) from the block clock exp(-t / clock_tau)."""
-        return 1.0 - torch.pow(torch.clamp(clock, min=1e-30, max=1.0), self.clock_tau_s / self.late_tau_s)
-
-    def forward(self, x):
-        mvf = x[:, self.idx["moving"]]; sn = x[:, self.idx["mv_sin"]]; cs = x[:, self.idx["mv_cos"]]
-        n = torch.pow(8.0, x[:, self.idx["nz"]]); rho = 2.0 * x[:, self.idx["rz"]]
-        grp = (cs < 0).long()
-        w = (torch.abs(n[:, None] - self.counts[None, :]) < 0.5).to(x.dtype)       # (n, 5): which count
-        b = (self.bN[grp] * w).sum(1)
-        fac = 1.0 + torch.tanh(self.late[0]) * self._late_t(x[:, self.idx["clock"]])
-        s = sn * mvf * (b + self.e[grp] * rho) * fac
-        ah = mvf * (cs > float(np.cos(np.radians(30.0)))).to(x.dtype)
-        f = ah * (self.ahead[0] + self.ahead[1] * rho)
-        z = torch.zeros_like(s)
-        return torch.stack([f, -s, -s, s, s] + [z] * 9, dim=1)
-
-    def step_shift(self, x):
-        return torch.zeros(x.shape[0], dtype=x.dtype)
-
-    def numpy_fn(self):
-        """x (one feature row) -> (14-vector, 0.0): the generator's per-bout twin of ``forward``."""
-        bN = self.bN.detach().cpu().numpy().astype(np.float64)
-        e = self.e.detach().cpu().numpy().astype(np.float64)
-        ah = self.ahead.detach().cpu().numpy().astype(np.float64)
-        g = float(np.tanh(float(self.late.detach().cpu().numpy()[0])))
-        counts = np.asarray(V4_COUNTS, float)
-        ix, ca, p = dict(self.idx), float(np.cos(np.radians(30.0))), self.clock_tau_s / self.late_tau_s
-
-        def fn(x):
-            mvf = float(x[ix["moving"]]); sn = float(x[ix["mv_sin"]]); cs = float(x[ix["mv_cos"]])
-            n = 8.0 ** float(x[ix["nz"]]); rho = 2.0 * float(x[ix["rz"]])
-            gi = 1 if cs < 0 else 0
-            b = float(bN[gi][np.abs(n - counts) < 0.5].sum())
-            clk = min(max(float(x[ix["clock"]]), 1e-30), 1.0)
-            s = sn * mvf * (b + e[gi] * rho) * (1.0 + g * (1.0 - clk ** p))
-            f = mvf * float(cs > ca) * (ah[0] + ah[1] * rho)
-            o = np.zeros(14, dtype=np.float32); o[0] = f; o[1] = o[2] = -s; o[3] = o[4] = s
-            return o, 0.0
-        return fn
-
-    def spec(self):
-        return dict(version=4, layout=self.layout, idx=self.idx, clock_tau_s=self.clock_tau_s,
-                    late_tau_s=self.late_tau_s, bN=self.bN.detach().cpu().numpy().tolist(),
-                    e=self.e.detach().cpu().numpy().tolist(), ahead=self.ahead.detach().cpu().numpy().tolist(),
-                    late=self.late.detach().cpu().numpy().tolist())
-
-
-def stim_turn_v4(cfg_feat, n_features):
-    """A zero-started ``StimTurnTermV4`` for a centroid (S4) checkpoint with ``n_features`` inputs. The block clock's
-    column is located from the feature layout: [..., lag flag][block clock][run clock][tail (align, static, ...)]."""
-    mode = cfg_feat["stim_mode"]
-    if mode in M.POP_MODES:
-        raise ValueError("the v4 term is built for the centroid (S4) layout")
-    if str(cfg_feat.get("clock_mode", "") or "").lower() != "exp":
-        raise ValueError("the v4 late factor reads the exponential block clock (clock_mode='exp')")
-    if int(cfg_feat.get("K_stim", 1) or 1) > 1 or cfg_feat.get("clock2_tau_s"):
-        raise ValueError("the v4 clock index assumes one stimulus-block and one block-clock column")
-    k_s = int(cfg_feat["K"]) + (3 * int(cfg_feat["K"]) if cfg_feat.get("include_symbols") else 0)
-    cols = M.shoal_cols(mode)
-    need = ("moving", "nz", "rz", "mv_sin", "mv_cos")
-    if not all(c in cols for c in need):
-        raise ValueError(f"the v4 term needs {need} in the stimulus block of {mode!r}")
-    idx = {c: k_s + cols.index(c) for c in need}
-    idx["clock"] = int(n_features) - MB.tail_width(cfg_feat) - (1 if cfg_feat.get("run_clock_tau") else 0) - 1
-    return StimTurnTermV4(idx, clock_tau_s=float(cfg_feat.get("clock_tau_s", 4.0)))
 
 
 # V5 (report notebook, Model 11): COUNT-GATED terms -- every piece is multiplied by a count curve that is 0 at ONE
@@ -696,8 +387,6 @@ def stim_turn_v5(cfg_feat, arm, n_features=None):
     """A zero-started ``StimTurnTermV5`` of arm 'S' / 'B' / 'BS' / 'Bst' / 'BSl' for the checkpoint's centroid layout.
     'BSl' also needs ``n_features`` (the net's input width) to locate the block clock, as ``stim_turn_v4``."""
     mode = cfg_feat["stim_mode"]
-    if mode in M.POP_MODES:
-        raise ValueError("the v5 term is built for the centroid (S4) layout")
     k_s = int(cfg_feat["K"]) + (3 * int(cfg_feat["K"]) if cfg_feat.get("include_symbols") else 0)
     cols = M.shoal_cols(mode)
     kw = dict(V5_ARMS[arm])
@@ -725,54 +414,7 @@ def stim_turn_v5(cfg_feat, arm, n_features=None):
 
 
 
-def stim_turn_indices(cfg_feat):
-    """Column indices of the per-direction moving fraction and log count in the FEATURE ROW for a population
-    stimulus mode: [K history][(3K symbols)][stim block ...]."""
-    mode = cfg_feat["stim_mode"]
-    if mode not in M.POP_MODES:
-        raise ValueError(f"the stimulus turn term needs a population stimulus mode, not {mode!r}")
-    cols = M.pop_cols(mode)
-    k_s = int(cfg_feat["K"]) + (3 * int(cfg_feat["K"]) if cfg_feat.get("include_symbols") else 0)
-    return ([k_s + cols.index(f"mv{a}") for a in range(len(M.POP_ANG_DEG))],
-            [k_s + cols.index(f"nz{a}") for a in range(len(M.POP_ANG_DEG))])
-
-# --------------------------------------------------------------------------- #
-#  REPULSION TERM (report Model 43, Final_report_extra_data.ipynb). A fixed-form term on a trained model, fitted
-#  to the Larsch lab screen data (short-range turn-away and backing off from a single dot, twin_test.py), stored
-#  as ``cfg_feat["repulsion"]`` = {"a", "r_c", "w"} (+ {"c", "r_b", "w_b"} for the brake). It reads EACH active
-#  dot j (not the centroid), at distance d_j (mm) and bearing phi_j from the pre-bout heading (travel frame):
-#      turn:  s = -a * sum_j sin(phi_j) * sigma((r_c - d_j) / w)      toward-minus-away log-odds: +s on the
-#             right-turn (dtheta > 0) components, -s on the left -- the V5 term's convention (positive = toward)
-#      brake: u = -c * sum_j max(cos(phi_j), 0) * sigma((r_b - d_j) / w_b)   added to the step head's log-means
-#      step:  u += s_amp * sum_j sigma((s_r - d_j) / s_w)   the step's log-means near ANY dot (Model 50; s_amp < 0 =
-#             shorter steps), fitted by the teacher-forced likelihood of the screen bouts (scripts/repulsion_lik.py)
-#  The network and any profile correction are untouched. Applied in the numpy generator (every rollout) and, as a
-#  per-bout side input computed from the record's own dot positions, in the torch teacher-forced paths (score /
-#  likelihood, conditional_turn, conditional_kin). The batch engine refuses it.
-# --------------------------------------------------------------------------- #
 REP_PX_PER_MM = 3.60
-
-
-def repulsion_shifts(dxs, dys, x, y, h, rp):
-    """(turn shift s, step log-mean shift u) of the repulsion term. ``dxs``/``dys``: dot positions in px, (k,) for one
-    bout or (n, k) for n bouts, NaN = inactive; ``x``/``y``/``h``: pre-bout pose (px, rad), scalars or (n,)."""
-    dxs = np.atleast_2d(np.asarray(dxs, float)); dys = np.atleast_2d(np.asarray(dys, float))
-    x = np.asarray(x, float).reshape(-1, 1); y = np.asarray(y, float).reshape(-1, 1)
-    h = np.asarray(h, float).reshape(-1, 1)
-    on = np.isfinite(dxs) & np.isfinite(dys) & np.isfinite(x) & np.isfinite(h)
-    d = np.hypot(dxs - x, dys - y) / REP_PX_PER_MM
-    phi = MB._wrap_pi(np.arctan2(dys - y, dxs - x) - h)
-    sig = lambda z: 1.0 / (1.0 + np.exp(-np.clip(z, -50, 50)))
-    s = -float(rp.get("a", 0.0)) * np.where(on, np.sin(phi) * sig((float(rp.get("r_c", 0.0)) - d)
-                                                                   / float(rp.get("w", 1.0))), 0.0).sum(1)
-    u = np.zeros(s.shape)
-    if rp.get("s_amp"):                                    # STEP term (Model 50): the step's log-mean near any dot,
-        u = u + float(rp["s_amp"]) * np.where(on, sig((float(rp["s_r"]) - d)  # whatever its bearing (likelihood-fitted)
-                                                       / float(rp.get("s_w", 1.0))), 0.0).sum(1)
-    if rp.get("c"):
-        u = -float(rp["c"]) * np.where(on, np.maximum(np.cos(phi), 0.0) * sig((float(rp["r_b"]) - d)
-                                                                             / float(rp.get("w_b", 1.0))), 0.0).sum(1)
-    return np.nan_to_num(s), np.nan_to_num(u)
 
 
 # --------------------------------------------------------------------------- #
@@ -785,7 +427,7 @@ def repulsion_shifts(dxs, dys, x, y, h, rp):
 #      step:  u_g = s_amp n_g^beta sigma((s_r - d*_g) / s_w)               (the step head's log-mean)
 #  stored as ``cfg_feat["grouprep"]`` = {"a", "r_c", "w", "beta", "s_amp", "s_r", "s_w"}. For one dot (the screen) d*
 #  is the dot itself, so the screen fit needs no synthetic groups. Numpy generator only (every rollout); the torch
-#  teacher-forced paths do NOT see it (score it with scripts/grouprep_fit.py instead). Exclusive with "repulsion".
+#  teacher-forced paths do NOT see it (score it with twin/grouprep_fit.py instead).
 #  ``cfg_feat["collision_mm"]`` (optional, the shoal reference): a bout whose landing point is within that distance of
 #  a neighbour (provider.neighbours_xy()) is redrawn inside the wall-rejection loop.
 # --------------------------------------------------------------------------- #
@@ -823,32 +465,6 @@ def grouprep_shifts(near, x, y, h, gp):
     return float(s), float(u)
 
 
-class repulsion_side:
-    """Context: attach the repulsion term's per-bout shifts, computed from ``rec``'s own dot positions and real
-    pre-bout poses, to the net for one teacher-forced pass (``skip_term`` / ``step_term`` add them). No-op when the
-    model has no repulsion term."""
-
-    def __init__(self, model, rec):
-        self.net = getattr(model, "_model", None)
-        self.rp = (getattr(model, "_cfg_feat", None) or {}).get("repulsion")
-        self.rec = rec
-
-    def __enter__(self):
-        if self.rp:
-            rec = self.rec
-            dxs, dys = getattr(rec, "dot_xs", None), getattr(rec, "dot_ys", None)
-            if dxs is None:
-                raise RuntimeError("repulsion term: the record carries no per-dot positions (rec.dot_xs)")
-            s, u = repulsion_shifts(dxs, dys, rec.x_px, rec.y_px, MB._travel_ref(rec), self.rp)
-            self.net._rep_side = (torch.tensor(s, dtype=torch.float32), torch.tensor(u, dtype=torch.float32))
-        return self
-
-    def __exit__(self, *exc):
-        if self.rp:
-            self.net._rep_side = None
-        return False
-
-
 def _cond_cols(y_ang, y_dist, dth_scale, kin_scales, y_dt=None):
     """The within-bout conditioners, on the scale the history blocks use.
 
@@ -864,18 +480,6 @@ def _cond_cols(y_ang, y_dist, dth_scale, kin_scales, y_dt=None):
         return out
     lt = np.log(np.clip(np.asarray(y_dt, float), 1e-6, None))
     return out + (np.nan_to_num((lt - tm) / ts).astype(np.float32),)
-
-
-def _noise_tensors(noise_builder, ep, dth_scale, kin_scales, dev):
-    """Build one epoch's NOISY copy as device tensors, in the same row order as the clean one."""
-    Xn, yan, ydn, ytn = noise_builder(ep)
-    azn, lcn, ltn = _cond_cols(yan, ydn, dth_scale, kin_scales, y_dt=ytn)
-    return (torch.tensor(np.asarray(Xn, np.float32), device=dev),
-            torch.tensor(azn, device=dev), torch.tensor(lcn, device=dev),
-            torch.tensor(ltn, device=dev),
-            torch.tensor(np.asarray(yan, np.float32), device=dev),
-            torch.tensor(np.asarray(ydn, np.float32), device=dev),
-            torch.tensor(np.asarray(ytn, np.float32), device=dev))
 
 
 # Measured, not guessed. Gradient-norm distribution over 402 steps of a 6-epoch fit (identical
@@ -972,39 +576,12 @@ def _warn_unstable(stats, hist):
               "the fit was steered but did not diverge")
 
 
-def _noise_kwargs(model, train_records):
-    """Translate a model's ``noise_aug`` dict into the trainer's noise kwargs ({} when off).
-
-    ONE rng for the whole fit, advanced by every call, so each epoch sees a FRESH perturbation of
-    the same records rather than a fixed augmented dataset -- which would merely be a bigger
-    training set and would let the net memorise the particular jitter. Shared by the joint and
-    fishre trainers so the two cannot drift."""
-    na = getattr(model, "noise_aug", None)
-    if not na:
-        return {}
-    rng = np.random.default_rng([int(model.seed), 7919])
-    cfg, recs = model._cfg_feat, list(train_records)
-    return dict(noise_builder=lambda _ep: MB.build_noisy_sequences(recs, cfg, rng),
-                noise_mode=str(na.get("mode", "concat")),
-                noise_frac=float(na.get("frac", 0.5)))
-
-
 def fit_mix_joint(X, y_ang, y_dist, y_dt, hidden, dth_scale, kin_scales, *, epochs=80, lr=1e-3,
                   batch_size=256, patience=8, val_frac=0.15, seed=0, device=None,
-                  n_dist=2, n_dt=3, weight_decay=1e-5, order=None,
-                  noise_builder=None, noise_mode="concat", noise_frac=0.5, weights=None,
-                  dt_trunc=None):
+                  n_dist=2, n_dt=3, weight_decay=1e-5, order=None, weights=None, dt_trunc=None):
     """Train ``MDNMixJoint`` on the exact chained joint NLL. Distance/dt NaN-masked per channel
     (the last bout of every fish has no forward-looking dt or distance); early stopping is on the
-    JOINT validation loss, so all three channels share one stopping criterion.
-
-    ``noise_builder(epoch) -> (X~, dtheta~, distance~, dt)`` enables NOISE AUGMENTATION: a fresh
-    pose-perturbed copy of the whole training set each epoch, with the targets corrected back to
-    the true next onset (``MB.build_noisy_sequences``). ``noise_mode='concat'`` trains on clean
-    and noisy rows both (~2x epoch cost, the faithful version); ``'mask'`` replaces a
-    Bernoulli(``noise_frac``) subset of each clean batch instead (same cost, half the clean data).
-    THE VALIDATION LOSS IS ALWAYS CLEAN -- otherwise early stopping optimises a different
-    objective from the one reported, and the loss is not comparable to any archived arm."""
+    JOINT validation loss, so all three channels share one stopping criterion."""
     M._seed_everything(seed)
     dev = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
     a_z, ld_c, lt_c = _cond_cols(y_ang, y_dist, dth_scale, kin_scales, y_dt=y_dt)
@@ -1019,9 +596,6 @@ def fit_mix_joint(X, y_ang, y_dist, y_dt, hidden, dth_scale, kin_scales, *, epoc
     # stopping is on the WEIGHTED validation loss -- the objective actually being fitted; Metric A
     # (score()) stays the plain per-bout density and is reported separately.
     wt = None if weights is None else torch.tensor(np.asarray(weights, np.float32), device=dev)
-    if wt is not None and noise_builder is not None:
-        raise ValueError("regime weights with noise augmentation are not wired up: the noisy "
-                         "copy's rows would need the same weights")
     net = MDNMixJoint(Xt.shape[1], hidden, n_dist=n_dist, n_dt=n_dt, order=order).to(dev)
     net.dt_trunc = (float(dt_trunc) if dt_trunc else None)
     opt = torch.optim.Adam(net.parameters(), lr=lr, weight_decay=weight_decay)
@@ -1056,29 +630,11 @@ def fit_mix_joint(X, y_ang, y_dist, y_dt, hidden, dth_scale, kin_scales, *, epoc
         # the batch COMPOSITION must not. Slicing `tr` directly, as this loop used to, meant every
         # minibatch contained the same 256 bouts for all 80/250 epochs. `fit_mix` (:118) and
         # `fit_mix_kin` both reshuffle; this was the only trainer in the repo that did not.
-        NT = (_noise_tensors(noise_builder, _ep, dth_scale, kin_scales, dev)
-              if noise_builder is not None else None)
         tr_ep = tr[torch.randperm(len(tr), device=dev)]
         for i in range(0, len(tr_ep), batch_size):
             ix = tr_ep[i:i + batch_size]
-            if NT is not None and noise_mode == "mask":
-                m = torch.rand(len(ix), device=dev) < float(noise_frac)
-                Xb = torch.where(m.unsqueeze(1), NT[0][ix], Xt[ix])
-                azb = torch.where(m, NT[1][ix], az[ix]); lcb = torch.where(m, NT[2][ix], lc[ix])
-                ltb = torch.where(m, NT[3][ix], lt_t[ix])
-                yab = torch.where(m, NT[4][ix], ya[ix]); ydb = torch.where(m, NT[5][ix], yd[ix])
-                ytb = torch.where(m, NT[6][ix], yt[ix])
-                opt.zero_grad(); loss = nll_on(Xb, azb, lcb, ltb, yab, ydb, ytb)
-            else:
-                opt.zero_grad(); loss = nll(ix)
+            opt.zero_grad(); loss = nll(ix)
             guarded_step(opt, loss, net.parameters(), stats=_gstats)
-        if NT is not None and noise_mode != "mask":       # 'concat': a second, noisy pass
-            tr_ep2 = tr[torch.randperm(len(tr), device=dev)]
-            for i in range(0, len(tr_ep2), batch_size):
-                ix = tr_ep2[i:i + batch_size]
-                opt.zero_grad()
-                loss = nll_on(*(t[ix] for t in NT))
-                guarded_step(opt, loss, net.parameters(), stats=_gstats)
         net.eval()
         with torch.no_grad():
             v = float(nll(va))
@@ -1131,19 +687,7 @@ def _numpy_predictor_joint(model, z=None):
     _skip_term = [np.zeros(14, dtype=np.float32)]
     _st = getattr(model, "stim_turn", None)
     _st_args = None
-    _st_v2 = None
-    _st_step = [0.0]
-    _st_call = None                                  # x -> (14-vector turn shift, step shift)
-    if _st is not None and getattr(_st, "version", 1) >= 3:
-        _st_call = _st.numpy_fn()
-    elif _st is not None:
-        _st_args = (_st.coef.detach().cpu().numpy().astype(np.float64), _st.sin.cpu().numpy().astype(np.float64),
-                    _st.grp.cpu().numpy(), np.asarray(_st.mv_idx), np.asarray(_st.nz_idx))
-        if getattr(_st, "v2", False):
-            _st_v2 = (np.asarray(_st.rho_idx), _st.lk.cpu().numpy().astype(np.float64),
-                      _st.coef_rng.detach().cpu().numpy().astype(np.float64)[_st.grp.cpu().numpy()],
-                      _st.ahead.detach().cpu().numpy().astype(np.float64))
-        _st_call = lambda x: stim_turn_np(*_st_args, x, v2=_st_v2)  # noqa: E731
+    _st_call = None if _st is None else _st.numpy_fn()  # x -> (14-vector turn shift, step shift)
     if z is not None and "z_body.weight" in sd:
         # KEEP THE DTYPE. `b1 + (W_z @ z)` promotes float32 -> float64 the moment z is float64, and
         # every subsequent bout is then computed in a different precision from the control's. The
@@ -1239,7 +783,7 @@ def _numpy_predictor_joint(model, z=None):
         if _skip_w is not None:
             _skip_term[0] = _skip_w @ np.concatenate([x[a:b] for a, b in _skip_sl])
         if _st_call is not None:
-            _o, _st_step[0] = _st_call(x)
+            _o = _st_call(x)[0]
             _skip_term[0] = (_skip_term[0] if _skip_w is not None else 0.0) + _o
         h = np.maximum(W1 @ x + b1, 0.0)
         for Wk, bk in _deep:
@@ -1263,8 +807,6 @@ def _numpy_predictor_joint(model, z=None):
 
     def dist_params(b, *prev):
         do = Wd @ _inp(b, prev, "d") + bd
-        if _st_v2 is not None:                       # the profile term's step lever (stashed by ``body``)
-            do = do.copy(); do[nd:2 * nd] = do[nd:2 * nd] + _st_step[0]
         return _sm(do[:nd]), do[nd:2 * nd], sp(do[2 * nd:3 * nd]) + M.EPS
 
     def dt_params(b, *prev):
@@ -1319,7 +861,7 @@ def _numpy_predictor_joint(model, z=None):
     def _t_link(to):
         return _sm(to[:ndt]), to[ndt:2 * ndt], sp(to[2 * ndt:3 * ndt]) + M.EPS
 
-    body_angle.raw = dict(hid=_hid, skip=_skip_of, lag=_lag_of, st=_st_call, st_step=_st_v2 is not None,
+    body_angle.raw = dict(hid=_hid, skip=_skip_of, lag=_lag_of, st=_st_call,
                           a=_a_raw, a_link=_a_link, d=_d_raw, d_link=_d_link, t=_t_raw, t_link=_t_link)
     return body_angle, dist_params, dt_params
 
@@ -1329,7 +871,7 @@ def _numpy_predictor_joint(model, z=None):
 # --------------------------------------------------------------------------- #
 # The recorded programme never shows two dot groups at once (0 % of 39,542 stimulus bouts), so how a trained network
 # responds to two is NOT learned -- it is fixed by the rule that turns two groups into the network's input. Four rules,
-# all on the same trained weights (scripts/multi_stim.py):
+# all on the same trained weights:
 #   'effects'  each group alone through the whole network, plus a no-dots baseline; every head's output (before its link
 #              function) = baseline + sum of the groups' effects. Every row is a valid single-group (or no-dots) input.
 #   'add'      one row whose stimulus columns are the SUM of the groups' columns (first-layer drives add; cos may be > 1).
@@ -1340,55 +882,27 @@ def _numpy_predictor_joint(model, z=None):
 # the scene's onset; 0 in the no-dots baseline row, as on every no-dot bout in training), and the profile term (pf) is
 # evaluated on each group's own row: summed for 'effects' / 'add', averaged for 'avg', the nearest group's for
 # 'nearest'. With ONE group every rule gives exactly the standard row, so the standard simulator is reproduced bit for
-# bit (scripts/multi_stim.py --validate).
+# bit (twin/two_targets.py validate).
 MULTI_RULES = ("effects", "add", "avg", "nearest")
-# HEADING-WEIGHTED rule (2026-10-15, Final_report_extrapolations_2): 'heading<kappa>', e.g. 'heading2'. As 'effects', each
-# group alone through the network against the no-dots baseline, but the group effects are combined with weights that sum
-# to one, w_i = softmax_i(kappa * cos(phi_i)), phi_i the group's bearing from the fish's heading: groups nearly
-# straight ahead weigh about equally (the effects are averaged), and of two groups far apart the one more ahead dominates,
-# which turns the fish further toward it -- the positive feedback behind a switch from averaging to choosing
-# (Sridhar et al. 2021). kappa = 0 is the plain average of the effects; with ONE group w = 1 and the row is the standard one.
 
-
-def heading_kappa(rule):
-    """kappa of a 'heading<kappa>' rule, else None."""
-    if isinstance(rule, str) and rule.startswith("heading"):
-        return float(rule[len("heading"):])
-    return None
-
-
-def heading_weights(phis, kappa):
-    c = kappa * np.cos(np.asarray(phis, float))
-    c = c - np.max(c)
-    w = np.exp(c)
-    return w / w.sum()
 
 
 class MultiBout:
     """One bout of a multi-group scene: the hidden activations of its rows and how to combine their head outputs.
-    ``base`` True = rows[0] is the no-dots baseline and rows[1:] the groups ('effects'); else one combined row.
-    ``w`` (heading rule) = the groups' weights: baseline + sum_i w_i (group_i - baseline) instead of the plain sum."""
+    ``base`` True = rows[0] is the no-dots baseline and rows[1:] the groups ('effects'); else one combined row."""
 
-    __slots__ = ("raw", "hs", "adds", "lags", "base", "w")
+    __slots__ = ("raw", "hs", "adds", "lags", "base")
 
-    def __init__(self, raw, rows, adds, base, w=None):
+    def __init__(self, raw, rows, adds, base):
         self.raw = raw
         self.hs = [raw["hid"](r) for r in rows]
         self.adds = adds
         self.lags = [raw["lag"](r) for r in rows]
         self.base = bool(base)
-        self.w = None if w is None else np.asarray(w, float)
 
     def _comb(self, outs):
         if not self.base:
             return outs[0]
-        if self.w is not None:                        # heading rule: weighted effects, weights summing to one
-            if len(self.w) == 1:
-                return outs[1]                        # one group: exactly its own row
-            o = outs[0].copy()
-            for wi, q in zip(self.w, outs[1:]):
-                o = o + wi * (q - outs[0])
-            return o
         o = outs[1]                                   # sum of the groups' outputs minus (G - 1) baselines: the
         for q in outs[2:]:                            # baseline plus every group's effect. G = 1 -> outs[1] exactly.
             o = o + q
@@ -1407,7 +921,7 @@ class MultiBout:
         return self.raw["t_link"](self._comb([self.raw["t"](h, g, *prev) for h, g in zip(self.hs, self.lags)]))
 
 
-def multi_bout(raw, rule, group_rows, base_row=None, comb_row=None, weights=None):
+def multi_bout(raw, rule, group_rows, base_row=None, comb_row=None):
     """The ``MultiBout`` of one bout. ``group_rows`` = each group's own full input row (block clock on, its own
     aligned-and-far flag); ``base_row`` = the no-dots row ('effects'); ``comb_row`` = the combined row ('add' / 'avg' /
     'nearest'). The turn head's additive term (skip path + pf) follows the rule -- see MULTI_RULES."""
@@ -1425,9 +939,6 @@ def multi_bout(raw, rule, group_rows, base_row=None, comb_row=None, weights=None
     if rule == "effects":
         rows = [base_row] + list(group_rows)
         return MultiBout(raw, rows, [_add(r, [r]) for r in rows], base=True)
-    if heading_kappa(rule) is not None:
-        rows = [base_row] + list(group_rows)
-        return MultiBout(raw, rows, [_add(r, [r]) for r in rows], base=True, w=weights)
     if rule == "nearest":
         return MultiBout(raw, [comb_row], [_add(comb_row, [comb_row])], base=False)
     if rule in ("add", "avg"):
@@ -1463,7 +974,7 @@ def generate_mix_joint_loop(model, rec, cfg_feat, rng, closed_loop=True, guardra
     _off = [k for k in ("repulsion", "vigor", "indiv", "kin_innov", "kin_feedback", "centre_bias", "dt_latent",
                         "rad_gate", "stim_lags", "stim_static_clock", "stim_static_bump", "stim_onset", "dt_snap")
             if cfg_feat.get(k)]
-    if (_off or int(cfg_feat.get("K_stim", 1)) > 1 or cfg_feat["stim_mode"] in M.POP_MODES
+    if (_off or int(cfg_feat.get("K_stim", 1)) > 1 or cfg_feat["stim_mode"] not in M.SHOAL_MODES
             or "rad_sd" in (cfg_feat.get("fish_re") or {}) or (cfg_feat.get("wall_reject") or {}).get("pull") is not None
             or float((cfg_feat.get("drift") or {}).get("bord", 0.0))):
         raise NotImplementedError(f"generator option not in this code: {_off or cfg_feat['stim_mode']}")
@@ -1778,9 +1289,8 @@ def generate_mix_joint_loop(model, rec, cfg_feat, rng, closed_loop=True, guardra
             raise ValueError(f"multi_rule {multi_rule!r} not in {MULTI_RULES}")
         if stim_provider is None or not callable(getattr(stim_provider, "groups", None)) or not recompute_stim:
             raise ValueError("multi_rule needs the online stimulus path and a provider with groups()")
-        if _ra is not None or keep_features or _force_P or body_angle.raw["st_step"]:
-            raise NotImplementedError("multi_rule: no re-anchoring, feature recording, forced starts or a step-lever "
-                                      "profile term")
+        if _ra is not None or keep_features or _force_P:
+            raise NotImplementedError("multi_rule: no re-anchoring, feature recording or forced starts")
         _MG_MAX = 4
         grp_cx = np.full((n, _MG_MAX), np.nan); grp_cy = np.full((n, _MG_MAX), np.nan)
         grp_phi = np.full((n, _MG_MAX), np.nan); grp_n = np.zeros(n, dtype=np.int8)
@@ -2322,8 +1832,7 @@ class MLPMixJointDensity(MX.MLPMixLoopDensity):
             X, y_ang, y_dist, y_dt, self.hidden, self._dth_scale, self._kin_scales,
             epochs=self.epochs, lr=self.lr, patience=self.patience,
             batch_size=self.batch_size, seed=self.seed, n_dist=self.n_dist, n_dt=self.n_dt,
-            order=self.head_order, weights=weights, dt_trunc=self.dt_trunc,
-            **_noise_kwargs(self, train_records))
+            order=self.head_order, weights=weights, dt_trunc=self.dt_trunc)
         self.config = dict(mode="joint", hidden=self.hidden, n_features=X.shape[1], K=self.K,
                            K_kin=self.K_kin, stim_mode=self.stim_mode, use_border=self.use_border,
                            use_kin=True, n_dist=self.n_dist, n_dt=self.n_dt,
@@ -2393,7 +1902,7 @@ class MLPMixJointDensity(MX.MLPMixLoopDensity):
         X = MB.build_feature_matrix(rec, cf)
         az, lc, lt = _cond_cols(rec.dtheta, rec.distance_px, cf["dth_scale"], cf["kin_scales"],
                                 y_dt=rec.dt_s)
-        with torch.no_grad(), repulsion_side(self, rec):
+        with torch.no_grad():
             ang = self._model.joint_forward(torch.tensor(X), torch.tensor(az), torch.tensor(lc),
                                             torch.tensor(lt))[0]
         return np.exp(ang[0].numpy()), [z.numpy().astype(float) for z in ang[1:]]
@@ -2493,16 +2002,10 @@ def load_joint(path, map_location="cpu"):
 
 
 def stim_turn_from_spec(spec):
-    """Rebuild a saved profile term (v1 / v2 / v3 / v4 / v5) -- parameters are then filled by ``load_state_dict``."""
-    v = int(spec.get("version", 1))
-    if v == 5:
-        return StimTurnTermV5(spec["idx"], side=spec.get("side", False), static=spec.get("static", False),
-                              fcount=spec.get("fcount", "nz"), late=spec.get("late", False),
-                              clock_tau_s=spec.get("clock_tau_s", 4.0), late_tau_s=spec.get("late_tau_s", V5_LATE_TAU_S),
-                              cut_s=spec.get("cut_s"))
-    if v == 4:
-        return StimTurnTermV4(spec["idx"], clock_tau_s=spec.get("clock_tau_s", 4.0),
-                              late_tau_s=spec.get("late_tau_s", V4_LATE_TAU_S))
-    if v == 3:
-        return StimTurnTermV3(spec["layout"], spec["idx"])
-    return StimTurnTerm(spec["mv_idx"], spec["nz_idx"], rho_idx=spec.get("rho_idx"))
+    """Rebuild a saved profile term (version 5) -- parameters are then filled by ``load_state_dict``."""
+    if int(spec.get("version", 1)) != 5:
+        raise ValueError(f"profile term version {spec.get('version', 1)}: only version 5 is in this code")
+    return StimTurnTermV5(spec["idx"], side=spec.get("side", False), static=spec.get("static", False),
+                          fcount=spec.get("fcount", "nz"), late=spec.get("late", False),
+                          clock_tau_s=spec.get("clock_tau_s", 4.0), late_tau_s=spec.get("late_tau_s", V5_LATE_TAU_S),
+                          cut_s=spec.get("cut_s"))

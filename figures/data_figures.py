@@ -1,11 +1,11 @@
 """Figures for the thesis Data chapter.
 
 Reads the real data only (no model output) and writes vector PDFs into
-``Final_Report/figures/``. Every number quoted in Chapter 3 comes from here or
+``figures/out/``. Every number quoted in Chapter 3 comes from here or
 from ``--stats``, so the prose and the figures cannot drift apart.
 
-    uv run scripts/make_report_figures.py            # all figures
-    uv run scripts/make_report_figures.py --stats    # print the numbers only
+    uv run python -m figures.data_figures            # all figures
+    uv run python -m figures.data_figures --stats    # print the numbers only
 
 Palette: Okabe-Ito blue / vermillion / green, validated for CVD separation
 (worst all-pairs dE 11.0 deuteranopia, 18.7 normal vision).

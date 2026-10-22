@@ -2216,8 +2216,7 @@ class MLPMixJointREDensity(JT.MLPMixJointDensity):
             kin_clip=self._kin_clip, weights=weights, dt_trunc=getattr(self, "dt_trunc", None),
             disp=self.re_disp, lag_slice=lag_slice, tail=self.re_tail,
             weight_heads=(self.regime_w or {}).get("heads"), weights_per_head=weights_per_head,
-            skip_slices=skip_slices, depth=self.depth, tsize=self.re_tsize,
-            **JT._noise_kwargs(self, train_records))
+            skip_slices=skip_slices, depth=self.depth, tsize=self.re_tsize)
         if self.drift:
             # Publish the FITTED loadings into cfg_feat BEFORE the calibrators, which all roll out.
             # Same discipline dt_latent and fish_re follow, and for the same reason: the generator
@@ -2288,9 +2287,8 @@ class MLPMixJointREDensity(JT.MLPMixJointDensity):
         return self
 
     def score(self, rec):
-        """The marginal predictive (``_score``), with the repulsion term's per-bout side input when there is one."""
-        with JT.repulsion_side(self, rec):
-            return self._score(rec)
+        """The marginal predictive (``_score``)."""
+        return self._score(rec)
 
     def _score(self, rec):
         """THREE channels, each the EXACT marginal predictive with z integrated out.

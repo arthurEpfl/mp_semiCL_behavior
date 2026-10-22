@@ -1,6 +1,6 @@
 """Appendix figure for the group repulsion term (app:grouprep): the three screen readouts the term is calibrated on,
 by distance to the dot, for real fish (test half of the clutches) and F without the term and with it at 1, 2, 4 and 8
-times the calibrated strength, one row per seed. From Model/twin_test/grtest_<14f|32b>.json (grouprep_fit.py test).
+times the calibrated strength, one row per seed. From output/screen/grtest_<14f|32b>.json (twin/grouprep_fit.py test).
 
     python thesis_grouprep_fig.py [out_dir]      # default MSc_Thesis_local/figures -> fig_app_grouprep.pdf
 """

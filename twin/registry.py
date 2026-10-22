@@ -66,6 +66,7 @@ RECIPES = {
     "D4": recipe(**D4),
     # ablations of M6
     "M6-stim": recipe("Snull", cdt=True, tr=True, rc=True, w3=True, clock=False),
+    "M6-pos": recipe("Scond", cdt=True, tr=True, rc=True, w3=True),
     "M6-count": recipe("S4xnn", **_T),
     "M6-range": recipe("S4xnr", cdt=True, tr=True, rc=True, w3=True),
     "M6-motion": recipe("S4xnm", cdt=True, tr=True, rc=True, w3=True),
@@ -118,7 +119,7 @@ for args in [
     ("D1", "18a", "24a"), ("D2", "24b", "24c"), ("D3", "16e", "30e"), ("D4", "11e", "32a"),
     ("F", "14f", "32b", "correct", ("11e", "32a")),
     # ablations of M6
-    ("M6-stim", "29e", "33u"), ("M6-count", "29c", "33s"), ("M6-range", "33c", "33d"), ("M6-motion", "29d", "33t"),
+    ("M6-stim", "29e", "33u"), ("M6-pos", "33a", "33b"), ("M6-count", "29c", "33s"), ("M6-range", "33c", "33d"), ("M6-motion", "29d", "33t"),
     ("M6-turn4", "33e", "33f"), ("M6-turn3", "49c", "49d"), ("M6-turn1", "33g", "33h"), ("M6-turn0", "33i", "33j"),
     ("M6-kin5", "44c", "44d"), ("M6-kin4", "44a", "44b"), ("M6-kin2", "49a", "49b"), ("M6-kin1", "33k", "33l"),
     ("M6-kin0", "33m", "33n"), ("M6-block clock", "33o", "33p"), ("M6-run clock", "35a", "35b"),

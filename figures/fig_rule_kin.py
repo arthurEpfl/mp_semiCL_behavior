@@ -5,9 +5,9 @@ bin reweighted to one common cell mix). Real fish: the observed bout (geometric 
 fish, 95 % bootstrap band over fish). M6 and F (both seeds): the teacher-forced expectation on the same held-out bouts
 (population latent; model_figures.conditional_kin for step and interval, given the real turn and step), mean over
 fish with a 95 % bootstrap interval over fish -- narrower than the real band by construction (an expectation, no
-single-bout scatter). Writes Final_Report/figures/fig_rule_3panel.pdf (fig_rule.pdf is left as it is).
+single-bout scatter). Writes figures/out/fig_rule_3panel.pdf.
 
-    uv run --no-sync python scripts/report_figs/fig_rule_kin.py            # build the kinematics cache if missing, draw
+    uv run python -m figures.fig_rule_kin            # build the kinematics cache if missing, draw
 """
 import sys
 from pathlib import Path

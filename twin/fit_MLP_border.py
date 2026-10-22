@@ -49,18 +49,6 @@ def wall_mm(u):
     return 0.5 * DISH_MM * (1.0 - np.asarray(u, float))
 
 
-def snap_dt(t, fps=30.0):
-    """Quantise a generated inter-bout interval to the camera's frame lattice (multiples of 1/fps).
-
-    Real dt is ``diff(frame_onset)/FPS`` -- exact lattice points -- while the emitted log-normal is
-    continuous, and a random forest separates real from generated windows on the lattice alone
-    (dt_median: isolated AUC 0.95, monotone-rank AUC 0.46 -- a measurement artefact, not
-    behaviour). Passing the sample through the same measurement operator as the data removes it.
-    ``max(.,1)`` guards the 1e-3-clipped emission from rounding to zero, which would break every
-    ``finite & > 0`` mask downstream."""
-    return max(round(float(t) * fps), 1) / fps
-
-
 # =========================================================================== #
 #  Records: baseline FishRecords + attached pose / border / dish
 # =========================================================================== #
@@ -254,27 +242,6 @@ def _border_block(rec, cfg_feat):
     return border_channels(dnorm, psi, (cfg_feat or {}).get("border_mode", "raw"))
 
 
-def _adapt_block(rec, cfg_feat):
-    """(n, 2) sensory-adaptation block ``[prox, prox - a]`` where ``prox`` = fish-to-dot proximity
-    (``rec.dot_prox``, Phase-1) and ``a`` is its causal leaky integral
-    ``a[t] = λ a[t-1] + (1-λ) prox[t]``. Feeds the model the CHANGE in proximity relative to a
-    habituating baseline, so it can learn to DISENGAGE from a sustained stimulus (sensory adaptation;
-    cf. bacterial-chemotaxis perfect adaptation -- the response tracks the temporal derivative, not
-    the absolute level, so the fish doesn't get stuck orbiting a held dot). λ = ``cfg_feat['adapt_lambda']``."""
-    if getattr(rec, "dot_prox", None) is None:
-        raise RuntimeError("stim_mode adapt block needs rec.dot_prox "
-                           "(run scripts/add_dot_geometry.py, then build_border_records).")
-    prox = np.nan_to_num(np.asarray(rec.dot_prox, float))
-    lam = float(cfg_feat.get("adapt_lambda", 0.6))
-    n = len(prox)
-    a = np.empty(n)
-    if n:
-        a[0] = prox[0]
-        for t in range(1, n):
-            a[t] = lam * a[t - 1] + (1.0 - lam) * prox[t]
-    return np.stack([prox, prox - a], axis=1).astype(np.float32)
-
-
 # =========================================================================== #
 #  Stimulus BLOCK structure -- one definition, shared by the features and the metrics
 # =========================================================================== #
@@ -327,43 +294,6 @@ def stim_segments(nd, mv, run_start=None):
     if run_start is not None:
         new = new | np.asarray(run_start, bool)
     return np.cumsum(new) - 1
-
-
-def stim_lag_rows(dxh, dyh, segh, x, y, h, seg_now):
-    """(n, 3K) the stimulus-lag block from the dot centroid at the previous K bouts (``dxh``/``dyh`` (n, K), NaN =
-    none), their segment ids (``segh`` (n, K), -1 = none), the CURRENT pose ``x``/``y``/``h`` (n,) and the current
-    segment ``seg_now`` (n,). Vectorised and scalar-safe: the record builder, the numpy generator (n = 1) and the
-    batched engine all call this one function."""
-    dxh = np.atleast_2d(np.asarray(dxh, float)); dyh = np.atleast_2d(np.asarray(dyh, float))
-    segh = np.atleast_2d(np.asarray(segh)); n, K = dxh.shape
-    x = np.atleast_1d(np.asarray(x, float)); y = np.atleast_1d(np.asarray(y, float))
-    h = np.atleast_1d(np.asarray(h, float)); seg_now = np.atleast_1d(np.asarray(seg_now))
-    ok = np.isfinite(dxh) & np.isfinite(dyh) & (segh == seg_now[:, None]) & (segh >= 0)
-    ux = np.where(ok, dxh, 0.0) - x[:, None]; uy = np.where(ok, dyh, 0.0) - y[:, None]
-    phi = _wrap_pi(np.arctan2(uy, ux) - h[:, None])
-    r = np.hypot(ux, uy)
-    rz = np.clip((np.log(np.clip(r, M.SHOAL_R_MIN, None)) - np.log(M.SHOAL_R_REF)) / M.SHOAL_R_OCT, -1.0, 1.0)
-    out = np.stack([np.where(ok, np.sin(phi), 0.0), np.where(ok, np.cos(phi), 0.0), np.where(ok, rz, 0.0)], axis=2)
-    return out.reshape(n, 3 * K).astype(np.float32)
-
-
-def _stimlag_block(rec, cfg_feat):
-    """(n, 3K) ``stim_lag_rows`` on a record: the reference heading is the one the stimulus block uses (``phi_ref``),
-    segments break at condition changes AND at run starts (``run_pos == 0``)."""
-    K = int(cfg_feat.get("stim_lags") or 0)
-    n = rec.n
-    if K <= 0 or n == 0:
-        return np.zeros((n, 0), dtype=np.float32)
-    rp = getattr(rec, "run_pos", None)
-    seg = stim_segments(getattr(rec, "n_dots", np.zeros(n)), rec.moving,
-                        None if rp is None else (np.asarray(rp) == 0))
-    dcx = np.asarray(getattr(rec, "dot_cx", np.full(n, np.nan)), float)
-    dcy = np.asarray(getattr(rec, "dot_cy", np.full(n, np.nan)), float)
-    h = (_travel_ref(rec) if cfg_feat.get("phi_ref", "ori") == "travel" else np.asarray(rec.f_ori_rad, float))
-    dxh = np.full((n, K), np.nan); dyh = np.full((n, K), np.nan); segh = np.full((n, K), -1, dtype=np.int64)
-    for k in range(1, K + 1):
-        dxh[k:, k - 1] = dcx[:-k]; dyh[k:, k - 1] = dcy[:-k]; segh[k:, k - 1] = seg[:-k]
-    return stim_lag_rows(dxh, dyh, segh, np.asarray(rec.x_px, float), np.asarray(rec.y_px, float), h, seg)
 
 
 # DOT-JUMP PHASE (Model 41, `stim_jump`): moving dots do not glide; each jumps about 2.1 mm every 18 frames (0.6 s) and
@@ -478,69 +408,6 @@ def _dmove_block(rec, cfg_feat):
     h = (_travel_ref(rec) if cfg_feat.get("phi_ref", "ori") == "travel" else np.asarray(rec.f_ori_rad, float))
     ok = np.r_[False, seg[1:] == seg[:-1]] & (np.nan_to_num(mv) > 0) & (np.nan_to_num(nd) > 0)
     return dmove_rows(np.r_[np.nan, dcx[:-1]], np.r_[np.nan, dcy[:-1]], dcx, dcy, h, ok)
-
-
-def stimhist_cols(K_stim):
-    """Column names for ``_stimhist_block``: 1 + 4*(K_stim-1)."""
-    cols = ["tib"]
-    for j in range(1, int(K_stim)):
-        cols += [f"act_m{j}", f"mv_m{j}", f"nz_m{j}", f"age_m{j}"]
-    return tuple(cols)
-
-
-def _stimhist_block(rec, cfg_feat):
-    """(n, 1 + 4*(K_stim-1)) STIMULUS MEMORY: where we are in the current block/pause cycle,
-    plus the CONDITION of the previous ``K_stim - 1`` stimulus onsets.
-
-    The model has never had any of this. ``M._stim_block`` is a pure per-bout snapshot and every
-    shoal channel is exactly 0 during a pause, so the net cannot know whether a block just ended,
-    how long it has been running, or what it saw last -- while the METRICS have known since
-    ``LATE_BLOCK_S`` was added that block phase matters (``dot_dist_bias`` is ~2/3 a block-onset
-    placement artefact).
-
-    An "onset" here is the start of a block with dots present (pauses are not onsets, so K_stim=3
-    really means three stimulus presentations, not one presentation and two pauses). Slot 0 is the
-    most recent onset at or before this bout -- which during a pause is the block that just ended,
-    so the memory survives the gap. Its CONDITION is already carried by the shoal block's
-    act/moving/nz, so only its AGE is added here (``tib``, on the 110 s cycle scale); the older
-    slots carry the full condition.
-
-    Teacher-forceable: every channel is a function of the record's own block programme, so the
-    closed-loop generators index it by bout exactly as they already index ``M._stim_block``."""
-    n = rec.n
-    Ks = int(cfg_feat.get("K_stim", 1))
-    if Ks <= 1 or n == 0:
-        return np.zeros((n, 0), dtype=np.float32)
-    start_fr, bid, fr = block_onsets(rec)
-    start_s = start_fr / _FPS
-    t_on = fr / _FPS
-    nd = np.nan_to_num(np.asarray(getattr(rec, "n_dots", np.zeros(n)), float))
-    mv = np.nan_to_num(np.asarray(rec.moving, float))
-    # one row per block: (onset_s, is_stim, moving, nz)
-    first = np.concatenate([[True], bid[1:] != bid[:-1]])
-    b_on = start_s[first]
-    b_act = (nd[first] > 0).astype(float)
-    b_mv = mv[first]
-    b_nz = np.log2(np.clip(nd[first], 1.0, None)) / np.log2(M.SHOAL_N_MAX)
-    keep = b_act > 0                                   # STIMULUS onsets only
-    s_on, s_mv, s_nz = b_on[keep], b_mv[keep], b_nz[keep]
-    # index of the most recent stimulus onset at or before each bout (-1 before the first one)
-    k = np.searchsorted(s_on, t_on, side="right") - 1
-    out = np.zeros((n, 1 + 4 * (Ks - 1)), dtype=np.float32)
-    has0 = k >= 0
-    out[has0, 0] = np.clip((t_on[has0] - s_on[k[has0]]) / STIMHIST_CYCLE_S, 0.0, 1.0)
-    out[~has0, 0] = 1.0                                # before the first block: 'long ago'
-    for j in range(1, Ks):
-        c = 1 + 4 * (j - 1)
-        idx = k - j
-        ok = idx >= 0
-        out[ok, c + 0] = 1.0
-        out[ok, c + 1] = s_mv[idx[ok]]
-        out[ok, c + 2] = s_nz[idx[ok]]
-        out[ok, c + 3] = np.clip((t_on[ok] - s_on[idx[ok]]) / STIMHIST_AGE_S, 0.0, 1.0)
-        out[~ok, c + 3] = 1.0
-    assert out.shape[1] == len(stimhist_cols(Ks)), out.shape
-    return out
 
 
 CLOCK_BLOCK_S = 60.0       # CLsemi stimulus block length (1800 fr @ 30 fps)
@@ -729,27 +596,19 @@ def regime_weights(rec, w_onset=8.0, w_pursuit=8.0, onset_bouts=4, pursuit_deg=3
 
 
 def build_feature_matrix(rec, cfg_feat):
-    """(n, D) input matrix: fit_MLP's history (+symbols) + stim (+ the K_stim stimulus-memory
-    block), then the border block when ``cfg_feat['use_border']`` and the adaptation block when
-    ``cfg_feat['use_adapt']``.
-    Column order MUST match the generators (``generate_mlp*`` / ``generate_mix*``).
-
-    ``lag_valid`` and ``clock_mode`` are APPENDED LAST, after the kin block, on purpose:
-    ``fit_MLP_fishre`` derives ``border_slice`` by summing the widths of the blocks that come
-    BEFORE the border block, so inserting anything earlier would silently move the columns
-    ``re_bgain`` scales. Both default to off, so every archived config is bit-identical."""
+    """(n, D) input matrix of a record: turn history, stimulus code, wall block, kinematic history, lag flag,
+    block clock, run clock, aligned-and-far input, static block, jump phase, dot direction -- each when its
+    ``cfg_feat`` key is on. Column order MUST match the generator's row (``fit_MLP_joint.generate_mix_joint_loop``)."""
+    off = [k for k in ("include_symbols", "use_adapt", "stim_static_clock", "stim_static_bump", "stim_onset",
+                       "stim_lags") if cfg_feat.get(k)]
+    if off or int(cfg_feat.get("K_stim", 1)) > 1:
+        raise NotImplementedError(f"feature options not in this code: {off or 'K_stim > 1'}")
     blocks = [M._history_block(rec.dtheta, cfg_feat["K"], cfg_feat["dth_scale"],
                                run_pos=getattr(rec, "run_pos", None))]
-    if cfg_feat["include_symbols"]:
-        blocks.append(M._symbol_block(rec.symbol, cfg_feat["K"]))
     blocks.append(M._stim_block(rec, cfg_feat["stim_mode"], cfg_feat["rich_scales"],
                                 phi_ref=cfg_feat.get("phi_ref", "ori")))
-    if int(cfg_feat.get("K_stim", 1)) > 1:
-        blocks.append(_stimhist_block(rec, cfg_feat))
     if cfg_feat.get("use_border"):
         blocks.append(_border_block(rec, cfg_feat))
-    if cfg_feat.get("use_adapt"):
-        blocks.append(_adapt_block(rec, cfg_feat))
     if cfg_feat.get("use_kin"):
         blocks.append(_kin_history_block(rec, cfg_feat))
     if cfg_feat.get("lag_valid"):
@@ -762,85 +621,11 @@ def build_feature_matrix(rec, cfg_feat):
         blocks.append(_align_block(rec, cfg_feat))
     if cfg_feat.get("stim_static"):
         blocks.append(_static_block(rec, cfg_feat))
-    if cfg_feat.get("stim_static_clock"):
-        blocks.append(_static_clock_block(rec, cfg_feat))
-    if cfg_feat.get("stim_static_bump"):
-        blocks.append(_static_bump_block(rec, cfg_feat))
-    if cfg_feat.get("stim_onset"):
-        blocks.append(_onset_block(rec, cfg_feat))          # the generator appends in this order
-    if int(cfg_feat.get("stim_lags") or 0) > 0:
-        blocks.append(_stimlag_block(rec, cfg_feat))        # after everything else (Model 38)
     if cfg_feat.get("stim_jump"):
         blocks.append(_jump_block(rec, cfg_feat))           # (Model 41)
     if cfg_feat.get("stim_dmove"):
         blocks.append(_dmove_block(rec, cfg_feat))          # LAST (Model 51)
     return np.concatenate(blocks, axis=1).astype(np.float32)
-
-
-def _onset_block(rec, cfg_feat):
-    """(n, 2) ONSET x BEARING (Model 25): the first block clock (exp(-t / tau), 1.0 on the first bout
-    of a block, 0 on no-dot bouts) times [sin(bearing), cos(bearing)] to the active dots, in the
-    ``phi_ref`` frame. MEASURED (teacher-forced, held-out fish): real fish turn 27 / 31 / 33 / 31 deg
-    toward moving dots on the onset bout for 1 / 2 / 4 / 8 dots -- a first turn that does NOT scale
-    with group size -- while the fit gives 21 / 23 / 28 / 31, because the only onset input is a lone
-    clock column and every bearing term is scaled by N. This lets the heads act on "turn toward
-    (sin) / lengthen the step toward (cos) whatever just appeared"."""
-    ck = _clock_block(rec, cfg_feat)
-    if ck.shape[1] == 0:
-        raise ValueError("stim_onset needs a block clock (clock_mode)")
-    phi = getattr(rec, "stim_angle_travel", None) if cfg_feat.get("phi_ref", "ori") == "travel" else None
-    phi = np.asarray(phi if phi is not None else rec.stim_angle, float)
-    n = rec.n
-    nd = np.nan_to_num(np.asarray(getattr(rec, "n_dots", np.zeros(n)), float))
-    return onset_channels(ck[:, 0], phi, nd).astype(np.float32)
-
-
-def onset_channels(clock, phi, n_dots):
-    """(n, 2) ``clock x [sin(phi), cos(phi)]`` on active-dot bouts, 0 elsewhere. Scalar-safe; the
-    generator's closed-loop row and the record block share this one function."""
-    ck = np.atleast_1d(np.asarray(clock, float)); phi = np.atleast_1d(np.asarray(phi, float))
-    nd = np.atleast_1d(np.nan_to_num(np.asarray(n_dots, float)))
-    act = np.isfinite(phi) & (nd > 0)
-    s = np.where(act, np.sin(np.nan_to_num(phi)), 0.0); c = np.where(act, np.cos(np.nan_to_num(phi)), 0.0)
-    return np.stack([ck * s, ck * c], axis=1)
-
-
-def static_bump(t_s, params):
-    """Mid-block bump clock in (0, 1]: a Gaussian window in the time since the block onset,
-    ``exp(-((t - c) / w)^2 / 2)`` with ``params = (c, w)`` -- 1 at t = c, 0.08 at the onset and ~0
-    past c + 3w (for (18, 8): 12-30 s is the > 0.3 core, 0.003 at 45 s). The window in which real
-    fish turn AWAY from static dots they are near (12-30 s, -3.0 deg) while they approach them at
-    onset and are neutral after 30 s: a monotone clock cannot express that (Model 19). A difference
-    of exponentials was tried first and has too slow a tail (still 0.5 at 45 s for (8, 30) s)."""
-    c, w = float(params[0]), float(params[1])
-    t = np.maximum(np.asarray(t_s, float), 0.0)
-    return np.exp(-0.5 * ((t - c) / w) ** 2)
-
-
-def _static_bump_block(rec, cfg_feat):
-    """(n, 8) the static bearing block x ``static_bump`` of the time since the block onset
-    (``block_onsets``, the clock's own anchoring; 0 on no-dot bouts through the static block)."""
-    if not cfg_feat.get("stim_static"):
-        raise ValueError("stim_static_bump needs stim_static")
-    params = cfg_feat["stim_static_bump"]
-    start_fr, _bid, fr = block_onsets(rec)
-    t = np.maximum((fr - start_fr) / _FPS, 0.0)
-    return (_static_block(rec, cfg_feat) * static_bump(t, params)[:, None]).astype(np.float32)
-
-
-def _static_clock_block(rec, cfg_feat):
-    """(n, 8) the static bearing block times the SLOWEST block clock (the last `_clock_block`
-    column: `clock2_tau_s` when set). MEASURED (Model 18, teacher-forced within 80 px of static
-    dots): real fish turn toward them in the first 4 s of a block (+2.8 deg), are neutral at 4-12 s
-    and turn AWAY at 12-30 s (-3.0 deg), then neutral; the fit is flat (+0.4 .. +1.6) because its
-    only clock (tau 4 s) is at 0.05 by 12 s. This product puts "static bearing x where in the
-    block" on the input side."""
-    if not cfg_feat.get("stim_static"):
-        raise ValueError("stim_static_clock needs stim_static")
-    ck = _clock_block(rec, cfg_feat)
-    if ck.shape[1] == 0:
-        raise ValueError("stim_static_clock needs a block clock (clock_mode)")
-    return (_static_block(rec, cfg_feat) * ck[:, -1:]).astype(np.float32)
 
 
 def _static_block(rec, cfg_feat):
@@ -857,10 +642,6 @@ def tail_width(cfg_feat):
     """Width of the blocks appended AFTER the run clock (align, static) -- what the turn head's
     skip path reads together with the stimulus block."""
     return ((1 if cfg_feat.get("stim_align") else 0) + (8 if cfg_feat.get("stim_static") else 0)
-            + (8 if cfg_feat.get("stim_static_clock") else 0)
-            + (8 if cfg_feat.get("stim_static_bump") else 0)
-            + (2 if cfg_feat.get("stim_onset") else 0)
-            + 3 * int(cfg_feat.get("stim_lags") or 0)
             + (2 if cfg_feat.get("stim_jump") else 0)
             + (2 if cfg_feat.get("stim_dmove") else 0))
 
@@ -983,20 +764,6 @@ def kin_dt_level(dt_s, tm, tau=KIN_DT_EMA):
     return lev
 
 
-def build_feature_sequences(records, cfg_feat):
-    """Stack (X (N,D), y (N,)) over records. y = dtheta target (deg)."""
-    Xs, ys = [], []
-    for r in records:
-        Xs.append(build_feature_matrix(r, cfg_feat))
-        ys.append(r.dtheta.astype(np.float32))
-    return np.concatenate(Xs, 0), np.concatenate(ys, 0)
-
-
-# =========================================================================== #
-#  NOISE AUGMENTATION -- perturb the POSE, correct the target back to the truth
-# =========================================================================== #
-_NOISE_STIM_OK = ("none", "dot", "dotb") + M.POP_MODES + M.SHOAL_MODES   # pop: positions pass through, the block re-derives
-
 # Sized by measurement, not by analogy. The knob trades COVERAGE of drifted states against
 # DISTORTION of the conditional the model is meant to learn, and the two pull in opposite
 # directions. Measured over 6 fish (real turn sd 56.96 deg, median step 15.03 px):
@@ -1015,229 +782,6 @@ _NOISE_STIM_OK = ("none", "dot", "dotb") + M.POP_MODES + M.SHOAL_MODES   # pop: 
 # corrupts. sigma_ori 15 deg is modest next to the 40.6 deg median f_ori-vs-travel discrepancy
 # that already exists in the data. THIS IS THE OBVIOUS THING TO SWEEP if the arm is promising.
 NOISE_AUG_DEFAULT = {"sigma_pos": 4.0, "sigma_ori": 15.0, "mode": "concat", "frac": 0.5}
-
-
-def noisy_record(rec, cfg_feat, rng):
-    """A shallow copy of ``rec`` whose POSE is perturbed and whose every downstream field --
-    inputs AND targets -- is re-derived from that perturbed pose.
-
-    One-step MLE is teacher-forced on the REAL pose; the free-running rollout feeds the net its
-    own drifted pose, which it has never been trained on (measured: mean r/R off by 0.03-0.05 R
-    before any containment patch). This is the standard remedy -- corrupt the input state and
-    ADJUST THE TARGET so the model learns to correct back to the true next state. It is the
-    training-noise scheme of Sanchez-Gonzalez et al. 2020 (GNS) and Pfaff et al. 2021
-    (MeshGraphNets); the same idea is DART (Laskey et al. 2017) in imitation learning and
-    Data-as-Demonstrator (Venkatraman et al. 2015) for time series. Bishop 1995 is why the target
-    correction is the load-bearing half: input noise WITHOUT it is only Tikhonov smoothing and
-    does nothing about drift.
-
-    PERTURB THE POSE, NOT THE CHANNELS. Every input the closed loop recomputes for itself is a
-    function of the pose -- the border distance and bearing, the shoal bearing and range -- and so
-    is every target. Drawing one (eps_x, eps_y, eps_ori) per bout and re-deriving all of them
-    therefore (a) keeps the channels mutually CONSISTENT (a jittered border distance that
-    disagreed with its own bearing is a state the rollout can never be in), and (b) gives the
-    history blocks correlated, random-walk-like noise for free, since ``dtheta`` and
-    ``distance_px`` are themselves re-derived and then windowed by ``_history_block`` /
-    ``_kin_history_block``. GNS makes exactly this point about i.i.d. vs accumulated noise.
-
-    Targets, corrected back to the TRUE next onset (this is the whole mechanism):
-        theta~[t]    = atan2(y[t+1] - y~[t], x[t+1] - x~[t])
-        dtheta~[t]   = wrap(theta~[t] - theta~[t-1])
-        distance~[t] = hypot(x[t+1] - x~[t], y[t+1] - y~[t])
-    ``dt`` is untouched (it is not a function of position). The true next onset is exact for
-    EVERY bout including the last, because ``(distance_px[t], heading_rad[t])`` reconstruct it
-    (verified against the CSV to 7e-15 px).
-
-    The stimulus PROGRAMME is real and is never perturbed -- only the fish's own pose relative to
-    it. ``dot_cx``/``dot_cy``/``n_dots``/``moving``/``frame_onset`` all pass through unchanged.
-    """
-    na = cfg_feat.get("noise_aug") or {}
-    s_pos = float(na.get("sigma_pos", 0.0))
-    s_ori = float(na.get("sigma_ori", 0.0))
-    if cfg_feat.get("stim_mode") not in _NOISE_STIM_OK:
-        raise ValueError(f"noise_aug does not know how to re-derive stim_mode "
-                         f"{cfg_feat.get('stim_mode')!r} from a perturbed pose "
-                         f"(supported: {_NOISE_STIM_OK})")
-    import copy as _copy
-    r2 = _copy.copy(rec)
-    n = rec.n
-    x = np.asarray(rec.x_px, float); y = np.asarray(rec.y_px, float)
-    hd = np.asarray(rec.heading_rad, float)
-    dth = np.asarray(rec.dtheta, float)
-    d0 = np.asarray(rec.distance_px, float)
-    # TRUE next onset for every bout, last one included (exact from distance + heading).
-    xn = np.empty(n); yn = np.empty(n)
-    if n > 1:
-        xn[:-1] = x[1:]; yn[:-1] = y[1:]
-    xn[-1] = x[-1] + d0[-1] * np.cos(hd[-1]); yn[-1] = y[-1] + d0[-1] * np.sin(hd[-1])
-
-    ez = np.zeros(n)
-    ex = rng.normal(0.0, s_pos, n) if s_pos > 0 else ez
-    ey = rng.normal(0.0, s_pos, n) if s_pos > 0 else ez
-    eo = rng.normal(0.0, np.radians(s_ori), n) if s_ori > 0 else ez
-    xt = x + ex; yt = y + ey
-
-    th2 = np.arctan2(yn - yt, xn - xt)
-    d2 = np.hypot(xn - xt, yn - yt)
-    th_prev = np.empty(n)
-    # Bout 0 has no predecessor to perturb, so its angular reference stays the real one -- the
-    # exact row-local identity _travel_ref uses. Everything after references the perturbed chain,
-    # which keeps wrap(th2 - radians(dth2)) == th_prev, i.e. _travel_ref(r2) is self-consistent.
-    th_prev[0] = _wrap_pi(hd[0] - np.radians(dth[0]))
-    if n > 1:
-        th_prev[1:] = th2[:-1]
-    dth2 = np.degrees(_wrap_pi(th2 - th_prev))
-
-    r2.dtheta = dth2.astype(float)
-    r2.distance_px = d2.astype(float)
-    r2.symbol = E.symbols_from_dtheta(dth2)
-    r2.x_px = xt; r2.y_px = yt
-    r2.heading_rad = th2
-    r2.f_ori_rad = _wrap_pi(np.asarray(rec.f_ori_rad, float) + eo)
-    # The fish cannot be outside its own dish, so clamp rather than emit a negative distance the
-    # border basis has no support for.
-    u2 = np.hypot(xt - rec.dish_cx, yt - rec.dish_cy) / rec.dish_R
-    r2.dist_to_border_norm = np.clip(1.0 - u2, 0.0, 1.0)
-    if getattr(rec, "dot_cx", None) is not None:
-        ddx = np.asarray(rec.dot_cx, float) - xt
-        ddy = np.asarray(rec.dot_cy, float) - yt
-        bear = np.arctan2(ddy, ddx)                       # absolute bearing to the dot centroid
-        r2.dot_dist_px = np.hypot(ddx, ddy)
-        r2.dot_prox = 1.0 / (1.0 + (r2.dot_dist_px / PX_PER_MM) / R0_MM)
-        r2.stim_angle = _wrap_pi(bear - r2.f_ori_rad)
-        r2.stim_angle_travel = _wrap_pi(bear - th_prev)
-    return r2
-
-
-def build_noisy_pair(rec, cfg_feat, rng):
-    """``(X~, dtheta~, distance~, dt)`` for one record -- the augmented training pair."""
-    r2 = noisy_record(rec, cfg_feat, rng)
-    return (build_feature_matrix(r2, cfg_feat), np.asarray(r2.dtheta, float),
-            np.asarray(r2.distance_px, float), np.asarray(r2.dt_s, float))
-
-
-def build_noisy_sequences(records, cfg_feat, rng):
-    """Stack ``build_noisy_pair`` over records, in the SAME row order as
-    ``[build_feature_matrix(r) for r in records]`` -- so a train/val index split computed on the
-    clean matrix selects the corresponding noisy rows."""
-    Xs, ya, yd, yt = [], [], [], []
-    for r in records:
-        a, b, c, d = build_noisy_pair(r, cfg_feat, rng)
-        Xs.append(a); ya.append(b); yd.append(c); yt.append(d)
-    return (np.concatenate(Xs, 0), np.concatenate(ya), np.concatenate(yd), np.concatenate(yt))
-
-
-# =========================================================================== #
-#  Autoregressive generation (copy of fit_MLP.generate_mlp + teacher-forced border)
-# =========================================================================== #
-def generate_mlp(model, rec, cfg_feat, dt_pool, dist_pool, rng):
-    """Free-run rollout: generated dtheta history fed back; stimulus AND border
-    covariate teacher-forced from ``rec`` (like fit_MLP). The border row is appended
-    in the SAME column order as ``build_feature_matrix``."""
-    n = rec.n
-    K = cfg_feat["K"]
-    dth_scale = cfg_feat["dth_scale"]
-    stim = M._stim_block(rec, cfg_feat["stim_mode"], cfg_feat["rich_scales"],
-                         phi_ref=cfg_feat.get("phi_ref", "ori"))   # teacher-forced
-    border = _border_block(rec, cfg_feat) if cfg_feat.get("use_border") else np.zeros((n, 0))
-    fwd = M._numpy_predictor(model)
-    dth = np.zeros(n)
-    for t in range(n):
-        hist = np.zeros(K)
-        for k in range(1, K + 1):
-            if t - k >= 0:
-                hist[k - 1] = dth[t - k]
-        row = [hist / dth_scale]
-        if cfg_feat["include_symbols"]:
-            sb = np.zeros(3 * K)
-            for k in range(1, K + 1):
-                if t - k >= 0:
-                    d = dth[t - k]
-                    s = 0 if abs(d) < M.DTHETA0 else (1 if d < 0 else 2)
-                    sb[3 * (k - 1) + s] = 1.0
-            row.append(sb)
-        row.append(stim[t])
-        row.append(border[t])
-        x = np.concatenate(row).astype(np.float32)
-        w, sF, aL, tL, aR, tR = fwd(x)
-        c = rng.choice(3, p=w)
-        if c == 0:
-            dth[t] = rng.normal(0.0, sF)
-        elif c == 1:
-            dth[t] = -rng.gamma(aL, tL)
-        else:
-            dth[t] = +rng.gamma(aR, tR)
-        dth[t] = float(np.clip(dth[t], -180.0, 180.0))   # bound the fed-back angle (wrap-safe; stops rollout blow-up)
-    return dict(dtheta=dth, symbol=E.symbols_from_dtheta(dth),
-                dt_s=rng.choice(dt_pool, size=n), distance_px=rng.choice(dist_pool, size=n))
-
-
-# =========================================================================== #
-#  Evaluation-pipeline adapter (subclass of fit_MLP.MLPDensity)
-# =========================================================================== #
-class MLPBorderDensity(M.MLPDensity):
-    """Border-aware MDN MLP. Identical to ``fit_MLP.MLPDensity`` except the feature
-    matrix carries the 3-column wall covariate (``use_border=True``), threaded through
-    train / score / sample so it is used consistently everywhere."""
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.name = f"mlp_border_{self.mode}"
-
-    def fit(self, train_records, ctx):
-        c = ctx.cfg or {}
-        self.K = int(c.get("mlp_K", self.K))
-        self.stim_mode = c.get("mlp_stim_mode", self.stim_mode)
-        self.include_symbols = bool(c.get("mlp_include_symbols", self.include_symbols))
-        self.hidden = int(c.get("mlp_hidden", self.hidden))
-        self.epochs = int(c.get("mlp_epochs", self.epochs))
-        self.lr = float(c.get("mlp_lr", self.lr))
-        self.requires_absdict = (self.stim_mode == "rich")
-        self._dt_pool, self._dist_pool = ctx.dt_pool, ctx.dist_pool
-        self._rich_scales = ctx.rich_scales
-
-        # train-fold-only scale + emission init (leak-free); border cols are raw (bounded)
-        alld = np.concatenate([r.dtheta for r in train_records])
-        self._dth_scale = float(max(np.std(alld), 1.0))
-        fwd = alld[np.abs(alld) < M.DTHETA0]
-        turn = np.abs(alld[np.abs(alld) >= M.DTHETA0])
-        s0 = float(max(np.std(fwd) if len(fwd) > 5 else 8.0, 0.5))
-        m_, v_ = (turn.mean(), turn.var()) if len(turn) > 5 else (40.0, 400.0)
-        a0 = float(max(m_ * m_ / max(v_, 1e-12), M.ALPHA_MIN))
-        t0 = float(max(v_ / max(m_, 1e-12), 1.0))
-
-        self._cfg_feat = dict(K=self.K, stim_mode=self.stim_mode,
-                              include_symbols=self.include_symbols,
-                              dth_scale=self._dth_scale, rich_scales=self._rich_scales,
-                              use_border=True)
-        X, y = build_feature_sequences(train_records, self._cfg_feat)
-        self._model, self.history = M.fit_mlp(
-            X, y, self.mode, self.hidden, epochs=self.epochs, lr=self.lr,
-            patience=self.patience, batch_size=self.batch_size, seed=self.seed,
-            init_emis=(s0, a0, t0))
-        self.config = dict(mode=self.mode, hidden=self.hidden, n_features=X.shape[1],
-                           K=self.K, stim_mode=self.stim_mode, use_border=True,
-                           include_symbols=self.include_symbols, dth_scale=self._dth_scale,
-                           rich_scales=(None if self._rich_scales is None
-                                        else np.asarray(self._rich_scales).tolist()))
-        return self
-
-    def score(self, rec):
-        X = build_feature_matrix(rec, self._cfg_feat)
-        w, sigmaF, aL, tL, aR, tR = M.predict_params(self._model, X)
-        with torch.no_grad():
-            logdens = M.mixture_logdens(
-                torch.tensor(rec.dtheta.astype(np.float32)),
-                self._model(torch.tensor(X))).numpy()
-        if self.mode == "basic":
-            slq = E.symbol_logmass(w, sigmaF[0], aL[0], tL[0], mu=0.0)
-        else:
-            slq = M.symbol_logq_full(w, sigmaF, aL, tL, aR, tR)
-        return dict(logdens=logdens, symbol_logq=slq)
-
-    def sample(self, rec, rng):
-        return generate_mlp(self._model, rec, self._cfg_feat,
-                            self._dt_pool, self._dist_pool, rng)
 
 
 # =========================================================================== #

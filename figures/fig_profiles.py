@@ -25,8 +25,8 @@ multiplied by style.MM_3P67_TO_3P60 (= 3.67 / 3.60) at plotting time. The archiv
 values (the archived summaries are at 3.67); the caches stay at 3.67 and are written only by --rebuild (or when
 missing). Latencies, SEM-unit errors and fish counts are not converted.
 
-    uv run python scripts/report_figs/fig_profiles.py              # build the cache if missing, check, draw
-    uv run python scripts/report_figs/fig_profiles.py --rebuild    # regenerate the rollouts (20 jobs, <= 8 workers)
+    uv run python -m figures.fig_profiles              # build the cache if missing, check, draw
+    uv run python -m figures.fig_profiles --rebuild    # regenerate the rollouts (20 jobs, <= 8 workers)
 """
 
 import sys
@@ -55,7 +55,7 @@ REJ = {"d0": 2.0, "d1": 10.0, "max_draws": 20}
 ARM_M6 = "S4x_adt_z2_cdt_tr_rc_al_w3ft"
 ARM_F = "S4_adt_z2_drift_cdt_tr_rc_al_w3ft_st_pf5Bcr_last"
 ARM_D4 = "S4_adt_z2_drift_cdt_tr_rc_al_w3ft_st"
-# (public name, seed) -> (checkpoint dir under Model/, arm, internal key)
+# (public name, seed) -> (checkpoint folder under output/checkpoints/, arm, registry key)
 HEAD = {("M6", 0): ("M26e", ARM_M6, "26e"), ("M6", 101): ("M30d", ARM_M6, "30d"),
         ("D4", 0): ("M11e", ARM_D4, "11e"), ("D4", 101): ("M32a", ARM_D4, "32a"),
         ("F", 0): ("M14f", ARM_F, "14f"), ("F", 101): ("M32b", ARM_F, "32b")}

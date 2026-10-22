@@ -8,9 +8,9 @@ clearly to one side (|bearing| 45-135 deg), dot centroid inside the dish; turn t
   * Models M6, D4, F at seed 0 (filled, solid) and 101 (open, dashed): their own rollouts, the archived profile streams
     of fig_profiles (fig_profiles_gen_<key>.pkl; 50 simulated fish per unit), same selection, per simulated fish then
     mean over fish. The profile code is at 3.67 px/mm, so ranges are converted by MM_3P67_TO_3P60.
-Writes Final_Report/figures/fig_range_law.pdf (+ PNG preview) and prints every plotted value.
+Writes figures/out/fig_range_law.pdf (+ PNG preview) and prints every plotted value.
 
-    uv run python scripts/report_figs/fig_range_law.py
+    uv run python -m figures.fig_range_law
 """
 import sys
 from pathlib import Path
