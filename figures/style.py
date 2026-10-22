@@ -1,39 +1,23 @@
 """Shared style for the thesis figures of Chapters 4-6 (Methods, Results, Discussion).
 
-Same look as ``scripts/make_report_figures.py`` (Chapter 3): DejaVu Sans 8 pt, recessive axes,
-Okabe-Ito colours, vector PDFs written into ``Final_Report/figures/`` at the width they are shown.
+Same look as ``figures/data_figures.py`` (Chapter 3): DejaVu Sans 8 pt, recessive axes, Okabe-Ito colours, vector
+PDFs written into ``figures/out/`` (``paths.FIGURES``) at the width they are shown. One script per figure:
 
-Usage in a figure script (one script per figure, ``scripts/report_figs/fig_<name>.py``):
-
-    import sys; from pathlib import Path
     from figures.style import *          # noqa: F401,F403  (sets rcParams, gives save(), panel(), colours)
 
     fig, ax = plt.subplots(figsize=(TEXTWIDTH_IN, 2.4))
     ...
-    save(fig, "fig_results_profiles")      # -> Final_Report/figures/fig_results_profiles.pdf (+ PNG preview)
+    save(fig, "fig_profiles")            # -> figures/out/fig_profiles.pdf (+ PNG preview, shown in a notebook)
 """
-
-import os
-import sys
-from pathlib import Path
-
 import matplotlib as mpl
+import matplotlib.pyplot as plt  # noqa: F401
 
-mpl.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402,F401
+from figures import show_png
+from twin import paths
 
-ROOT = Path(__file__).resolve().parents[2]
-SCRIPTS = ROOT / "scripts"
-MODEL = ROOT / "Model"
-OUT = ROOT / "Final_Report" / "figures"
-# Caches behind the figures (rollout curves, two-group / multi-fish summaries, the extra multi-fish runs) and the PNG
-# previews live in Model/report_figs_cache/ (untracked data, like the rest of Model/). Override with REPORT_FINAL_DIR /
-# REPORT_FIG_PNG.
-REPORT_FINAL_DIR = Path(os.environ.get("REPORT_FINAL_DIR", MODEL / "report_figs_cache"))
-PNG_DIR = Path(os.environ.get("REPORT_FIG_PNG", REPORT_FINAL_DIR / "png"))
-
-for p in (str(SCRIPTS), str(MODEL)):
-    if p not in sys.path:
+OUT = paths.FIGURES
+REPORT_FINAL_DIR = paths.FIG_CACHE        # rollout curves and numbers behind the figures
+PNG_DIR = paths.FIGURES / "png"
 
 TEXTWIDTH_IN = 6.3          # \textwidth at a4paper with 2.5 cm margins
 
@@ -95,10 +79,17 @@ def panel(ax, letter, title=None):
 
 
 def save(fig, name):
-    """Write Final_Report/figures/<name>.pdf and a PNG preview in PNG_DIR."""
+    """Write figures/out/<name>.pdf and a PNG preview in figures/out/png/, shown inline when run in a notebook."""
     OUT.mkdir(parents=True, exist_ok=True)
     fig.savefig(OUT / f"{name}.pdf")
     PNG_DIR.mkdir(parents=True, exist_ok=True)
     fig.savefig(PNG_DIR / f"{name}.png", dpi=170)
     plt.close(fig)
-    print(f"  wrote {OUT / (name + '.pdf')}  (preview {PNG_DIR / (name + '.png')})")
+    print(f"  wrote {OUT / (name + '.pdf')}")
+    show(name)
+
+
+def show(name, width=900):
+    """Display figures/out/png/<name>.png in a notebook (no-op elsewhere)."""
+    if (PNG_DIR / f"{name}.png").exists():
+        show_png(PNG_DIR / f"{name}.png", width)

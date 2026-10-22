@@ -13,9 +13,21 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-ROOT = Path(__file__).resolve().parent.parent
-TW = ROOT / "Model" / "twin_test"
-OUTDIR = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "MSc_Thesis_local" / "figures"
+from figures import show_png
+from twin import paths
+
+TW = paths.SCREEN_OUT
+OUTDIR = paths.FIGURES
+
+def _save(fig, name):
+    """figures/out/<name>.pdf + a PNG preview (shown inline in a notebook)."""
+    OUTDIR.mkdir(parents=True, exist_ok=True)
+    fig.savefig(OUTDIR / f"{name}.pdf")
+    (OUTDIR / "png").mkdir(exist_ok=True)
+    fig.savefig(OUTDIR / "png" / f"{name}.png", dpi=170)
+    plt.close(fig)
+    show_png(OUTDIR / "png" / f"{name}.png")
+
 BINS = np.array([0, 2, 4, 6, 8, 10, 12, 15, 20, 25, 30, 40, 70], float)
 NB = 11                                           # bins up to 40 mm, as fig_screen_response
 from figures.fig_screen import RESP_XLIM, RESP_YLIM  # noqa: E402  same axes as fig_screen_response
@@ -53,9 +65,7 @@ def main():
             ax.text(-0.14, 1.04, "abcdef"[3 * r + j], transform=ax.transAxes, fontsize=12, fontweight="bold")
     axs[0, 2].legend(fontsize=7, frameon=False, loc="upper right")
     fig.tight_layout()
-    OUTDIR.mkdir(parents=True, exist_ok=True)
-    fig.savefig(OUTDIR / "fig_app_grouprep.pdf"); plt.close(fig)
-    print("wrote", OUTDIR / "fig_app_grouprep.pdf")
+    _save(fig, "fig_app_grouprep")
 
 
 if __name__ == "__main__":

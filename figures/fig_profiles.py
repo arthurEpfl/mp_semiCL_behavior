@@ -56,9 +56,9 @@ ARM_M6 = "S4x_adt_z2_cdt_tr_rc_al_w3ft"
 ARM_F = "S4_adt_z2_drift_cdt_tr_rc_al_w3ft_st_pf5Bcr_last"
 ARM_D4 = "S4_adt_z2_drift_cdt_tr_rc_al_w3ft_st"
 # (public name, seed) -> (checkpoint dir under Model/, arm, internal key)
-HEAD = {("M6", 0): ("report_ckpts/M26e", ARM_M6, "26e"), ("M6", 101): ("report_ckpts/M30d", ARM_M6, "30d"),
-        ("D4", 0): ("report_ckpts/M11e", ARM_D4, "11e"), ("D4", 101): ("report_ckpts/M32a", ARM_D4, "32a"),
-        ("F", 0): ("report_ckpts/M14f", ARM_F, "14f"), ("F", 101): ("report_ckpts/M32b", ARM_F, "32b")}
+HEAD = {("M6", 0): ("M26e", ARM_M6, "26e"), ("M6", 101): ("M30d", ARM_M6, "30d"),
+        ("D4", 0): ("M11e", ARM_D4, "11e"), ("D4", 101): ("M32a", ARM_D4, "32a"),
+        ("F", 0): ("M14f", ARM_F, "14f"), ("F", 101): ("M32b", ARM_F, "32b")}
 ZERO = {0: "29e", 101: "33u"}                    # M6 -stim: the stimulus-blind zero point of attraction
 N_FOLDS, R_PER_MODEL = 5, 10
 CHECK_COLS = ("dip", "lat", "plateau", "d1_plateau", "grading", "mv_err_sem", "st_err_sem", "static_drift")
@@ -82,7 +82,7 @@ def _fold_job(job):
     from twin import model_figures as MF
     MF.BLOCK_SEED = True                                  # the report units' per-block random streams
     with contextlib.redirect_stdout(io.StringIO()):
-        models, _ = MF.fold_models(str(MODEL / d), arm, REJ)
+        models, _ = MF.fold_models(str(paths.CKPTS / d), arm, REJ)
         m = list(models.values())[k]                      # same (sorted-by-file) order as fold_models' callers
         raw = MF.programme_bouts(m, k, R_PER_MODEL, seed=0)
     return (name, seed, k), raw
@@ -137,11 +137,11 @@ def build(workers=8, have=None):
         runaway = int(sum(int(parts[(name, seed, k)].attrs.get("runaway", 0)) for k in range(N_FOLDS)))
         with contextlib.redirect_stdout(io.StringIO()):
             gen = MF.finish_profile(raw.copy(), N_FOLDS, R_PER_MODEL, progress=False)
-            tab, _ = profile_variants_matched(str(MODEL / d), arm, {lab: {"arm": arm}}, rej=REJ,
+            tab, _ = profile_variants_matched(str(paths.CKPTS / d), arm, {lab: {"arm": arm}}, rej=REJ,
                                               r_per_model=R_PER_MODEL, show_raw=False, gens={lab: gen})
             plt.close("all")
             gen6 = gen[(gen.fish_id % R_PER_MODEL) < 6]   # the units' attraction used the first 6 rollouts per fold
-            att, _ = MF.attraction_table(str(MODEL / d), [arm], rej=REJ, r_per_model=6, gens={arm: gen6})
+            att, _ = MF.attraction_table(str(paths.CKPTS / d), [arm], rej=REJ, r_per_model=6, gens={arm: gen6})
             plt.close("all")
         pg1, mg1, sg1 = MF.weighted_curves(gen, w)        # the matched curves the [matched] metrics are read from
         gen.to_pickle(CACHE / f"fig_profiles_gen_{key}.pkl")
@@ -156,7 +156,7 @@ def build(workers=8, have=None):
 
 
 def summary(key):
-    return json.loads((MODEL / "report_outputs" / f"summary_M{key}.json").read_text())
+    return json.loads((paths.EVAL / f"summary_M{key}.json").read_text())
 
 
 def check(c):

@@ -22,12 +22,14 @@ from scipy.ndimage import gaussian_filter1d
 mpl.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-ROOT = Path(__file__).resolve().parents[1]
-OUT = ROOT / "Final_Report" / "figures"
-CLEAN = ROOT / "clean_data" / "bouts_clean.csv"
-RAW = ROOT / "data" / "bouts_GsizeMotionSingle.csv"
-TD = ROOT / "data" / "data" / "df_transformed"
-REPAIRED = ROOT / "clean_data" / "repaired_frames.csv"
+from figures import show_png  # noqa: E402
+from twin import paths  # noqa: E402
+
+OUT = paths.FIGURES
+CLEAN = paths.BOUTS
+RAW = paths.BOUTS_RAW
+TD = paths.FRAMES
+REPAIRED = paths.REPAIRED
 
 FPS = 30.0
 PX_PER_MM = 3.60          # physical scale (raw ROIdef); 3.67 is the nominal one
@@ -62,17 +64,17 @@ def _panel(ax, letter, title):
             fontweight="bold", va="top", ha="right")
 
 
-PNG_DIR = None          # set by --png: also dump rasters for eyeballing
+PNG_DIR = paths.FIGURES / "png"
 
 
 def _save(fig, name):
+    """figures/out/<name>.pdf + a PNG preview (shown inline in a notebook)."""
     OUT.mkdir(parents=True, exist_ok=True)
     fig.savefig(OUT / f"{name}.pdf")
-    if PNG_DIR is not None:
-        Path(PNG_DIR).mkdir(parents=True, exist_ok=True)
-        fig.savefig(Path(PNG_DIR) / f"{name}.png", dpi=170)
+    PNG_DIR.mkdir(parents=True, exist_ok=True)
+    fig.savefig(PNG_DIR / f"{name}.png", dpi=170)
     plt.close(fig)
-    print(f"  wrote {name}.pdf")
+    show_png(PNG_DIR / f"{name}.png")
 
 
 def load():
@@ -81,7 +83,7 @@ def load():
     return c
 
 
-ONSET_GEOM = ROOT / "clean_data" / "onset_geometry.csv"
+ONSET_GEOM = paths.CACHE / "onset_geometry.csv"
 STIM_NONE = {"none", "inter_stim_pause", "bout", "None", "nan"}
 
 
@@ -630,8 +632,8 @@ def _stim_colours():
 
 def _dot_profile_frame(c, keep_outside=False, bin_s=2.0):
     """Stimulus bouts with distance (mm) and time bin; the centroid-outside-dish rule unless keep_outside."""
-    from scripts.segment_bouts import load_physical_dish
-    dish = load_physical_dish(ROOT / "data/data/Original_data/ROIdef2025-02-20T12_09_16.csv")
+    from twin.segment_bouts import load_physical_dish
+    dish = load_physical_dish(paths.ROI_PHYS)
     a = c[c.active].copy()
     a["N"] = (np.nan_to_num(a.n_dots_left) + np.nan_to_num(a.n_dots_right)).astype(int)
     s = a[(a.stimulus != "inter_stim_pause") & a.dot_dist_px.notna()].copy()
@@ -651,12 +653,10 @@ def _blind_profile_frame(c, keep_outside=False, bin_s=2.0, reps=BLIND_REPS, seed
     error 1.4 px) -- and read at the same time since onset. Pauses last 50 s, so the curve
     stops there. Same bins, same centroid-outside-dish rule as ``_dot_profile_frame``; ``reps``
     static blocks per pause."""
-    import sys
-    if str(ROOT / "scripts") not in sys.path:
     from twin import model_figures as MF
-    from scripts.segment_bouts import load_physical_dish
+    from twin.segment_bouts import load_physical_dish
     prog, _, _ = MF._programme()
-    dish = load_physical_dish(ROOT / "data/data/Original_data/ROIdef2025-02-20T12_09_16.csv")
+    dish = load_physical_dish(paths.ROI_PHYS)
     static = np.flatnonzero(prog.is_stim_of & ~prog.moving_of.astype(bool))
     rng = np.random.default_rng(seed)
     a = c[c.active & (c.stimulus == "inter_stim_pause")]
@@ -784,8 +784,8 @@ def _binned(x, y, bins):
 
 def fig_spatial(c):
     """Where the fish are, and the directed turn that keeps them there."""
-    from scripts.segment_bouts import load_physical_dish
-    dish = load_physical_dish(ROOT / "data/data/Original_data/ROIdef2025-02-20T12_09_16.csv")
+    from twin.segment_bouts import load_physical_dish
+    dish = load_physical_dish(paths.ROI_PHYS)
     a = c[c.active].copy()
     fish = sorted(a.fish_id.unique())
 
@@ -1109,11 +1109,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--stats", action="store_true", help="print numbers, no figures")
     ap.add_argument("--only", default=None, help="one figure name")
-    ap.add_argument("--png", default=None, help="also write PNGs here, for review")
     args = ap.parse_args()
-
-    global PNG_DIR
-    PNG_DIR = args.png
     c = load()
     if args.stats:
         stats(c)

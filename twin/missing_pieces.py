@@ -33,19 +33,16 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-HERE = Path(__file__).resolve().parent
-ROOT = HERE.parent
-MODEL = ROOT / "Model"
-OUT = Path(os.environ.get("MISSING_PIECES_OUT", MODEL / "missing_pieces"))
-for _p in (str(HERE), str(MODEL)):
-    if _p not in sys.path:
+from twin import paths
+
+OUT = paths.MISSING
 
 PX_MM = 3.60                      # px per mm (Ch. 3); the profile code uses 3.67 (see section 10)
 REJ = {"d0": 2.0, "d1": 10.0, "max_draws": 20}
 ARM_M6 = "S4x_adt_z2_cdt_tr_rc_al_w3ft"
 ARM_F = "S4_adt_z2_drift_cdt_tr_rc_al_w3ft_st_pf5Bcr_last"
-HEAD = {"M6 s0": ("report_ckpts/M26e", ARM_M6, "26e"), "M6 s101": ("report_ckpts/M30d", ARM_M6, "30d"),
-        "F s0": ("report_ckpts/M14f", ARM_F, "14f"), "F s101": ("report_ckpts/M32b", ARM_F, "32b")}
+HEAD = {"M6 s0": ("M26e", ARM_M6, "26e"), "M6 s101": ("M30d", ARM_M6, "30d"),
+        "F s0": ("M14f", ARM_F, "14f"), "F s101": ("M32b", ARM_F, "32b")}
 W = 60
 WIN_REPS = 8
 TOWARD_BEARING = (10.0, 170.0)    # a bout has a side only when the target is not dead ahead / behind
@@ -88,7 +85,7 @@ def records():
 
 def _ckpt(d):
     p = Path(d)
-    return p if p.is_absolute() else MODEL / p
+    return p if p.is_absolute() else paths.CKPTS / p
 
 
 def manifest(d):
@@ -111,7 +108,7 @@ def load_model(d, file, rej=True):
 
 
 def summary(key):
-    p = MODEL / "report_outputs" / f"summary_M{key}.json"
+    p = paths.EVAL / f"summary_M{key}.json"
     return json.loads(p.read_text()) if p.exists() else None
 
 
@@ -766,7 +763,7 @@ PAIRS = [  # (label, (key A, key B) at seed 0, (key A, key B) at seed 101): diff
 def _lik_fish(key):
     from twin import report_eval as RM
     u = RM._unit(key)
-    p = MODEL / "report_ckpts" / f"M{key}" / "likA_model1.csv"
+    p = paths.CKPTS / f"M{key}" / "likA_model1.csv"
     if not p.exists():
         return None
     l = pd.read_csv(p).drop_duplicates(["arm", "fish"])
@@ -925,7 +922,7 @@ def _cond_lik_job(job):
 def loco_condition_lik(jobs=5):
     """Held-out bits per bout by stimulus condition for M6 and M6-trained-without-6-moving-dots, both seeds. Cached
     as 'loco_lik'."""
-    units = {"M6 s0": ("report_ckpts/M26e", ARM_M6), "M6 s101": ("report_ckpts/M30d", ARM_M6),
+    units = {"M6 s0": ("M26e", ARM_M6), "M6 s101": ("M30d", ARM_M6),
              "LOCO s0": ("missing_ladder_checkpoints", ARM_M6 + "_lo6m"),
              "LOCO s101": ("missing_seed101_ckpts", ARM_M6 + "_lo6m")}
     jl = [(lab, d, file, ho) for lab, (d, arm) in units.items() for file, ho in folds_of(d, arm)]

@@ -63,11 +63,11 @@ import pandas as pd
 from twin import fit_MLP_border as MB
 from twin import fit_MLP_joint as JT
 from twin import model_figures as MF
+from twin import paths
 from twin import stim_program as SPm
 from twin import stim_rollout as SR
 
-ROOT = Path(__file__).resolve().parents[1]
-OUT = Path(os.environ.get("TWO_TARGETS_OUT", ROOT / "Model" / "two_targets"))
+OUT = paths.TWO_TARGETS
 PX_MM = 3.60                                        # physical scale (Chapter 3)
 SPEED_MM_S = 2.0                                    # both centroids; trained moving centroids 1.1 (8 dots) - 3.5 (1 dot)
 A_MM = 20.0                                         # track half-length (inside the 49 mm dish with the widest L)
@@ -83,8 +83,8 @@ FOLLOW_BEHIND_MM, FOLLOW_LAT_MM = 40.0, 15.0
 GEOM_SEED = 7171
 ARM_M6 = "S4x_adt_z2_cdt_tr_rc_al_w3ft"
 ARM_F = "S4_adt_z2_drift_cdt_tr_rc_al_w3ft_st_pf5Bcr_last"
-MODELS = {"26e": ("report_ckpts/M26e", ARM_M6), "30d": ("report_ckpts/M30d", ARM_M6),
-          "14f": ("report_ckpts/M14f", ARM_F), "32b": ("report_ckpts/M32b", ARM_F)}
+MODELS = {"26e": ("M26e", ARM_M6), "30d": ("M30d", ARM_M6),
+          "14f": ("M14f", ARM_F), "32b": ("M32b", ARM_F)}
 UNIT_LABEL = {"26e": ("M6", 0), "30d": ("M6", 101), "14f": ("F", 0), "32b": ("F", 101)}
 
 

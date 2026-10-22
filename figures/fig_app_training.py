@@ -30,7 +30,7 @@ SEEDS = (0, 101)
 
 def blobs(key):
     out = []
-    for f in sorted(glob.glob(str(MODEL / "report_ckpts" / f"M{key}" / "*_fold[0-9].pt"))):
+    for f in sorted(glob.glob(str(paths.CKPTS / f"M{key}" / "*_fold[0-9].pt"))):
         out.append(torch.load(f, map_location="cpu", weights_only=False))
     assert len(out) == 5, key
     return out

@@ -27,21 +27,21 @@ from matplotlib.patches import Patch  # noqa: E402
 from figures import fig_profiles as FP  # noqa: E402
 from figures import fig_profiles_bands as FPB  # noqa: E402
 
-import scripts.make_report_figures as RF  # noqa: E402
+from figures import data_figures as RF  # noqa: E402
 
 M6_ARM = "S4x_adt_z2_cdt_tr_rc_al_w3ft"
 # (public name, seed) -> (checkpoint dir under Model/, arm, internal key); report_models MODELS k=26/29/30/33
-UNITS = {("M6", 0): ("report_ckpts/M26e", M6_ARM, "26e"), ("M6", 101): ("report_ckpts/M30d", M6_ARM, "30d"),
-         ("M6−stim", 0): ("report_ckpts/M29e", "Snull_adt_z2_cdt_tr_rc_w3ft_nck", "29e"),
-         ("M6−stim", 101): ("report_ckpts/M33u", "Snull_adt_z2_cdt_tr_rc_w3ft_nck", "33u"),
-         ("M6−pos", 0): ("report_ckpts/M33a", "Scond_adt_z2_cdt_tr_rc_w3ft", "33a"),
-         ("M6−pos", 101): ("report_ckpts/M33b", "Scond_adt_z2_cdt_tr_rc_w3ft", "33b"),
-         ("M6−count", 0): ("report_ckpts/M29c", "S4xnn_adt_z2_cdt_tr_rc_al_w3ft", "29c"),
-         ("M6−count", 101): ("report_ckpts/M33s", "S4xnn_adt_z2_cdt_tr_rc_al_w3ft", "33s"),
-         ("M6−range", 0): ("report_ckpts/M33c", "S4xnr_adt_z2_cdt_tr_rc_w3ft", "33c"),
-         ("M6−range", 101): ("report_ckpts/M33d", "S4xnr_adt_z2_cdt_tr_rc_w3ft", "33d"),
-         ("M6−motion", 0): ("report_ckpts/M29d", "S4xnm_adt_z2_cdt_tr_rc_w3ft", "29d"),
-         ("M6−motion", 101): ("report_ckpts/M33t", "S4xnm_adt_z2_cdt_tr_rc_w3ft", "33t")}
+UNITS = {("M6", 0): ("M26e", M6_ARM, "26e"), ("M6", 101): ("M30d", M6_ARM, "30d"),
+         ("M6−stim", 0): ("M29e", "Snull_adt_z2_cdt_tr_rc_w3ft_nck", "29e"),
+         ("M6−stim", 101): ("M33u", "Snull_adt_z2_cdt_tr_rc_w3ft_nck", "33u"),
+         ("M6−pos", 0): ("M33a", "Scond_adt_z2_cdt_tr_rc_w3ft", "33a"),
+         ("M6−pos", 101): ("M33b", "Scond_adt_z2_cdt_tr_rc_w3ft", "33b"),
+         ("M6−count", 0): ("M29c", "S4xnn_adt_z2_cdt_tr_rc_al_w3ft", "29c"),
+         ("M6−count", 101): ("M33s", "S4xnn_adt_z2_cdt_tr_rc_al_w3ft", "33s"),
+         ("M6−range", 0): ("M33c", "S4xnr_adt_z2_cdt_tr_rc_w3ft", "33c"),
+         ("M6−range", 101): ("M33d", "S4xnr_adt_z2_cdt_tr_rc_w3ft", "33d"),
+         ("M6−motion", 0): ("M29d", "S4xnm_adt_z2_cdt_tr_rc_w3ft", "29d"),
+         ("M6−motion", 101): ("M33t", "S4xnm_adt_z2_cdt_tr_rc_w3ft", "33t")}
 ORDER = ["M6", "M6−stim", "M6−pos", "M6−count", "M6−range", "M6−motion"]
 CURVES = FP.CACHE / "fig_ablation_profiles_curves.pkl"
 COND_KEY = {"d1s3.5": (1, True), "d2s3.5": (2, True), "d4s3.5": (4, True), "d6s3.5": (6, True),

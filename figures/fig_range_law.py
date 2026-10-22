@@ -21,7 +21,7 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
 
-import scripts.make_report_figures as RF  # noqa: E402
+from figures import data_figures as RF  # noqa: E402
 
 BINS = [0, 10, 20, 30, 45, 70]
 LAB = ["0–10", "10–20", "20–30", "30–45", "45–70"]
@@ -31,7 +31,7 @@ UNITS = [("M6", 0, "26e"), ("M6", 101, "30d"), ("D4", 0, "11e"), ("D4", 101, "32
 UNIT_C = {"M6": MODEL_C["M6"], "D4": GREEN, "F": MODEL_C["F"]}
 OFF = {"M6": -0.09, "D4": 0.0, "F": 0.09}
 PANELS = [("mv", "2–8 moving dots"), ("one", "1 moving dot"), ("st", "Static dots")]
-CACHE = REPORT_FINAL_DIR / "cache"
+CACHE = paths.FIG_CACHE / "cache"
 
 
 def _bins(rng):

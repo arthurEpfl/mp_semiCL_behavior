@@ -53,13 +53,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-OUT = Path(__file__).resolve().parent          # artifacts land next to this script
-ROOT = OUT if (OUT / "scripts").exists() else OUT.parent   # repo root, for imports only
-
 # One source of truth for every knob, shared by the CLI and the notebook entry point, so the
 # two can never drift into different defaults.
 DEFAULTS = dict(
-    ckpt_dir=str(OUT), R=20, jobs=min(15, max(1, (os.cpu_count() or 4) - 1)),
+    ckpt_dir="", R=20, jobs=min(15, max(1, (os.cpu_count() or 4) - 1)),
     out="panelB_model1.csv", c2st_out="c2st_model1.csv",
     c2st_reps=8, c2st_seed=0,
     importances=False, imp_repeats=3, imp_arms="",

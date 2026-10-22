@@ -20,9 +20,21 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-ROOT = Path(__file__).resolve().parent.parent
-TW = ROOT / "Model" / "twin_test"
-OUTDIR = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "MSc_Thesis_local" / "figures"
+from figures import show_png
+from twin import paths
+
+TW = paths.SCREEN_OUT
+OUTDIR = paths.FIGURES
+
+def _save(fig, name):
+    """figures/out/<name>.pdf + a PNG preview (shown inline in a notebook)."""
+    OUTDIR.mkdir(parents=True, exist_ok=True)
+    fig.savefig(OUTDIR / f"{name}.pdf")
+    (OUTDIR / "png").mkdir(exist_ok=True)
+    fig.savefig(OUTDIR / "png" / f"{name}.png", dpi=170)
+    plt.close(fig)
+    show_png(OUTDIR / "png" / f"{name}.png")
+
 RESP_XLIM = (0.0, 37.0)
 RESP_YLIM = ((-0.37, 0.19), (-1.15, 2.25), (0.4, 2.9))   # turn toward, distance gained, bouts at each distance
 COL = {"M6": "#0072B2", "F": "#D55E00", "D4": "#009E73", "M6dm": "#CC79A7", "D4dm": "#E69F00"}
@@ -94,7 +106,7 @@ def fig_response():
     fig.tight_layout(rect=(0.03, 0, 1, 1))
     for r_, nm in enumerate(("zero-shot", "trained on the screen", "+ dot direction")[:nr]):
         rowlabel(axs[r_, 0], nm)
-    fig.savefig(OUTDIR / "fig_screen_response.pdf"); plt.close(fig)
+    _save(fig, "fig_screen_response")
 
 
 def fig_switch():
@@ -136,7 +148,7 @@ def fig_switch():
     for ax in axs.ravel():
         ax.legend(fontsize=6.5, frameon=False, loc="lower center", ncol=3, handlelength=1.6, columnspacing=1.0)
     fig.tight_layout()
-    fig.savefig(OUTDIR / "fig_screen_switch.pdf"); plt.close(fig)
+    _save(fig, "fig_screen_switch")
 
 
 def fig_closerange():
@@ -169,7 +181,7 @@ def fig_closerange():
     fig.tight_layout(rect=(0.03, 0, 1, 1))
     for r_, nm in enumerate(("zero-shot", "trained on the screen", "+ dot direction")[:len(rows)]):
         rowlabel(axs[r_, 0], nm)
-    fig.savefig(OUTDIR / "fig_closerange.pdf"); plt.close(fig)
+    _save(fig, "fig_closerange")
 
 
 MERGED_ROWS = ((("F", "F zero-shot", "F"),), (("D4", "D4 screen", "D4"),), (("D4dm", "D4dm screen", "D4 + direction"),))
@@ -217,7 +229,7 @@ def fig_screen_merged():
     fig.tight_layout(rect=(0.035, 0, 1, 1))
     for r_, nm in enumerate(MERGED_LABELS):
         rowlabel(axs[r_, 0], nm, x=-0.40)
-    fig.savefig(OUTDIR / "fig_screen_response.pdf"); plt.close(fig)
+    _save(fig, "fig_screen_response")
 
 
 def fig_switch_noM6():
@@ -253,10 +265,8 @@ def fig_switch_noM6():
         ax.text(4, 32.6, "bout-like", fontsize=7, color="0.35", ha="left")
     axs[0].set_ylabel("distance to the dot (mm)")
     fig.tight_layout()
-    fig.savefig(OUTDIR / "fig_screen_switch.pdf"); plt.close(fig)
+    _save(fig, "fig_screen_switch")
 
 
 if __name__ == "__main__":
-    OUTDIR.mkdir(parents=True, exist_ok=True)
     fig_screen_merged(); fig_switch_noM6()
-    print("wrote fig_screen_response.pdf (merged: turn toward + close range) and fig_screen_switch.pdf to", OUTDIR)

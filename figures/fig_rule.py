@@ -70,7 +70,7 @@ LABEL_DARK = "#000000"            # in-cell labels: black or white, whichever co
 
 # --------------------------------------------------------------------------- head-gap compute
 def _arm_of(key):
-    arms = sorted(p.name[:-len("_fold0.pt")] for p in (MODEL / "report_ckpts" / f"M{key}").glob("*_fold0.pt"))
+    arms = sorted(p.name[:-len("_fold0.pt")] for p in (paths.CKPTS / f"M{key}").glob("*_fold0.pt"))
     assert len(arms) == 1, (key, arms)
     return arms[0]
 
@@ -84,7 +84,7 @@ def _hg_job(key):
     from twin import model_figures as MF
     arm = _arm_of(key)
     with contextlib.redirect_stdout(io.StringIO()):
-        D, S = MF.head_gaps({key: (str(MODEL / "report_ckpts" / f"M{key}"), arm)}, plot=False)
+        D, S = MF.head_gaps({key: (str(paths.CKPTS / f"M{key}"), arm)}, plot=False)
     return key, arm, D, S
 
 

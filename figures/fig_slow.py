@@ -46,7 +46,7 @@ MODELS = [("M6", "26e", "30d", False), ("D1", "18a", "24a", False), ("D3", "16e"
           ("D2", "24b", "24c", True), ("D4", "11e", "32a", True), ("F", "14f", "32b", True)]
 CHANS = [("dt", "Log interval"), ("dist", "Log displacement"), ("rad", "Radial position r/R"),
          ("turn", "Turn magnitude")]
-TURN_CSV = REPORT_FINAL_DIR / "cache" / "fig_slow_turn.csv"
+TURN_CSV = paths.FIG_CACHE / "cache" / "fig_slow_turn.csv"
 # The drift's interval and displacement gains were picked by a rollout search that matches exactly
 # this statistic (flat windows, training fish; fit_MLP_mix._search_drift_gain, Methods sec:m-drift);
 # the radial channel is reported there, never optimised. Panels a, b are therefore calibration
@@ -60,7 +60,7 @@ OFF = {0: -0.17, 101: 0.17}
 
 
 def panel_b(key):
-    f = glob.glob(str(MODEL / "report_ckpts" / f"M{key}" / "panelB_*.csv"))
+    f = glob.glob(str(paths.CKPTS / f"M{key}" / "panelB_*.csv"))
     assert len(f) == 1, (key, f)
     return pd.read_csv(f[0]).set_index("fish").sort_index()
 
