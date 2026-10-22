@@ -145,7 +145,7 @@ def fig_screen_merged():
 
 
 def fig_switch_noM6():
-    """fig_screen_switch without M6 (2026-10-21): F zero-shot, D4 trained on the screen, D4 + direction; every panel
+    """fig_screen_switch: the bout-like episode from the switch on. F zero-shot, D4 trained on the screen, D4 + direction; every panel
     against the real fish of the 98 clutches not used in training (screen_trained_eval's profiles); F's blind run from
     screen_profiles.json (a model curve, independent of the real set)."""
     P = json.load(open(TW / "screen_profiles.json"))
@@ -166,15 +166,12 @@ def fig_switch_noM6():
         for s, ls in ((0, "-"), (101, "--")):
             series(ax, xc, TR["prof"][km.format(s=s)], None, COL[m], ls=ls, band=True, label=f"{nm_.get(m, m)} s{s}")
         series(ax, xc, ref, None, COL[m], ls=":", band=True, label=rlab, lw=1.0)
-        ax.axvline(0, color="0.3", lw=0.8)
-        ax.axvspan(xc[0] - 5, 0, color="0.92", lw=0, zorder=0)
+        ax.set_xlim(0.0, float(b[-1]))                       # the bout-like episode only (bins from the switch on)
         ax.set_ylim(11.0, 33.5); ax.set_title(ttl, fontsize=9)
-        ax.set_xlabel("time from the switch to bout-like motion (s)")
+        ax.set_xlabel("time since the dot switched to bout-like motion (s)")
         letter(ax, lt)
         ax.legend(fontsize=6.5, frameon=False, loc="upper center", bbox_to_anchor=(0.5, -0.2), ncol=2,
                   handlelength=1.8, columnspacing=1.0)
-        ax.text(-3, 32.6, "continuous", fontsize=7, color="0.35", ha="right")
-        ax.text(4, 32.6, "bout-like", fontsize=7, color="0.35", ha="left")
     axs[0].set_ylabel("distance to the dot (mm)")
     fig.tight_layout()
     _save(fig, "fig_screen_switch")
