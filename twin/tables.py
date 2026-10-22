@@ -126,3 +126,32 @@ NEGRES_OTHER = (["M6", "M6, jump phase", "M6, floor 2 px", "D4", "D4, jump phase
                 [("lik. joint", _get("lik_joint"), 3), ("lik. interval", _get("lik_interval"), 3),
                  ("AUC", _get("auc_matched"), 3), ("dip", _get("dip", MM), 2),
                  ("moving error", _get("mv_err_sem"), 2)])
+
+
+# ---- what tells each model from real fish (tab:app-imp-s0, tab:app-imp-s101)
+IMP_MODELS = ["M1", "M2", "M3", "M4", "M5", "M6", "D1", "D2", "D3", "D4", "F"]
+FEATURE_GROUPS = [("Turn", ("uni_", "T_", "absdth", "acf_lag", "runlen")), ("Displacement", ("dist_",)),
+                  ("Interval", ("dt_",)), ("Dot distance", ("dotdist",)), ("Radial", ("rad_",))]
+
+
+def importances(key):
+    """Permutation importance of every window feature on the matched classifier of a unit: its cached matched windows
+    (replicate 0), five folds of fish, five permutations per feature (drop in held-out AUC)."""
+    from twin import generative_metrics as GM
+    f = glob.glob(str(paths.CKPTS / f"M{key}" / "protocol_windows_*.npz"))
+    z = np.load(f[0], allow_pickle=True)["res"].item()
+    names = GM.traj_names_for_dim(next(iter(z.values()))["all"][0].shape[1])
+    wins = {fi: (z[fi]["all"][0], z[fi]["all"][1][0]) for fi in z if len(z[fi]["all"][0])}
+    return GM.c2st_importances(wins, feature_names=names, seed=0)
+
+
+def importance_table(seed, names=IMP_MODELS, jobs=11):
+    """Importance x 1000 of every feature for every model at one seed, and each feature group's share (%) of the
+    positive importance."""
+    from concurrent.futures import ProcessPoolExecutor
+    keys = [registry.BY_NAME[(n, seed)] for n in names]
+    with ProcessPoolExecutor(jobs) as ex:
+        imp = pd.DataFrame(dict(zip(names, ex.map(importances, keys))))
+    pos = imp.clip(lower=0)
+    share = pd.DataFrame({g: pos[[r.startswith(p) for r in imp.index]].sum() for g, p in FEATURE_GROUPS}).T
+    return (1000 * imp).round(1), (100 * share / share.sum()).round(0)

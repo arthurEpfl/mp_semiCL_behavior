@@ -50,9 +50,9 @@ from pathlib import Path
 
 import numpy as np
 
-HERE = Path(__file__).resolve().parent
-ROOT = HERE.parent
-OUT = Path(os.environ.get("MULTI_FISH_OUT", ROOT / "Model" / "multi_fish"))
+from twin import paths
+
+OUT = paths.MULTI_FISH
 PX_MM = 3.60                       # px per mm of the physical dish (the thesis' scale; distances are reported in mm)
 RADIUS_PX = 280.0                  # perception horizon: the log-range input saturates here (70 px x 4 = 78 mm)
 ENV_PX = {1: 0.0, 2: 37.0, 4: 59.2, 6: 67.4, 8: 74.3}   # trained spread envelope (moving groups, measured 2026-10-05)
@@ -280,7 +280,6 @@ _CACHE = {}
 
 def _imports():
     if "MF" not in _CACHE:
-        sys.path[:0] = [str(HERE), str(ROOT / "Model")]
         from twin import model_figures as MF
         from twin import stim_rollout as SR
         _CACHE.update(MF=MF, SR=SR)

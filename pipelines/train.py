@@ -23,23 +23,19 @@ def main():
     ap.add_argument("--list", action="store_true", help="list every model and exit")
     a = ap.parse_args()
     os.environ.setdefault("OMP_NUM_THREADS", "1")
-    from twin import correction, registry, training
+    from twin import registry, training
     if a.list or not a.name:
         for k, u in registry.UNITS.items():
             print(f"{u['name']:26s} seed {u['seed']:<3d} key {k:4s} {u['make']:8s} {registry.arm(u)}"
                   + (f"  (from {u['base']})" if u["base"] else ""))
         return
     u = registry.unit(a.name, a.seed)
-    if u["make"] == "train":
-        fit = {} if a.epochs is None else dict(epochs=a.epochs)
+    fit = {} if a.epochs is None else dict(epochs=a.epochs)
+    if a.fold is not None or a.out:
         training.train_unit(a.name, a.seed, folds=[a.fold] if a.fold is not None else range(5), jobs=a.jobs,
                             out_dir=a.out, **fit)
-    elif u["make"] == "correct":
-        correction.correct_unit(u["key"], jobs=a.jobs)
-    elif u["make"] == "driftfix":
-        correction.fix_drift(u["key"])
     else:
-        correction.copy_unit(u["key"])
+        training.make_unit(a.name, a.seed, jobs=a.jobs, **fit)
     print(f"{a.name} seed {a.seed}: unit {u['key']} -> {registry.ckpt_dir(u)}")
 
 

@@ -122,7 +122,15 @@ def hgap(key):
     return head_gaps({f"Model {key}": (d, arm)}, rej=rej)[1]
 
 
-CELLS = ("lik", "auc", "auc2", "indv", "prof", "matched", "attr", "tow", "hgap")
+CELLS = {"lik": "held-out likelihood per head (bits per bout)",
+         "auc": "window classifier: AUC (standard, steady-state) and the spread of simulated individuals",
+         "auc2": "the classifier with one generated window per real one, and matched to the real runs",
+         "indv": "individuality: every window statistic, real against simulated",
+         "prof": "distance to the dots across the block",
+         "matched": "the same profile matched to the real block composition: dip, plateau, grading, errors",
+         "attr": "attraction per dot count",
+         "tow": "turn toward the moving dots by dot count",
+         "hgap": "each head against real fish, per stimulus condition and block phase"}
 
 
 def summary(key, res):
@@ -182,6 +190,23 @@ def _capture(fn, key):
                          data={"image/png": base64.b64encode(png.getvalue()).decode(), "text/plain": ["<Figure>"]}))
     plt.close("all")
     return res, outs
+
+
+def show(key, cids=None):
+    """Display the measurements ``cids`` (default: all) of unit ``key`` as saved by ``evaluate``; a unit with no
+    saved evaluation is evaluated first."""
+    from IPython.display import Image, display
+    p = paths.EVAL / f"M{key}.json"
+    if not p.exists():
+        evaluate(key)
+    cells = {c["cid"]: c for c in json.loads(p.read_text(encoding="utf-8"))["cells"]}
+    for cid in ([cids] if isinstance(cids, str) else cids or CELLS):
+        print(f"\n== {CELLS[cid]}")
+        for o in cells[cid]["outputs"]:
+            if o.get("output_type") == "stream":
+                print("".join(o["text"]), end="")
+            elif "image/png" in o.get("data", {}):
+                display(Image(data=base64.b64decode(o["data"]["image/png"])))
 
 
 def evaluate(key, out_dir=None):

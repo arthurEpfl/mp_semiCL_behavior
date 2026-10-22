@@ -586,15 +586,21 @@ def fig_stim_bars(c):
     fig, axes = plt.subplots(2, 1, figsize=(TEXTWIDTH_IN, 3.9), sharex=True, sharey=True)
     w, xs = 0.38, np.arange(len(fish))
     for ax, cond in zip(axes, conds):
-        real, blind = [], []
+        real, blind, real_b, blind_b = [], [], [], []
         for f in fish:
             s = _stim_bouts(a[a.fish_id == f], cond)
-            real.append(_t_ci(_heading_blocks(s, s.stim_angle_travel.to_numpy())))
+            real_b.append(np.asarray(_heading_blocks(s, s.stim_angle_travel.to_numpy()), float))
+            real.append(_t_ci(real_b[-1]))
             tracks = {b: g.sort_values("t_blk")[["t_blk", "dot_cx", "dot_cy"]].dropna().to_numpy()
                       for b, g in s.groupby("blk")}
             p = a[(a.fish_id == f) & (a.cond == "none")]
-            blind.append(np.nanmean([_t_ci(_heading_blocks(p, _phantom_phi(p, tracks, rng)))
-                                     for _ in range(BLIND_REPS)], axis=0))
+            blind_b.append([np.asarray(_heading_blocks(p, _phantom_phi(p, tracks, rng)), float)
+                            for _ in range(BLIND_REPS)])
+            blind.append(np.nanmean([_t_ci(x) for x in blind_b[-1]], axis=0))
+        bl = np.nanmean([_t_ci(np.concatenate([b[k] for b in blind_b])) for k in range(BLIND_REPS)], axis=0)
+        print(f"  {cond}: P(heading at the dots) over stimulus blocks %.3f [%.3f, %.3f], blind fish %.3f [%.3f, %.3f]; "
+              % (*_t_ci(np.concatenate(real_b)), *bl)
+              + f"above the blind level in {sum(r[0] > b[0] for r, b in zip(real, blind))} of {len(fish)} fish")
         for i, (st, col, lab) in enumerate([(real, COND_C[cond], f"{cond} dots"),
                                             (blind, FAINT, "blind fish")]):
             st = np.asarray(st, float)
@@ -986,7 +992,15 @@ def stats(c):
         include_groups=False) * 100)
     P(f"quiescent share  pooled {100*c.loc[c.dt_s>QUIET_S,'dt_s'].sum()/c.dt_s.sum():.1f}%"
       f"  per-fish {q.min():.1f}-{q.max():.1f}% (fish {q.idxmin()}..{q.idxmax()})")
+    P(f"bouts ending in a gap    : {100 * c.gap_after.mean():.1f}% (interval > {QUIET_S:.0f} s)")
     P(f"longest gap              : {c.dt_s.max():.1f} s")
+    s = _dot_profile_frame(c, keep_outside=True)
+    from twin.segment_bouts import load_physical_dish
+    g = s.join(load_physical_dish(paths.ROI_PHYS).rename(columns={"radius": "R"}), on="fish_id")
+    s = s.assign(out=(np.hypot(g.dot_cx - g.cx, g.dot_cy - g.cy) > g.R).to_numpy())
+    per = s[s.moving.astype(bool)].groupby("N").out.mean()
+    P(f"dot centroid outside dish: {100 * s.out.mean():.1f}% of stimulus bouts (moving: "
+      + ", ".join(f"{n} dot{'s' if n > 1 else ''} {100 * v:.1f}%" for n, v in per.items()) + ")")
     P(f"bouts per fish           : {a.groupby('fish_id').size().min():,}-"
       f"{a.groupby('fish_id').size().max():,}")
     P("")

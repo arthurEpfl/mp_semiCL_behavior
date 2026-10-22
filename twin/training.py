@@ -172,3 +172,17 @@ def train_unit(name, seed, folds=range(5), jobs=5, out_dir=None, **fit):
     curve_png([c for _, _, c in res], out / f"curve_{arm}.png", f"{name} s{seed} - {arm}")
     print(f"{name} s{seed} ({u['key']}): {len(res)} folds -> {out}  [{(time.time() - t0) / 60:.0f} min]", flush=True)
     return out
+
+
+def make_unit(name, seed, jobs=5, **fit):
+    """Make a unit's checkpoints the way the registry says: trained from scratch, the correction on its base unit, the
+    base unit with the drift strength fixed, or a copy of the base unit."""
+    from twin import correction
+    u = registry.unit(name, seed)
+    if u["make"] == "train":
+        return train_unit(name, seed, jobs=jobs, **fit)
+    if u["make"] == "correct":
+        return correction.correct_unit(u["key"], jobs=jobs)
+    if u["make"] == "driftfix":
+        return correction.fix_drift(u["key"])
+    return correction.copy_unit(u["key"])
