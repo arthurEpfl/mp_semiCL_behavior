@@ -35,7 +35,7 @@ is inactive; F's network weights are unchanged by the correction (checked: 16/16
     python -m twin.multi_fish --analyse-grid      # -> output/multi_fish/summary_grid.json
     python -m twin.multi_fish --run-pairdm        # pairs of the screen-trained D4, with and without the dot's direction
     python -m twin.multi_fish --analyse-pairdm    # -> output/multi_fish/summary_pairdm.json
-    python -m twin.multi_fish --render NPZ MP4    # one video
+    python -m twin.shoal_videos                   # the shoaling videos (twin.videos draws every video)
 """
 from __future__ import annotations
 
@@ -993,86 +993,9 @@ def run_checks(log=print):
 
 
 # --------------------------------------------------------------------------- #
-# Videos
-# --------------------------------------------------------------------------- #
-BOUT_S = 0.2                       # a bout is drawn as a 0.2 s glide (the model's bouts are instantaneous)
-VIDEO_FPS = 30
-
-
-def frames_xy(f, taus):
-    """Positions (px) at video frame times: held between bouts, a linear 0.2 s glide through each bout."""
-    t = f["t"]
-    k = np.clip(np.searchsorted(t, taus, side="right") - 1, 0, len(t) - 2)    # last onset <= tau
-    a = np.clip((taus - t[k]) / BOUT_S, 0.0, 1.0)
-    x0, y0 = f["x"][k].astype(float), f["y"][k].astype(float)
-    x1, y1 = f["x"][k + 1].astype(float), f["y"][k + 1].astype(float)
-    return np.stack([x0 + a * (x1 - x0), y0 + a * (y1 - y0)], 1)
-
-
-
-
-def render_npz(npz, out_mp4, trail_s=4.0, dpi=110):
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    from matplotlib.animation import FuncAnimation
-    z = np.load(npz, allow_pickle=False)
-    xy, taus, dishes, labels, speed = z["xy"], z["taus"], z["dishes"], z["labels"], float(z["speed"])
-    P, N, F = xy.shape[0], xy.shape[1], xy.shape[2]
-    cols = plt.get_cmap("tab10")(np.arange(N) % 10)
-    fig, axes = plt.subplots(1, P, figsize=(5.2 * P, 5.6))
-    axes = np.atleast_1d(axes)
-    trail = max(1, int(trail_s * VIDEO_FPS / speed))
-    arts = []
-    for p, ax in enumerate(axes):
-        cx, cy, R = dishes[p]
-        x0, x1, y0, y1 = (float(v) for v in z["view"])
-        ax.add_patch(plt.Circle((0, 0), R / PX_MM, fill=False, lw=1.2, color="0.35"))
-        ax.set_xlim(x0, x1); ax.set_ylim(y1, y0); ax.set_aspect("equal"); ax.axis("off")
-        ax.set_title(str(labels[p]), fontsize=11)
-        w = x1 - x0
-        bar = 20.0 if w < 250 else 50.0
-        ax.plot([x0 + 0.04 * w, x0 + 0.04 * w + bar], [y1 - 0.03 * w] * 2, color="k", lw=2)
-        ax.text(x0 + 0.04 * w + bar / 2, y1 - 0.06 * w, f"{bar:.0f} mm", ha="center", fontsize=8)
-        if w < 2 * R / PX_MM:                               # zoomed: say so
-            ax.text(x1 - 0.02 * w, y0 + 0.03 * w, f"view {w:.0f} mm wide (dish {2 * R / PX_MM:.0f} mm)",
-                    ha="right", va="top", fontsize=7, color="0.4")
-        X = (xy[p, :, :, 0] - cx) / PX_MM
-        Y = (xy[p, :, :, 1] - cy) / PX_MM                     # camera orientation (image y down)
-        lines = [ax.plot([], [], lw=0.8, color=cols[i], alpha=0.6)[0] for i in range(N)]
-        dots = ax.scatter(X[:, 0], Y[:, 0], s=22, c=cols, zorder=3, edgecolors="k", linewidths=0.3)
-        bmm = float(z["body_mm"]) if "body_mm" in z.files else float("nan")
-        if np.isfinite(bmm):                      # true-size fish: a dot bmm mm across in dish units (scales with the zoom)
-            fig.canvas.draw()
-            px_per_mm = ax.get_window_extent().width / (x1 - x0)
-            dots.set_sizes([(bmm * px_per_mm * 72.0 / fig.dpi) ** 2] * len(X))
-            dots.set_linewidths(0.0)
-        arts.append((X, Y, lines, dots))
-    ttl = fig.text(0.5, 0.02, "", ha="center", fontsize=10)
-
-    def update(fr):
-        lo = max(0, fr - trail)
-        for X, Y, lines, dots in arts:
-            for i, ln in enumerate(lines):
-                ln.set_data(X[i, lo:fr + 1], Y[i, lo:fr + 1])
-            dots.set_offsets(np.c_[X[:, fr], Y[:, fr]])
-        m, s = divmod(float(taus[fr]), 60.0)
-        ttl.set_text(f"t = {int(m):02d}:{s:04.1f}   (x{speed:g} speed)")
-        return []
-
-    anim = FuncAnimation(fig, update, frames=F, interval=1000.0 / VIDEO_FPS, blit=False)
-    anim.save(str(out_mp4), writer="ffmpeg", fps=VIDEO_FPS, dpi=dpi)
-    plt.close(fig)
-
-
-
-
-
-
-# --------------------------------------------------------------------------- #
 # Notebook helpers: tables and figures from summary.json / checks.json / the pickles
 # --------------------------------------------------------------------------- #
-VIDEO_DIR = OUT / "videos"
+VIDEO_DIR = OUT / "videos"                 # the shoal videos (twin.shoal_videos)
 
 
 
@@ -1084,9 +1007,7 @@ VIDEO_DIR = OUT / "videos"
 
 if __name__ == "__main__":
     a = sys.argv[1:]
-    if a and a[0] == "--render":
-        render_npz(a[1], a[2])
-    elif a and a[0] == "--checks":
+    if a and a[0] == "--checks":
         _worker_init(); run_checks()
     elif a and a[0] == "--run-grid":
         _worker_init(); run_grid(int(a[1]) if len(a) > 1 else 16)
