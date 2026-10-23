@@ -1,7 +1,8 @@
-"""Final_report_missingPieces: the analyses the thesis still lacked, one function family per notebook section.
+"""The turn rule, the reference generators and the nearest-real-neighbour readout (notebooks/06; figures fig_rule and
+fig_range_law), one function family per section below.
 
-Every heavy computation runs once (``python missing_pieces.py run <section>``) and is cached in Model/missing_pieces/;
-the notebook (Model/final_report_missingpieces.py -> Final_report_missingPieces.ipynb) only reads the caches and draws.
+Every heavy computation runs once and is cached in output/missing_pieces/ (``python -m twin.missing_pieces refs |
+nearest | laws_draw`` redoes one); the notebooks and figure scripts only read the caches and draw.
 
 Headline models: M6 = 26e (seed 0) / 30d (seed 101), the analysis model; F = 14f / 32b, the final model. Seeds are
 separate cross-validation splits and are never pooled.
