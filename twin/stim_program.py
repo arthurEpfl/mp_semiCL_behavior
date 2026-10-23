@@ -233,5 +233,46 @@ def load_program(path, n_dots=N_DOTS, px_per_mm=PX_PER_MM, fps=FPS, drop_bout=Tr
         fps=float(fps), path=path)
 
 
+# --------------------------------------------------------------------------- #
+# A programme of your own
+# --------------------------------------------------------------------------- #
+def write_program(blocks, path, pause_s=50.0, lead_s=50.0, fps=FPS, n_dots=N_DOTS):
+    """Write a trajectory file in the rig's format (``load_program`` reads it back; the rig can play it).
+
+    ``blocks``: a list of ``(duration_s, dots, moving)``, one per stimulus block, each preceded by a ``pause_s`` pause
+    (and the first by ``lead_s``). ``dots(t)`` takes the times (s from the block onset, an array) and returns
+    ``(x_mm, y_mm)``, arrays of shape (len(t), k) with k <= 8: each dot's position relative to the fish's pose AT THE
+    BLOCK ONSET, x to the fish's left and y ahead of it (the file's convention; the rig anchors each block to the fish
+    when it starts, ``CLsemi``). ``moving`` labels the block as moving or static, which is what the model is told.
+    The block label is the rig's, ``CLsemi<frames>_g<k>-0_s<3.5|0>-<3.5|0>``.
+    """
+    rows = []
+    blank = ["none", 0, 0, 0, 1, 0]
+
+    def pause(sec):
+        rows.extend([blank * n_dots] * int(round(sec * fps)))
+
+    pause(lead_s)
+    for dur, dots, moving in blocks:
+        nf = int(round(dur * fps))
+        x, y = (np.atleast_2d(np.asarray(v, float)) for v in dots(np.arange(nf) / fps))
+        if x.shape != y.shape or x.shape[0] != nf or not 1 <= x.shape[1] <= n_dots:
+            raise ValueError(f"dots(t) must return two ({nf}, k) arrays with 1 <= k <= {n_dots}, got {x.shape}")
+        k, sp = x.shape[1], "3.5" if moving else "0"
+        lab = f"CLsemi{nf}_g{k}-0_s{sp}-{sp}"
+        for i in range(nf):
+            r = []
+            for d in range(n_dots):
+                r += ([lab, round(float(x[i, d]), 4), round(float(y[i, d]), 4), 4, 1, 0] if d < k else blank)
+            rows.append(r)
+        pause(pause_s)
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(rows).to_csv(path, header=False, index=False)
+    return path
 
 
+def build_program(blocks, path, **kw):
+    """``write_program(blocks, path, **kw)`` read back as a :class:`StimulusProgram`: a programme built in code goes
+    through the same reader as the rig's file."""
+    return load_program(write_program(blocks, path, **kw))

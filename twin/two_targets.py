@@ -19,6 +19,7 @@ behind the pair, in a dish of twice the radius with an anchored (equidistant) st
 
     python -m twin.two_targets validate               # one visible group: the four rules give the same bouts
     python -m twin.two_targets run-report [--jobs 14] # every map: M6 and F at both seeds, 4 pairs, L = 0-100 mm
+    video("14f"), rules_video("14f")                   # one fish at L = 20 / 50 / 80 mm; the four rules at 80 mm
 
 LARGE DISH. The training dish (radius 49 mm) holds tracks up to L = 50 mm; Sridhar et al. ran separations to
 100 mm, so the dish radius is doubled (ARENA = 2, as multi_fish's 5x dish): every wall mechanism of the model is relative
@@ -45,6 +46,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -305,16 +307,141 @@ def load(tag, pair, L, cond, arena=1, onset="free"):
     return pd.read_pickle(_path(tag, scene(pair, L), cond, arena, onset))
 
 
+def report_runs(tag, pair, L, cond):
+    """The bouts of one map column (2x dish, equidistant start): the stored run, else simulated now (seconds)."""
+    p = _path(tag, scene(pair, L), cond, ARENA_BIG, "anchored")
+    return pd.read_pickle(p) if p.exists() else simulate(tag, scene(pair, L), cond, arena=ARENA_BIG, onset="anchored",
+                                                         models=_cached_models(tag))
 
 
+# ------------------------------------------------------------------------------------------------- videos ------
+# ONE simulated fish, the same fish and block at several separations (or under several rules) side by side. The fish and
+# block are CHOSEN to show the pattern (an illustration, not a random sample): among the 15 fish x 10 blocks of the map's
+# runs, the (fish, block) whose bouts behind the pair (20-60 s) sit closest to the midline at the smallest L shown and
+# closest to one track at the largest. The fish is then re-simulated with the seeds of that run (same start pose,
+# latent, drift, random streams and tracks) and checked against the stored run when there is one. Each group is drawn
+# as 4 dots around its centroid (display only: the model sees a group as its centroid, count and moving flag); before
+# the block's first bout the pair is held at its start (the model sees the targets only at its bouts).
+VIDEO_DIR = paths.EXPERIMENTS / "two_dot_groups"
+VIDEO_SPEED, VIDEO_TRAIL_S = 3.0, 10.0
+DOT_OFFS_MM = np.array([[0.0, 3.5], [3.5, 0.0], [0.0, -3.5], [-3.5, 0.0]])
+COL_A, COL_B, COL_FISH = "#d62728", "#1f77b4", "#111111"
+TAGS = {("M6", 0): "26e", ("M6", 101): "30d", ("F", 0): "14f", ("F", 101): "32b"}
+TAG_LABEL = {v: f"{m} seed {s}" for (m, s), v in TAGS.items()}
+_MODELS = {}
 
 
+def _cached_models(tag):
+    if tag not in _MODELS:
+        _MODELS[tag] = _models(tag)
+    return _MODELS[tag]
 
 
+def pick(tag, Ls, cond="effects", pair="4v4", min_behind=8):
+    """(fish, block, table): score = |mean lateral| / (L/2) at max(Ls) minus mean |lateral| / (L/2) at min(Ls), over the
+    bouts behind the pair 20-60 s after onset, both with at least ``min_behind`` such bouts."""
+    lo, hi = min(Ls), max(Ls)
+    per = {}
+    for L in (lo, hi):
+        b = report_runs(tag, pair, L, cond)
+        b = b[(b.t_blk >= 20) & (b.along_mm <= 0)]
+        per[L] = b.groupby(["fish", "blk"]).lat_mm.agg(n="size", absm=lambda v: np.abs(v).mean(), m="mean")
+    T = per[lo].join(per[hi], lsuffix="_lo", rsuffix="_hi", how="inner")
+    T = T[(T.n_lo >= min_behind) & (T.n_hi >= min_behind)]
+    T["score"] = T.m_hi.abs() / (hi / 2) - T.absm_lo / (lo / 2)
+    k, j = T.score.idxmax()
+    return int(k), int(j), T.sort_values("score", ascending=False)
 
 
+def rerun(tag, pair, L, k, cond="effects"):
+    """Fish k of the map's run (``report_runs``) simulated again with its own seeds: (generator output, provider, dish)."""
+    models = _cached_models(tag)
+    m = models[k // (N_FISH // len(models))]
+    _, dish, ref = MF._programme()
+    dish = (float(dish[0]), float(dish[1]), float(dish[2]) * ARENA_BIG)
+    rng = np.random.default_rng([0, k])
+    pose = ref.sample_start_pose(rng, dish)
+    rule, vis = (cond, None) if cond in RULES else ("effects", () if cond == "blind" else REFS[cond])
+    prov = AnchoredParallelProvider(scene(pair, L), k, dish, N_BLOCKS, visible=vis)
+    rec = SR.make_synthetic_record(int(prov.T / 0.2) + 100, pose, dish, fish_id=k)
+    g = m.sample(rec, rng, stim_provider=prov, stop_time_s=prov.T, block_seed=(0, k), multi_rule=rule)
+    p = _path(tag, scene(pair, L), cond, ARENA_BIG, "anchored")
+    if p.exists():                                       # the stored run: the same fish, the same bouts
+        b = pd.read_pickle(p)
+        keep = sorted(t for t in prov.rec if t < len(g["dtheta"]))
+        if not np.allclose(np.asarray(g["dtheta"])[keep], b[b.fish == k].dth.to_numpy()):
+            raise RuntimeError("the re-simulated fish differs from the stored run")
+    return g, prov, dish
 
 
+def _panel(L, g, prov, dish, j, taus, label):
+    """One dish of a two-group video (``twin.videos`` panel), in mm centred on the tracks, and its lateral trace."""
+    from twin import videos as V
+    t0 = (prov.lead_f + j * prov.cyc_f) / prov.fps
+    fish = V.frames(g["t_onset_s"], g["x_px"], g["y_px"], t0 + taus)
+    t_anchor = prov.anchor[j][2] if j in prov.anchor else 0.0
+    A, B, lat = [], [], []
+    for i, tb in enumerate(taus):
+        (pa, pb), _, mid, nA = prov._state(j, int(round(max(tb, t_anchor) * prov.fps)))
+        A.append(pa); B.append(pb); lat.append(float(np.dot(fish[i] - mid, nA)) / PX_MM)
+    cx, cy, R = dish
+    tc = prov.centre[j] if prov.centre[j] is not None else np.array([cx, cy])
+    mm = lambda p: (np.asarray(p, float) - tc) / PX_MM                   # noqa: E731
+    u, nA, _ = prov.geom[j]
+    lines = [dict(x=[(sd * prov.half * nA + sg * prov.amp * u)[0] / PX_MM for sg in (-1, 1)],
+                  y=[(sd * prov.half * nA + sg * prov.amp * u)[1] / PX_MM for sg in (-1, 1)], color=col, lw=6,
+                  alpha=0.10) for sd, col in ((1, COL_A), (-1, COL_B))]          # the two tracks
+    lines.append(dict(x=[-prov.amp * u[0] / PX_MM, prov.amp * u[0] / PX_MM],
+                      y=[-prov.amp * u[1] / PX_MM, prov.amp * u[1] / PX_MM], color="0.5", lw=0.8, ls="--"))   # midline
+    dc = mm([cx, cy])
+    half = 75.0
+    return dict(xy=mm(fish)[None], view=(-half, half, -half, half), dish=(dc[0], dc[1], R / PX_MM), label=label,
+                title_size=12, colors=[COL_FISH], lines=lines, zoom_note=False,
+                dots=[dict(xy=np.transpose(mm(np.array(P_))[:, None] + DOT_OFFS_MM, (1, 0, 2)), color=c, size=14)
+                      for P_, c in ((A, COL_A), (B, COL_B))],
+                trace=dict(t=taus, y=np.array(lat), lines=[(L / 2, COL_A), (-L / 2, COL_B), (0.0, "0.5")],
+                           ylim=(-58, 58), ylabel="lateral (mm)", xlabel="time in block (s)", span=(0, 20)))
+
+
+def _footer(taus):
+    return [f"t = {tb:4.1f} s into the block (×{VIDEO_SPEED:g} speed)"
+            + ("   [read: 20-60 s]" if tb >= 20 else "   [onset phase, not read]") for tb in taus]
+
+
+def video(tag="14f", Ls=(20.0, 50.0, 80.0), cond="effects", pair="4v4", out_dir=VIDEO_DIR, fish_block=None,
+          force=False):
+    """The same fish and block at the separations ``Ls`` (one column each): mp4 path, (fish, block). An existing mp4
+    is kept unless ``force``."""
+    from twin import videos as V
+    k, j = fish_block or pick(tag, Ls, cond, pair)[:2]
+    taus = np.arange(0.0, STIM_S, VIDEO_SPEED / V.FPS)
+    title = (f"{TAG_LABEL[tag]}, rule '{cond}', {pair}, dish of twice the radius, equidistant start: fish {k}, block {j} "
+             f"at {len(Ls)} separations\nred = group A, blue = group B, black = the fish ({VIDEO_TRAIL_S:g} s trail); "
+             "below: its lateral position (lines: the tracks; dashed: the midline; grey: 0-20 s, not read)")
+    out = Path(out_dir) / f"{pair}_{tag}_{cond}_L{'-'.join(f'{L:g}' for L in Ls)}.mp4"
+    if out.exists() and not force:
+        return out, (k, j)
+    panels = [_panel(L, *rerun(tag, pair, L, k, cond), j, taus, f"L = {L:g} mm") for L in Ls]
+    V.write(panels, taus, title, _footer(taus), out, speed=VIDEO_SPEED, trail_s=VIDEO_TRAIL_S, dpi=100)
+    return out, (k, j)
+
+
+def rules_video(tag="14f", L=80.0, conds=RULES, pair="4v4", fish_block=None, out_dir=VIDEO_DIR, force=False):
+    """The same fish and block at one separation under each rule (one column each): mp4 path, (fish, block). The fish
+    and block are picked under 'effects' at L = 20 mm and ``L`` unless ``fish_block`` is given; an existing mp4 is kept
+    unless ``force``."""
+    from twin import videos as V
+    k, j = fish_block or pick(tag, (20.0, L), "effects", pair)[:2]
+    taus = np.arange(0.0, STIM_S, VIDEO_SPEED / V.FPS)
+    title = (f"{TAG_LABEL[tag]}, {pair}, L = {L:g} mm, dish of twice the radius, equidistant start: fish {k}, block {j} "
+             f"under each rule\nred = group A, blue = group B, black = the fish ({VIDEO_TRAIL_S:g} s trail); below: its "
+             "lateral position (lines: the tracks; dashed: the midline; grey: 0-20 s, not read)")
+    out = Path(out_dir) / f"{pair}_{tag}_rules_L{L:g}.mp4"
+    if out.exists() and not force:
+        return out, (k, j)
+    panels = [_panel(L, *rerun(tag, pair, L, k, c), j, taus, f"rule '{c}'") for c in conds]
+    V.write(panels, taus, title, _footer(taus), out, speed=VIDEO_SPEED, trail_s=VIDEO_TRAIL_S, dpi=100)
+    return out, (k, j)
 
 
 # ----------------------------------------------------------------------------------------------- validate ------

@@ -46,3 +46,4 @@ TWO_TARGETS = OUTPUT / "two_targets"                 # two dot groups (two_targe
 SCREEN_OUT = OUTPUT / "screen"                       # the second data set (twin_test.py and screen_*.py)
 GROUPREP = OUTPUT / "grouprep"                       # the group repulsion term (grouprep_fit.py)
 FIG_CACHE = OUTPUT / "figures_cache"                 # rollouts and numbers behind the result figures
+EXPERIMENTS = OUTPUT / "experiments"                 # what the notebooks in experiments/ simulate and render
