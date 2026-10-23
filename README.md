@@ -66,6 +66,52 @@ the correction 45-80 min per fold; evaluating a unit about 15 min. Training is d
 is evaluation: re-evaluating a unit reproduces its saved numbers exactly. On another machine or with other library
 versions, retrained models differ within the seed-to-seed noise.
 
+### Train and evaluate a model of your own
+
+A model is a recipe in `twin/registry.py` plus a unit (a key per seed). To try a variant, add both, for example M6
+with six bouts of step and interval history:
+
+```python
+# twin/registry.py
+RECIPES = { ...,
+    "M6, kin 6": recipe(**M6, Kk=6),        # the ingredients: see recipe()'s docstring
+}
+for args in [ ...,
+    ("M6, kin 6", "x1", "x2"),              # unit keys at seed 0 and seed 101 (any unused names)
+]:
+```
+
+then train it, evaluate it on the held-out fish and look at the results:
+
+```bash
+uv run python pipelines/train.py "M6, kin 6" --seed 0        # -> output/checkpoints/Mx1/
+uv run python pipelines/evaluate.py "M6, kin 6" --seed 0     # -> output/evaluation/Mx1.json, summary_Mx1.json
+```
+
+```python
+from twin import tables, unit_eval
+unit_eval.show("x1")                                 # every measurement: classifier, individuality, profiles, ...
+tables.profile_table(["M6", "M6, kin 6"])            # next to M6 in the thesis table (seed 101 once trained)
+```
+
+To retrain a thesis model without replacing its checkpoints, train into another folder and evaluate that folder;
+the results go to `output/evaluation/<folder name>/`:
+
+```bash
+uv run python pipelines/train.py M6 --seed 0 --out output/checkpoints/M26e_retrain
+uv run python pipelines/evaluate.py M6 --seed 0 --ckpts output/checkpoints/M26e_retrain
+```
+
+and `unit_eval.show("26e", eval_dir="output/evaluation/M26e_retrain")`. Both commands end by printing the next one.
+
+Retraining a thesis unit in place (no `--out`) replaces its checkpoints. What was computed from the old ones is then
+redone or refused, never used silently: the classifier's window cache is recomputed by the next evaluation; the tables
+refuse a unit evaluated before it was retrained until it is evaluated again; the profile figures roll the retrained
+units out again; the caches behind the turn-rule figures (`twin/missing_pieces.py`) name the call that rebuilds them.
+The simulations beyond the data (two groups, shoals, the second data set) are cached per condition under
+`output/two_targets/`, `output/multi_fish/` and `output/screen/` and are not checked: delete a condition's files to
+simulate it again.
+
 ## How this was checked
 
 The code was cleaned from the development repository (tag `pre-cleanup`) and checked against it:
@@ -78,6 +124,10 @@ The code was cleaned from the development repository (tag `pre-cleanup`) and che
 - the 30 fps tables rebuilt from the rig's files, and the bout table and the training table from them;
 - every thesis figure pixel-identical, and the thesis tables reproduced from the saved evaluations;
 - the cached shoal and two-group simulations reproduced by the new code.
+- the train-then-evaluate path itself: M1 retrained from scratch into a new folder gave bit-identical weights and
+  its evaluation the saved summary; M6's checkpoints evaluated from a fresh folder (the classifier's windows
+  recomputed) gave the saved summary, the saved panel and, for the new turn column, the cache behind the turn panel
+  of the slow-state figure.
 
 Options the thesis models never used were removed; a configuration that asks for one is refused rather than run.
 

@@ -19,6 +19,10 @@ Each function takes a unit key (``registry``) and prints / draws what the models
 ``evaluate(key)`` (pipelines/evaluate.py) saves every output in ``paths.EVAL / f"M{key}.json"`` and the headline
 numbers, which every model table reads, in ``summary_M{key}.json``. Evaluation is deterministic: re-running a unit
 reproduces its summary exactly.
+
+``evaluate(key, ckpt_dir=...)`` scores other checkpoints of the same recipe (a retrain, ``pipelines/train.py --out``)
+with the unit's settings, into ``paths.EVAL / <folder name>`` unless ``out_dir`` is given; ``show(key,
+eval_dir=...)`` displays them.
 """
 import base64
 import contextlib
@@ -34,11 +38,13 @@ from twin import paths, registry
 
 pd.set_option("display.width", 250)
 REJ = {"wall_reject": dict(registry.REJ)}       # generation-time wall containment, as a config override
+_DIRS = {}                                      # unit key -> checkpoint folder, while ``evaluate(ckpt_dir=...)`` runs
 
 
 def _u(key):
     u = registry.unit(str(key))
-    return u, str(registry.ckpt_dir(u)), registry.arm(u), (REJ["wall_reject"] if u["rej"] else None)
+    d = _DIRS.get(str(key), registry.ckpt_dir(u))
+    return u, str(d), registry.arm(u), (REJ["wall_reject"] if u["rej"] else None)
 
 
 @contextlib.contextmanager
@@ -192,12 +198,16 @@ def _capture(fn, key):
     return res, outs
 
 
-def show(key, cids=None):
-    """Display the measurements ``cids`` (default: all) of unit ``key`` as saved by ``evaluate``; a unit with no
-    saved evaluation is evaluated first."""
+def show(key, cids=None, eval_dir=None):
+    """Display the measurements ``cids`` (default: all) of unit ``key`` as saved by ``evaluate`` (in ``eval_dir``,
+    default ``paths.EVAL``); a thesis unit with no saved evaluation is evaluated first."""
+    from pathlib import Path
+
     from IPython.display import Image, display
-    p = paths.EVAL / f"M{key}.json"
+    p = (paths.EVAL if eval_dir is None else Path(eval_dir)) / f"M{key}.json"
     if not p.exists():
+        if eval_dir is not None:
+            raise FileNotFoundError(f"{p} does not exist: run pipelines/evaluate.py with --ckpts first")
         evaluate(key)
     cells = {c["cid"]: c for c in json.loads(p.read_text(encoding="utf-8"))["cells"]}
     for cid in ([cids] if isinstance(cids, str) else cids or CELLS):
@@ -209,20 +219,39 @@ def show(key, cids=None):
                 display(Image(data=base64.b64decode(o["data"]["image/png"])))
 
 
-def evaluate(key, out_dir=None):
-    """Run every measurement on unit ``key``; save the outputs (M<key>.json) and the summary (summary_M<key>.json)."""
+def evaluate(key, out_dir=None, ckpt_dir=None):
+    """Run every measurement on unit ``key``; save the outputs (M<key>.json) and the summary (summary_M<key>.json).
+
+    ``ckpt_dir``: score the checkpoints in that folder instead of the unit's own (they must be of the unit's arm), with
+    the unit's generation settings; the results then go to ``paths.EVAL / <folder name>`` unless ``out_dir`` is given,
+    so the thesis evaluation of the unit is never overwritten."""
+    from pathlib import Path
+
     import matplotlib
     matplotlib.use("Agg")
     key = str(key)
-    out = paths.EVAL if out_dir is None else out_dir
+    if ckpt_dir is not None:
+        ckpt_dir = Path(ckpt_dir).resolve()
+        arms = {e["arm"] for e in json.loads((ckpt_dir / "manifest_model1.json").read_text())}
+        if registry.arm(key) not in arms:
+            raise ValueError(f"{ckpt_dir} holds {sorted(arms)}, not unit {key}'s arm {registry.arm(key)}")
+        if ckpt_dir != registry.ckpt_dir(key).resolve():
+            out_dir = paths.EVAL / ckpt_dir.name if out_dir is None else out_dir
+        _DIRS[key] = ckpt_dir
+    out = Path(paths.EVAL if out_dir is None else out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    res, cells = {}, []
-    for cid in CELLS:
-        t0 = time.time()
-        res[cid], outs = _capture(globals()[cid], key)
-        cells.append(dict(cid=cid, source=f"{cid}({key!r})", outputs=outs))
-        print(f"  {key} {cid}: {time.time() - t0:.0f} s", flush=True)
+    try:
+        res, cells = {}, []
+        for cid in CELLS:
+            t0 = time.time()
+            res[cid], outs = _capture(globals()[cid], key)
+            cells.append(dict(cid=cid, source=f"{cid}({key!r})", outputs=outs))
+            print(f"  {key} {cid}: {time.time() - t0:.0f} s", flush=True)
+        s = summary(key, res)
+    finally:
+        _DIRS.pop(key, None)
     (out / f"M{key}.json").write_text(json.dumps(dict(k=key, arm=registry.arm(key), cells=cells)), encoding="utf-8")
-    s = summary(key, res)
     (out / f"summary_M{key}.json").write_text(json.dumps(s, indent=1), encoding="utf-8")
+    print(f"unit {key}: evaluation in {out}\n  in a notebook: unit_eval.show({key!r}"
+          + ("" if out == paths.EVAL else f", eval_dir=r'{out}'") + ")", flush=True)
     return s

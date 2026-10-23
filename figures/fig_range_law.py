@@ -20,6 +20,7 @@ import pandas as pd  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
 
 from figures import data_figures as RF  # noqa: E402
+from figures import fig_profiles as FP  # noqa: E402
 
 BINS = [0, 10, 20, 30, 45, 70]
 LAB = ["0–10", "10–20", "20–30", "30–45", "45–70"]
@@ -62,7 +63,7 @@ def real_side():
 
 
 def model_side(key):
-    g = pd.read_pickle(CACHE / f"fig_profiles_gen_{key}.pkl")
+    g = FP.gen_of(key)
     g = g[(g.t_blk >= 10) & np.degrees(np.abs(g.phi)).between(45, 135)].copy()
     g["tow"] = g.dth * np.sign(g.phi)
     g["rb"] = _bins(g.dist_mm * MM_3P67_TO_3P60)

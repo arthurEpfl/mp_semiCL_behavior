@@ -173,3 +173,20 @@ def ckpt_dir(u):
     from twin import paths
     u = unit(u) if isinstance(u, str) else u
     return paths.CKPTS / f"M{u['key']}"
+
+
+def stale(path, dirs):
+    """The checkpoint folders among ``dirs`` (paths, or folder names under ``paths.CKPTS``) holding a fold checkpoint
+    newer than the file ``path``: a cache built from them before they were retrained. Every folder if ``path`` is
+    missing; a folder without checkpoints never counts."""
+    from pathlib import Path
+
+    from twin import paths
+    path = Path(path)
+    t = path.stat().st_mtime if path.exists() else float("-inf")
+    out = []
+    for d in dirs:
+        d = Path(d) if Path(d).is_absolute() else paths.CKPTS / d
+        if any(p.stat().st_mtime > t for p in d.glob("*_fold*.pt")):
+            out.append(d)
+    return out

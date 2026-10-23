@@ -1,12 +1,16 @@
 """Make the checkpoints of a thesis model at one seed (see twin/registry.py for every name).
 
     uv run python pipelines/train.py M6 --seed 0            # train the five folds of M6 at seed 0 (unit 26e)
-    uv run python pipelines/train.py M6 --seed 0 --fold 2   # one fold only
+    uv run python pipelines/train.py M6 --seed 0 --out output/checkpoints/M26e_retrain
+                                                            # the same into another folder (keeps the thesis unit)
+    uv run python pipelines/train.py M6 --seed 0 --fold 2   # one fold only (the unit's other folds are kept)
     uv run python pipelines/train.py F --seed 101           # the correction on D4 at seed 101 (needs D4's unit)
     uv run python pipelines/train.py --list                 # every model, its keys and how it is made
 
 A model trained from scratch takes 1-3 min per fold without the latent (M1), 10-60 min with it and 1-2 h with the
 drift (D2, D4), on one CPU thread per fold; the five folds run in parallel. The correction takes 45-80 min per fold.
+Without --out the unit's own folder is overwritten: the thesis checkpoints are replaced. Training ends by printing the
+command that evaluates what it made.
 """
 import argparse
 import os
@@ -32,11 +36,17 @@ def main():
     u = registry.unit(a.name, a.seed)
     fit = {} if a.epochs is None else dict(epochs=a.epochs)
     if a.fold is not None or a.out:
-        training.train_unit(a.name, a.seed, folds=[a.fold] if a.fold is not None else range(5), jobs=a.jobs,
-                            out_dir=a.out, **fit)
+        if u["make"] != "train":
+            ap.error(f"{a.name} is made by '{u['make']}' from unit {u['base']}, not trained: --fold and --out "
+                     "apply to trained models only")
+        out = training.train_unit(a.name, a.seed, folds=[a.fold] if a.fold is not None else range(5), jobs=a.jobs,
+                                  out_dir=a.out, **fit)
     else:
-        training.make_unit(a.name, a.seed, jobs=a.jobs, **fit)
-    print(f"{a.name} seed {a.seed}: unit {u['key']} -> {registry.ckpt_dir(u)}")
+        out = training.make_unit(a.name, a.seed, jobs=a.jobs, **fit)
+    q = f'"{a.name}"' if " " in a.name else a.name
+    own = os.path.normcase(os.path.abspath(out)) == os.path.normcase(os.path.abspath(registry.ckpt_dir(u)))
+    print(f"{a.name} seed {a.seed}: unit {u['key']} -> {out}\nevaluate it with\n"
+          f"  uv run python pipelines/evaluate.py {q} --seed {a.seed}" + ("" if own else f" --ckpts {out}"))
 
 
 if __name__ == "__main__":      # required on Windows: the fold workers re-import this module

@@ -59,13 +59,26 @@ def save(name, obj):
         pickle.dump(obj, fh, protocol=pickle.HIGHEST_PROTOCOL)
 
 
+# caches computed from the HEAD models -> how to rebuild them
+MODEL_CACHES = {"nearest": "missing_pieces.nearest()", "laws_draw": "missing_pieces.response_draws()",
+                "laws_kin_draw": "python -m figures.fig_rule_kin"}
+
+
+def _stale(name):
+    from twin import registry
+    return name in MODEL_CACHES and bool(registry.stale(OUT / f"{name}.pkl", [d for d, _, _ in HEAD.values()]))
+
+
 def load(name):
+    if (OUT / f"{name}.pkl").exists() and _stale(name):
+        raise RuntimeError(f"cache '{name}' is older than the checkpoints of {', '.join(d for d, _, _ in HEAD.values())}:"
+                           f" rebuild it with {MODEL_CACHES[name]}")
     with open(OUT / f"{name}.pkl", "rb") as fh:
         return pickle.load(fh)
 
 
 def have(name):
-    return (OUT / f"{name}.pkl").exists()
+    return (OUT / f"{name}.pkl").exists() and not _stale(name)
 
 
 _REC = {}

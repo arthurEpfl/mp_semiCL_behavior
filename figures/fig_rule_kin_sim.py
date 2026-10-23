@@ -62,7 +62,8 @@ def _sim_job(job):
 
 
 def sim_data(jobs=10):
-    if SIM_CACHE.exists():
+    from twin import registry
+    if SIM_CACHE.exists() and not registry.stale(SIM_CACHE, [d for d, _, _ in P.HEAD.values()]):
         return pd.read_pickle(SIM_CACHE)
     jl = [(lab, d, file, k) for lab, (d, arm, key) in P.HEAD.items() for k, (file, _) in enumerate(P.folds_of(d, arm))]
     with ProcessPoolExecutor(jobs) as ex:

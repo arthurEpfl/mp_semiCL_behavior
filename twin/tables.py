@@ -7,6 +7,7 @@ import glob
 import json
 from decimal import ROUND_HALF_UP, Decimal
 from functools import lru_cache
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -42,9 +43,17 @@ def fmt(v, nd, half_up=True):
     return str(Decimal(repr(float(v))).quantize(Decimal(1).scaleb(-nd), rounding=ROUND_HALF_UP))
 
 
+def fresh(path, key):
+    """``path``, an evaluation output of unit ``key``; refused if the unit was retrained after it was written."""
+    if path.exists() and registry.stale(path, [registry.ckpt_dir(key)]):
+        raise RuntimeError(f"unit {key} was retrained after {path.name} was written: re-evaluate it first "
+                           f"(uv run python pipelines/evaluate.py --keys {key})")
+    return path
+
+
 def summary(key):
     """The headline numbers of a unit (None if it has not been evaluated)."""
-    p = paths.EVAL / f"summary_M{key}.json"
+    p = fresh(paths.EVAL / f"summary_M{key}.json", key)
     return json.loads(p.read_text()) if p.exists() else None
 
 
@@ -99,7 +108,7 @@ def window_corr(key, ch):
     """Lag-1 correlation of successive 60-bout window means of one channel (dt, dist, rad), simulated, mean over the
     held-out fish (the unit's panel table: real value + stored gap)."""
     f = glob.glob(str(paths.CKPTS / f"M{key}" / "panelB_*.csv"))
-    d = pd.read_csv(f[0])
+    d = pd.read_csv(fresh(Path(f[0]), key))
     return float((d[f"real_wacf_{ch}"] + d[f"wacf_{ch}_gap"]).mean())
 
 
@@ -139,7 +148,7 @@ def importances(key):
     (replicate 0), five folds of fish, five permutations per feature (drop in held-out AUC)."""
     from twin import generative_metrics as GM
     f = glob.glob(str(paths.CKPTS / f"M{key}" / "protocol_windows_*.npz"))
-    z = np.load(f[0], allow_pickle=True)["res"].item()
+    z = np.load(fresh(Path(f[0]), key), allow_pickle=True)["res"].item()
     names = GM.traj_names_for_dim(next(iter(z.values()))["all"][0].shape[1])
     wins = {fi: (z[fi]["all"][0], z[fi]["all"][1][0]) for fi in z if len(z[fi]["all"][0])}
     return GM.c2st_importances(wins, feature_names=names, seed=0)

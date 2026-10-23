@@ -77,7 +77,7 @@ def bands(c):
     real_w = {cond: float((b.hi - b.lo)[b.index < 60].mean()) for cond, b in c["real"]["band"].items()}
     out, rows = {}, []
     for (name, seed), m in c["models"].items():
-        gen = pd.read_pickle(FP.CACHE / f"fig_profiles_gen_{m['key']}.pkl")
+        gen = FP.gen_of(m["key"])
         widths = {cond: [] for cond in FP.CONDS}
         for rep in range(THIN_REPS):
             pf, _, _ = MF.weighted_curves(_thin(gen, n_real, np.random.default_rng(rep)), w)

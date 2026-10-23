@@ -462,6 +462,7 @@ def panel_for_fish(model, rec, rng, R=20, acf_lags=(1, 2, 3, 4, 5, 8, 12), reanc
     real_wacf = (win_acf1(np.log(np.clip(rec.dt_s, 1e-6, None)), runs=_runs),
                  win_acf1(np.log(np.clip(rec.distance_px, 1e-6, None)), runs=_runs),
                  win_acf1(_rr, runs=_runs) if _rr is not None else np.nan)
+    real_wacf_turn = win_acf1(np.abs(real_dth), runs=_runs)           # turn magnitude: not a drift target
     real_dist_std = float(np.std(np.abs(real_dist))) if len(real_dist) else np.nan
     real_T = _transition_matrix(real_sym, runs=_runs)
     real_acf = _acf(_turn_sign(real_sym), acf_lags, runs=_runs)
@@ -515,7 +516,7 @@ def panel_for_fish(model, rec, rng, R=20, acf_lags=(1, 2, 3, 4, 5, 8, 12), reanc
                             # --- timing / realism guards (see the real-side block above) ---
                             "quiesc5_gap", "quiesc20_gap", "quiesc60_gap", "clock_ratio",
                             "dt_tail20_gap", "rate_acf_1min_gap", "rate_acf_3min_gap",
-                            "wacf_dt_gap", "wacf_dist_gap", "wacf_rad_gap",
+                            "wacf_dt_gap", "wacf_dist_gap", "wacf_rad_gap", "wacf_turn_gap",
                             "cpl_dt_dist_gap", "cpl_dt_turn_gap", "dist_std_ratio",
                             "gen_fwd_frac", "gen_absdth_median", "bounce_rate"]}
     gcurves = []
@@ -549,6 +550,7 @@ def panel_for_fish(model, rec, rng, R=20, acf_lags=(1, 2, 3, 4, 5, 8, 12), reanc
             win_acf1(np.log(np.clip(g["distance_px"], 1e-6, None))) - real_wacf[1])
         acc["wacf_rad_gap"].append((win_acf1(_gr) - real_wacf[2])
                                    if _gr is not None else np.nan)
+        acc["wacf_turn_gap"].append(win_acf1(np.abs(gd)) - real_wacf_turn)
         # dist_std is the model's dominant tell AND the defect that MASKS every other one
         # (an identical injected defect is worth +0.042 AUC alone, +0.001 alongside a 20%
         # marginal error). Track it as a ratio with an unambiguous target of 1.0.
@@ -655,6 +657,7 @@ def panel_for_fish(model, rec, rng, R=20, acf_lags=(1, 2, 3, 4, 5, 8, 12), reanc
     # gaps above can be read back as absolute levels rather than only as differences.
     row["real_quiesc5"], row["real_quiesc20"], row["real_quiesc60"] = real_quiesc
     row["real_wacf_dt"], row["real_wacf_dist"], row["real_wacf_rad"] = real_wacf
+    row["real_wacf_turn"] = real_wacf_turn
     row["real_fwd_frac"] = float(np.mean(np.abs(real_dth) < E.DTHETA0))
     row["real_absdth_median"] = float(np.median(np.abs(real_dth)))
     return row

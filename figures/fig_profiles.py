@@ -156,9 +156,36 @@ def summary(key):
     return json.loads((paths.EVAL / f"summary_M{key}.json").read_text())
 
 
+def drop_stale(c, head, path):
+    """Forget the cached rollouts of the units of ``head`` retrained after ``path`` was written, so that ``build``
+    rolls them out again."""
+    from twin import registry
+    for u, (d, _, _) in head.items():
+        if u in c["models"] and registry.stale(path, [d]):
+            print(f"  {_lab(*u)} was retrained after {path.name} was written: rolling it out again")
+            del c["models"][u]
+    return c
+
+
+def gen_of(key):
+    """A unit's cached profile rollouts (written by ``build``), refused if older than the unit's checkpoints."""
+    from twin import registry
+    p = CACHE / f"fig_profiles_gen_{key}.pkl"
+    if registry.stale(p, [registry.ckpt_dir(key)]):
+        raise SystemExit(f"{p.name} is missing or older than unit {key}'s checkpoints: "
+                         "run figures.fig_profiles (or figures.fig_ablation_profiles) first")
+    return pd.read_pickle(p)
+
+
 def check(c):
     """The regenerated stream-0 readouts against the archived report units; returns the check table."""
     from twin import model_figures as MF
+    from twin import registry
+    old = [m["key"] for m in c["models"].values()
+           if registry.stale(paths.EVAL / f"summary_M{m['key']}.json", [registry.ckpt_dir(m["key"])])]
+    if old:
+        raise SystemExit(f"unit(s) {', '.join(old)} retrained after their evaluation: run "
+                         f"uv run python pipelines/evaluate.py --keys {','.join(old)} first")
     rows = []
     for (name, seed), m in c["models"].items():
         s = summary(m["key"])
@@ -431,8 +458,8 @@ def main(argv=None):
         c = build(a.workers)
     else:
         with open(CURVES, "rb") as fh:
-            c = pickle.load(fh)
-        if any(u not in c["models"] for u in HEAD):       # a unit added to HEAD: roll out only that one
+            c = drop_stale(pickle.load(fh), HEAD, CURVES)
+        if any(u not in c["models"] for u in HEAD):       # a unit added to HEAD or retrained: roll out only that one
             c = build(a.workers, have=c)
     assert_code_scale(c["px_per_mm"], "the cached curves' px_per_mm")
     t = check(c)                                          # UNconverted values (3.67) against the archive (3.67)

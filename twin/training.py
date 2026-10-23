@@ -160,7 +160,8 @@ def _fold_job(job):
 
 def train_unit(name, seed, folds=range(5), jobs=5, out_dir=None, **fit):
     """Train the folds of model ``name`` at ``seed`` in parallel and write the unit folder (default
-    ``registry.ckpt_dir``): checkpoints, ``manifest_model1.json``, ``likA_model1.csv``, ``curve_<arm>.png``."""
+    ``registry.ckpt_dir``): checkpoints, ``manifest_model1.json``, ``likA_model1.csv``, ``curve_<arm>.png``. Folds
+    not trained here keep their entries in the manifest and the likelihood table."""
     u = registry.unit(name, seed)
     out = Path(out_dir) if out_dir else registry.ckpt_dir(u)
     out.mkdir(parents=True, exist_ok=True)
@@ -168,8 +169,16 @@ def train_unit(name, seed, folds=range(5), jobs=5, out_dir=None, **fit):
     jl = [(name, seed, k, str(out), fit) for k in folds]
     with ProcessPoolExecutor(max_workers=min(jobs, len(jl))) as ex:
         res = list(ex.map(_fold_job, jl))
-    (out / "manifest_model1.json").write_text(json.dumps([e for e, _, _ in res], indent=1))
-    pd.DataFrame([row for _, lik, _ in res for row in lik]).to_csv(out / "likA_model1.csv", index=False)
+    done = {e["fold"] for e, _, _ in res}
+    mf, lf = out / "manifest_model1.json", out / "likA_model1.csv"
+    kept = [e for e in (json.loads(mf.read_text()) if mf.exists() else [])
+            if not (e["arm"] == arm and e["fold"] in done)]
+    mf.write_text(json.dumps(sorted(kept + [e for e, _, _ in res], key=lambda e: (e["arm"], e["fold"])), indent=1))
+    lik = pd.DataFrame([row for _, lik, _ in res for row in lik])
+    if lf.exists():
+        old = pd.read_csv(lf)
+        lik = pd.concat([old[~((old.arm == arm) & old.fold.isin(done))], lik], ignore_index=True)
+    lik.sort_values(["arm", "fold"], kind="stable").to_csv(lf, index=False)
     curve_png([c for _, _, c in res], out / f"curve_{arm}.png", f"{name} s{seed} - {arm}")
     print(f"{name} s{seed} ({u['key']}): {len(res)} folds -> {out}  [{(time.time() - t0) / 60:.0f} min]", flush=True)
     return out

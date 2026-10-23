@@ -23,7 +23,8 @@ for ch in dt / dist / rad. Three fish (4, 6, 10) have fewer than six pairs of co
 windows, so their real value -- and therefore the stored gap -- is NaN; every mean is over the
 remaining 12 fish, on both sides (the same 12 for every model and seed).
 
-TURN MAGNITUDE (panel d, 2026-10-15): not in the panel CSVs, so read from $RF/cache/fig_slow_turn.csv (key, fish,
+TURN MAGNITUDE (panel d): an evaluation with the current code records it in the panel (real_wacf_turn,
+wacf_turn_gap); for units evaluated before, it is read from $RF/cache/fig_slow_turn.csv (key, fish,
 real_turn, gen_turn): the same record-indexed rollouts as the panel (rollout_model1_local._one: rej override,
 rng = default_rng([rollout_seed, fish]), 20 per held-out fish; the build checked that their interval value gives back
 the archived panel to 1e-16), |dtheta| with the same win_acf1 (real within runs, rollout flat). Not a drift target.
@@ -31,6 +32,7 @@ the archived panel to 1e-16), |dtheta| with the same win_acf1 (real within runs,
     uv run python -m figures.fig_slow
 """
 import glob
+from pathlib import Path
 
 from figures.style import *  # noqa: F401,F403,E402
 
@@ -58,9 +60,10 @@ OFF = {0: -0.17, 101: 0.17}
 
 
 def panel_b(key):
+    from twin import tables
     f = glob.glob(str(paths.CKPTS / f"M{key}" / "panelB_*.csv"))
     assert len(f) == 1, (key, f)
-    return pd.read_csv(f[0]).set_index("fish").sort_index()
+    return pd.read_csv(tables.fresh(Path(f[0]), key)).set_index("fish").sort_index()
 
 
 def mean_ci(v):
@@ -77,9 +80,14 @@ def load():
     for name, k0, k1, _ in MODELS:
         for seed, key in ((0, k0), (101, k1)):
             d = panel_b(key)
-            t = T[T.key == key].set_index("fish").sort_index()
-            assert t.index.equals(d.index), key
-            d = d.assign(real_wacf_turn=t.real_turn, wacf_turn_gap=t.gen_turn - t.real_turn)
+            if "wacf_turn_gap" not in d:                 # evaluated before the panel recorded turn magnitude
+                from twin import registry
+                if registry.stale(TURN_CSV, [registry.ckpt_dir(key)]):
+                    raise SystemExit(f"unit {key} was retrained after {TURN_CSV.name}: re-evaluate it "
+                                     f"(uv run python pipelines/evaluate.py --keys {key}), the panel then has the turn")
+                t = T[T.key == key].set_index("fish").sort_index()
+                assert t.index.equals(d.index), key
+                d = d.assign(real_wacf_turn=t.real_turn, wacf_turn_gap=t.gen_turn - t.real_turn)
             r = d[[f"real_wacf_{c}" for c, _ in CHANS]]
             if ref is None:
                 ref = r

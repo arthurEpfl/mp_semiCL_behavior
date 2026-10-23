@@ -54,10 +54,10 @@ def curves():
     FP.CURVES = CURVES
     if CURVES.exists():
         with open(CURVES, "rb") as fh:
-            c = pickle.load(fh)
+            c = FP.drop_stale(pickle.load(fh), UNITS, CURVES)
     else:                                       # start from fig_profiles' cache: same real side, M6 already rolled out
         with open(FP.CACHE / "fig_profiles_curves.pkl", "rb") as fh:
-            base = pickle.load(fh)
+            base = FP.drop_stale(pickle.load(fh), FP.HEAD, FP.CACHE / "fig_profiles_curves.pkl")
         c = dict(base, models={k: v for k, v in base["models"].items() if k[0] == "M6"})
     if any(u not in c["models"] for u in UNITS):
         c = FP.build(6, have=c)

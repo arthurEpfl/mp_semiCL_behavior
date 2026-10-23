@@ -132,11 +132,12 @@ def matched_c2st_table(ckpt_dir, arm, rej=None, reps=REPS, seed=SEED, jobs=10):
     plain tiling (the harness), plain tiling subsampled to the real window count (1 generated window
     per real one), and generated windows matched to the real run ids (identical bout indices, 1:1) --
     on all windows and on the steady-state windows, with feature blocks dropped. Cached next to the
-    checkpoints as ``protocol_windows_<arm>.npz``."""
+    checkpoints as ``protocol_windows_<arm>.npz``, recomputed when a checkpoint is newer than the cache."""
     from twin import generative_metrics as GM
+    from twin import registry
     d = _ckpt_dir(ckpt_dir)
     cache = d / f"protocol_windows_{arm}.npz"
-    if cache.exists():
+    if cache.exists() and not registry.stale(cache, [d]):
         res = np.load(cache, allow_pickle=True)["res"].item()
     else:
         mani = json.loads((d / "manifest_model1.json").read_text())
