@@ -1,53 +1,93 @@
 # A behavioural digital twin of larval zebrafish
 
-Fifteen fish, each alone in a dish, were shown groups of one to eight moving or static dots in a
-semi-closed-loop assay (Perrino, 2026); their swimming was cut into bouts, and generative models of the bout sequence
-were trained on it, simulated in closed loop, evaluated against held-out fish and taken beyond the data (two groups of
-dots, several fish in one dish, a second data set).
+Fifteen larval zebrafish, each alone in a dish, were shown groups of one to eight moving or static dots in a
+semi-closed-loop assay (Perrino, 2026). Their swimming was cut into bouts, and generative models of the bout sequence
+were trained on it: a trained model is a simulated fish that swims, bout by bout, around any stimulus. The models were
+evaluated against held-out fish and taken beyond the data: two groups of dots, several fish in one dish, a second data
+set.
 
-Everything in the thesis is reproduced by the notebooks in `notebooks/`, from the code in `twin/` (the library) and
-`figures/` (one script per thesis figure).
+This repository holds the code, the notebooks that reproduce every table and figure of the thesis, and tools to
+simulate the trained models on stimuli of your own.
 
-## Layout
-
-| Path | What it holds |
-|---|---|
-| `twin/` | the library: preprocessing (`segment_bouts`, `cleaning`), the models (`stimulus`, `features`, `emission`, `joint`, `latent`), training (`training`, `profile_finetune`, `correction`), simulation (`stim_rollout`, `rollout_*`), evaluation (`unit_eval`, `rollout_eval`, `generative_metrics`, `model_figures`, `tables`), the analyses beyond the data (`missing_pieces`, `two_targets`, `multi_fish`, the `screen_*` modules) |
-| `twin/registry.py` | every thesis model: its name, recipe, seeds and checkpoint folder |
-| `twin/paths.py` | where the data, the trained models and every result live |
-| `figures/` | one script per thesis figure, writing `figures/out/<name>.pdf` |
-| `pipelines/` | the command lines: train and evaluate a model |
-| `notebooks/` | one notebook per part of the thesis, with its outputs |
-| `assets/` | the stimulus programme the rig played and the dish geometry (no animal data) |
-| `data/` | the recordings (not in git, see `data/README.md`) |
-| `output/` | checkpoints, evaluations and caches (not in git) |
-
-## Setup
+## Quick start
 
 ```bash
-uv sync                      # Python >= 3.13 and every dependency, from uv.lock
+uv sync                                   # Python >= 3.13 and every dependency, from uv.lock
+# unzip twin_data.zip and twin_output.zip into this folder (they create data/ and output/)
+uv run python pipelines/check.py          # 15 s: the data, a trained model and the code give back stored numbers
+uv run jupyter lab                        # then open notebooks/ or experiments/
 ```
 
-Put the recordings in `data/` as described in `data/README.md`. Trained checkpoints and computed results go to
-`output/`; to use folders elsewhere, set `TWIN_DATA`, `TWIN_OUTPUT` and `TWIN_FIGURES`. Open the notebooks with
-`uv run jupyter lab`.
+The recordings and the trained models are not in git: they come as these two zips. Without them the code runs but
+has nothing to read; `data/README.md` describes the recordings.
 
-## The notebooks
+## What you can do
+
+**Read the thesis results.** One notebook per part of the thesis, with its outputs; each reads the saved results and
+runs in minutes.
 
 | Notebook | Thesis | What it reproduces |
 |---|---|---|
-| `01_bout_discretisation` | Data | from the rig's raw files to the 30 fps tables and on to the bout table (Figures fig:detection, fig:bouttraj), checked identical to the training table |
-| `02_data_exploration` | Data | every figure and number of the Data chapter |
-| `03_models` | Methods, Results | the main line M1-M6 and the drift branch D1-D4, F: Tables tab:storyline, tab:realism, tab:app-imp-*, tab:profile-spread; Figures fig:slow, fig:profiles, fig:app-bands-*, fig:app-latent-gain, fig:app-drift-gain, fig:app-correction-trace; every model's measurements |
-| `04_other_results` | Appendix (negative results) | Tables tab:app-negres-net, tab:app-negres-drift, tab:app-negres-other |
-| `05_ablations` | Results | Tables tab:abl-all, tab:abl-indiv; Figure fig:abl-profiles |
-| `06_turn_rule_and_individuals` | Results, Appendix | Figures fig:rule, fig:range-law; Tables tab:range-law, tab:nrn; the classifier's real-against-real floor |
-| `07_two_groups` | Results, Appendix | Figures fig:bifurcation, fig:app-bif-* |
-| `08_second_data_set` | Results, Appendix | Tables tab:screen-auc, tab:app-screen-kin, tab:app-screen-importances, tab:app-grouprep; Figures fig:screen-response, fig:screen-switch, fig:app-grouprep |
-| `09_shoaling` | Results | Tables tab:shoal-grid, tab:shoal-pairs; the shoaling videos |
+| `notebooks/01_bout_discretisation` | Data | from the rig's raw files to the 30 fps tables and the bout table (fig:detection, fig:bouttraj) |
+| `notebooks/02_data_exploration` | Data | every figure and number of the Data chapter, and further real-data analyses: the pause threshold, a whole session, where fish rest, change over the session, how far back a bout remembers, the fish or the schedule |
+| `notebooks/03_models` | Methods, Results | the main line M1-M6 and the drift branch D1-D4, F: tab:storyline, tab:realism, tab:app-imp-*, tab:profile-spread; fig:slow, fig:profiles, fig:app-bands-*, fig:app-latent-gain, fig:app-drift-gain, fig:app-correction-trace; every model's measurements |
+| `notebooks/04_other_results` | Appendix | tab:app-negres-net, tab:app-negres-drift, tab:app-negres-other |
+| `notebooks/05_ablations` | Results | tab:abl-all, tab:abl-indiv; fig:abl-profiles |
+| `notebooks/06_turn_rule_and_individuals` | Results, Appendix | fig:rule, fig:range-law; tab:range-law, tab:nrn; the classifier's real-against-real floor |
+| `notebooks/07_two_groups` | Results, Appendix | fig:bifurcation, fig:app-bif-* |
+| `notebooks/08_second_data_set` | Results, Appendix | tab:screen-auc, tab:app-screen-kin, tab:app-screen-importances, tab:app-grouprep; fig:screen-response, fig:screen-switch, fig:app-grouprep |
+| `notebooks/09_shoaling` | Results | tab:shoal-grid, tab:shoal-pairs; the shoaling videos |
 
-The notebooks read saved results and say how to recompute them; each runs in minutes once `output/` holds the
-checkpoints and caches. Every figure script also runs on its own, e.g. `uv run python -m figures.fig_profiles`.
+Notebooks 07 and 09 need simulations the output zip leaves out (7 and 49 CPU-hours): each has a `RUN = True` switch.
+
+**Simulate the models.** The notebooks in `experiments/` explain an experiment, run a small version of it and make
+videos, all from the checkpoints:
+
+| Notebook | What it does |
+|---|---|
+| `experiments/rollout_tool` | any thesis model on any stimulus programme (the rig's, a file in its format, or one built in code, e.g. 4 dots on a circle): N simulated fish, their distance to the dots per block, trajectories, a check against the real fish and a video next to real fish |
+| `experiments/two_dot_groups` | two groups of dots at a separation L (Sridhar et al., 2021): how it is built, a small bifurcation map, one fish at three separations, the four combination rules side by side, M6 against F |
+| `experiments/shoaling` | several simulated fish in one dish seeing each other as dots: how it is built, a small group, one video per thesis condition with what to watch for |
+
+**Train and evaluate a model**, a thesis model or a variant of your own (see [Models](#models)).
+
+**Reproduce everything**: `uv run python pipelines/reproduce.py --level figures | evaluate | train --dry-run` lists
+what would run and how long it takes: from the saved results (the notebooks, plus the simulations the zip leaves
+out), from the checkpoints (re-evaluating every model, about 15 min each), or from the data (retraining every model,
+days of CPU). It is resumable and, from the checkpoints on, compares the recomputed evaluations with the saved ones.
+
+## Layout
+
+```
+twin/            the library: data processing, the models, training, simulation, evaluation, the experiments
+  paths.py       where everything below lives (override with TWIN_DATA, TWIN_OUTPUT, TWIN_FIGURES)
+  registry.py    every thesis model: its name, recipe, seeds and checkpoint folder
+  videos.py      the one renderer behind every video
+figures/         one script per thesis figure (uv run python -m figures.<name>), writing figures/out/
+pipelines/       train.py, evaluate.py, reproduce.py, check.py
+notebooks/       01-09, one per part of the thesis, with outputs
+experiments/     the three simulation notebooks above
+assets/          the rig's stimulus programme, the dish geometry, a histogram summary of the real fish
+data/            from twin_data.zip (not in git)
+  raw/             the rig's files: tracking, stimulus programme, dish geometry
+  frames/          one 30 fps table per fish
+  bouts_GsizeMotionSingle.csv, bouts_clean.csv, repaired_frames.csv    the bout tables
+  schizscreen_twin_v1/, schizscreen_twin_v1.zip                        the second data set (Larsch lab screen)
+output/          from twin_output.zip, and everything computed later (not in git)
+  checkpoints/     M<key>/: the five fold models of each thesis unit; screen_s0/, screen_s101/
+  evaluation/      M<key>.json and summary_M<key>.json: every measurement of each unit
+  figures_cache/, cache/, missing_pieces/, screen/, grouprep/       rollouts and numbers behind the figures
+  two_targets/, multi_fish/                                         simulated by notebooks 07 and 09 (RUN = True)
+  experiments/     what the experiments notebooks simulate and render
+```
+
+| Zip | Unzips to | Enables |
+|---|---|---|
+| `twin_data.zip` (7.3 GB) | `data/` | notebooks 01-02; training; the real fish in every comparison; the second data set (notebook 08) |
+| `twin_output.zip` (2.1 GB) | `output/` | the trained models (106 thesis units and the screen-trained D4), their evaluations and the caches: notebooks 03-06 and 08, the experiments, `check.py` |
+
+`AGENTS.md` is a guide to the code for coding agents and new contributors: the module map, the vocabulary, how to
+do common tasks and the rules the code keeps.
 
 ## Models
 
@@ -123,10 +163,18 @@ The code was cleaned from the development repository (tag `pre-cleanup`) and che
   data set, shoals, two groups), and the evaluations of M6 and F reproducing their saved summaries exactly;
 - the 30 fps tables rebuilt from the rig's files, and the bout table and the training table from them;
 - every thesis figure pixel-identical, and the thesis tables reproduced from the saved evaluations;
-- the cached shoal and two-group simulations reproduced by the new code.
+- the cached shoal and two-group simulations reproduced by the new code, a single group or fish simulated alone
+  identical to the same one in the full runs, and the shoal videos frame-identical after moving to `twin/videos.py`;
 - the train-then-evaluate path itself: M1 retrained from scratch into a new folder gave bit-identical weights and
   its evaluation the saved summary; M6's checkpoints evaluated from a fresh folder (the classifier's windows
   recomputed) gave the saved summary, the saved panel and, for the new turn column, the cache behind the turn panel
-  of the slow-state figure.
+  of the slow-state figure;
+- the real-data analyses added to notebook 02 give the numbers of the development notebook they come from.
 
 Options the thesis models never used were removed; a configuration that asks for one is refused rather than run.
+
+## Reference
+
+Arthur Pollet, *A Generative Model of Larval Zebrafish Swimming Behaviour*, MSc thesis, EPFL (LCN), 2026; supervised
+by Johanni Brea and Johannes Larsch. The recordings: Matilde Perrino, *Visual perception of social groups in
+zebrafish*, PhD thesis, University of Trento, 2026.
