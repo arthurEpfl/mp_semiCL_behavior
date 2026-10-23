@@ -1,6 +1,6 @@
 # A behavioural digital twin of larval zebrafish
 
-Code of Arthur Pollet's MSc thesis (EPFL, 2026): a generative model of larval zebrafish swimming. Fifteen fish, each alone in a dish, were shown groups of one to eight moving or static dots in a
+Fifteen fish, each alone in a dish, were shown groups of one to eight moving or static dots in a
 semi-closed-loop assay (Perrino, 2026); their swimming was cut into bouts, and generative models of the bout sequence
 were trained on it, simulated in closed loop, evaluated against held-out fish and taken beyond the data (two groups of
 dots, several fish in one dish, a second data set).
@@ -130,9 +130,3 @@ The code was cleaned from the development repository (tag `pre-cleanup`) and che
   of the slow-state figure.
 
 Options the thesis models never used were removed; a configuration that asks for one is refused rather than run.
-
-## Second data set
-
-The screen of the Larsch lab (Center for Integrative Genomics, University of Lausanne) is unpublished. Neither the
-data nor the caches computed from them are in this repository (`data/` and `output/` are not versioned); notebook 08
-shows the results. Its terms of use are in its own `DATA_USE.md`.
